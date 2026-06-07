@@ -1,0 +1,60 @@
+"""Host DTO helpers."""
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from agent_kernel.domain.base import DomainModel, utc_now
+
+
+def ok_response(**data: Any) -> dict[str, Any]:
+  return {"ok": True, **data}
+
+
+def error_response(message: str, **data: Any) -> dict[str, Any]:
+  return {"ok": False, "error": message, **data}
+
+
+@dataclass(slots=True)
+class EventStreamEnvelope(DomainModel):
+  event_id: str
+  event_type: str
+  run_id: str | None = None
+  payload: dict[str, Any] = field(default_factory=dict)
+  emitted_at: str = field(default_factory=lambda: utc_now().isoformat())
+
+
+@dataclass(slots=True)
+class TaskWorkspaceDTO(DomainModel):
+  workspace_id: str
+  title: str
+  conversation_id: str | None = None
+  task_ids: list[str] = field(default_factory=list)
+  run_ids: list[str] = field(default_factory=list)
+  agent_session_ids: list[str] = field(default_factory=list)
+  channel_ids: list[str] = field(default_factory=list)
+  artifact_ids: list[str] = field(default_factory=list)
+  controls: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class HTTPRouteSpec(DomainModel):
+  method: str
+  path: str
+  description: str
+  request_schema: dict[str, Any] = field(default_factory=dict)
+  response_schema: dict[str, Any] = field(default_factory=dict)
+
+
+def default_http_routes() -> list[HTTPRouteSpec]:
+  return [
+    HTTPRouteSpec(method="POST", path="/tasks", description="Create task."),
+    HTTPRouteSpec(method="GET", path="/runs/{run_id}", description="Inspect run state."),
+    HTTPRouteSpec(method="POST", path="/runs/{run_id}/cancel", description="Cancel run."),
+    HTTPRouteSpec(method="POST", path="/runs/{run_id}/interventions", description="Append human intervention."),
+    HTTPRouteSpec(method="GET", path="/runs/{run_id}/events", description="Stream run events."),
+    HTTPRouteSpec(method="GET", path="/artifacts/{artifact_id}", description="Inspect artifact."),
+    HTTPRouteSpec(method="POST", path="/approvals/{approval_id}/approve", description="Approve request."),
+    HTTPRouteSpec(method="POST", path="/approvals/{approval_id}/reject", description="Reject request."),
+    HTTPRouteSpec(method="POST", path="/tool-calls/{tool_call_id}/cancel", description="Cancel tool call."),
+    HTTPRouteSpec(method="POST", path="/tool-calls/{tool_call_id}/kill", description="Kill tool call."),
+  ]

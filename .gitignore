@@ -1,0 +1,52 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build/package output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Local runtime data
+*.sqlite
+*.sqlite3
+*.db
+agent_kernel.sqlite
+
+# Local secrets/config
+.env
+.env.*
+!.env.example
+agent-kernel.toml
+!agent-kernel.example.toml
+
+# Logs/temp files
+*.log
+tmp/
+temp/
+
+# Tooling/local state
+.agents/
+.codex/

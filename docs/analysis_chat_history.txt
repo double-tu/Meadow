@@ -1,0 +1,2360 @@
+是的，**建议先提取这些开源项目的功能特点**，但要注意：你的目标不应该是“把它们的功能拼起来”，而是要从它们里面抽象出更底层的 **Agent 能力原语 / 架构模式 / 扩展点 / 失败经验**，然后再设计一个统一、模块化、可组合的新 Agent 架构。
+
+更准确地说，你应该按下面这个路径做：
+
+> **调研项目功能 → 提取能力模型 → 归纳架构模式 → 设计统一抽象 → 做最小核心内核 → 插件化扩展 → 用复杂场景验证架构**
+
+而不是简单地：
+
+> 看几个项目 → 列功能 → 全部实现一遍
+
+---
+
+# 1. 你的判断是对的，但要从“功能提取”升级为“能力抽象”
+
+你列出的项目大致可以分成几类：
+
+## A. 产品 / UI / Claude Code 类项目
+
+例如：
+
+- `SpectrAI`
+- `desktop-cc-gui`
+- `AionUi`
+- `ClaudeCodeRev`
+
+这类项目的重点通常不是底层 Agent 理论，而是：
+
+- 用户交互体验
+- 多会话管理
+- 项目工作区
+- 调用 Claude Code / CLI 工具
+- 终端集成
+- 文件编辑 / Diff / Apply Patch
+- 任务执行可视化
+- 历史记录
+- 本地配置
+- 权限确认
+- 多轮对话体验
+
+你应该从它们提取：
+
+| 方向 | 可借鉴点 |
+|---|---|
+| UI 交互 | Agent 执行过程如何展示 |
+| CLI 调用 | 如何把外部 CLI 作为 Agent 能力 |
+| 项目上下文 | 如何绑定 workspace / repo / 文件树 |
+| 任务过程 | 如何展示 plan、step、tool call、result |
+| 用户介入 | 什么时候需要用户确认、打断、修改 |
+| 会话管理 | 多项目、多会话、多历史如何组织 |
+
+---
+
+## B. Agent / Code Agent / 通用 Agent 类项目
+
+例如：
+
+- `codeg`
+- `GenericAgent`
+
+这类项目更值得你研究它们的：
+
+- Agent Loop
+- 工具调用机制
+- Prompt 组织方式
+- 文件上下文管理
+- 代码生成 / 修改 / 执行 / 验证流程
+- 多轮任务推进
+- 如何处理失败与重试
+- 如何拆任务
+- 是否有计划器、执行器、审查器
+
+你要提取的不是“它有哪些功能”，而是：
+
+| 抽象能力 | 问题 |
+|---|---|
+| Planning | 它如何拆解任务？ |
+| Acting | 它如何决定调用工具？ |
+| Observation | 它如何读取工具结果？ |
+| Reflection | 它如何判断自己做错了？ |
+| Memory | 它如何记住上下文？ |
+| Context | 它如何压缩/筛选上下文？ |
+| Recovery | 它如何失败重试？ |
+| Verification | 它如何验证任务完成？ |
+
+---
+
+## C. Agent Framework 类项目
+
+例如：
+
+- `LangChain`
+- `LangGraph`
+- `CrewAI`
+- `AutoGen`
+
+这些是你最应该重点研究的。
+
+它们分别代表几种不同的设计思想：
+
+| 项目 | 主要思想 | 你应该借鉴什么 |
+|---|---|---|
+| LangChain | LLM 应用组件化 | Model、Prompt、Tool、Retriever、Chain、Memory 的模块化设计 |
+| LangGraph | 状态图 / 可循环工作流 | 用 Graph 表达复杂 Agent 流程、状态持久化、条件跳转、子图 |
+| CrewAI | 角色化多 Agent 协作 | Agent、Task、Crew、Process、Role、Goal 的任务协作模型 |
+| AutoGen | 多 Agent 对话编排 | Agent 间消息传递、GroupChat、UserProxy、工具执行、代码执行 |
+
+---
+
+# 2. 但不要追求“完美实现所有能力”
+
+你说：
+
+> 设计一个架构能够完美且优雅实现对应的能力
+
+方向是对的，但“完美”这个目标要小心。
+
+Agent 架构很容易陷入一个陷阱：
+
+> 越想兼容所有场景，抽象越复杂，最后核心系统变得难用、难调试、难扩展。
+
+更合理的目标应该是：
+
+> 设计一个足够小的 Agent Core，通过统一抽象支持 Agent、Workflow、Tool、Memory、Context、SubAgent、SubWorkflow 的递归组合。
+
+也就是说，你的核心架构不应该一开始就塞满功能，而应该把所有复杂能力都统一到少数几个抽象里。
+
+---
+
+# 3. 我建议你设计成“递归可组合 Agent 架构”
+
+核心思想：
+
+> **Agent 是一种 Workflow，Workflow 也是一种 Tool，Tool 可以调用 Agent，Agent 可以包含子 Agent，子 Agent 可以执行子 Workflow。**
+
+这样你的系统才会足够灵活。
+
+可以抽象成：
+
+```txt
+Agent
+ ├── Workflow
+ │    ├── Node
+ │    │    ├── LLMNode
+ │    │    ├── ToolNode
+ │    │    ├── AgentNode
+ │    │    ├── WorkflowNode
+ │    │    ├── RouterNode
+ │    │    ├── MemoryNode
+ │    │    └── HumanNode
+ │    └── Edge
+ ├── Tools
+ ├── Memory
+ ├── Context
+ ├── Policy
+ └── Runtime
+```
+
+关键点是：
+
+- Agent 可以作为节点
+- Workflow 可以作为节点
+- Tool 可以作为节点
+- Human 也可以作为节点
+- Memory 操作也是节点
+- Router 负责条件分支
+- 所有执行都基于统一状态流转
+
+---
+
+# 4. 新 Agent 架构可以分成 10 层
+
+我建议你的架构大概这样分层：
+
+```txt
+┌────────────────────────────────────────────┐
+│  1. Interface Layer                         │
+│  CLI / Web / Desktop / API / IDE Plugin     │
+├────────────────────────────────────────────┤
+│  2. Session & Conversation Layer            │
+│  多轮对话 / 会话 / 项目 / 用户状态          │
+├────────────────────────────────────────────┤
+│  3. Agent Orchestration Layer               │
+│  Supervisor / Planner / Router / Scheduler  │
+├────────────────────────────────────────────┤
+│  4. Workflow Engine Layer                   │
+│  Graph / DAG / Cyclic Graph / SubWorkflow   │
+├────────────────────────────────────────────┤
+│  5. Agent Runtime Layer                     │
+│  Agent Loop / Tool Calling / Reflection     │
+├────────────────────────────────────────────┤
+│  6. Tool & Integration Layer                │
+│  Function Tool / CLI Tool / HTTP / MCP      │
+├────────────────────────────────────────────┤
+│  7. Memory Layer                            │
+│  Working / Episodic / Semantic / Artifact   │
+├────────────────────────────────────────────┤
+│  8. Context Management Layer                │
+│  Token Budget / Retrieval / Compression     │
+├────────────────────────────────────────────┤
+│  9. Model Gateway Layer                     │
+│  OpenAI / Claude / Gemini / Local Model     │
+├────────────────────────────────────────────┤
+│ 10. Persistence & Observability Layer       │
+│  State Store / Event Log / Trace / Metrics  │
+└────────────────────────────────────────────┘
+```
+
+---
+
+# 5. 最核心的抽象应该是这几个
+
+## 5.1 AgentSpec
+
+描述一个 Agent 是什么。
+
+```ts
+interface AgentSpec {
+  id: string
+  name: string
+  role?: string
+  goal?: string
+  instructions?: string
+  model: ModelSpec
+  tools?: ToolSpec[]
+  memory?: MemorySpec
+  contextPolicy?: ContextPolicy
+  workflow?: WorkflowSpec
+  permissions?: PermissionPolicy
+}
+```
+
+Agent 不应该只是一个 prompt，而应该是：
+
+- 身份
+- 目标
+- 模型
+- 工具
+- 记忆
+- 上下文策略
+- 工作流
+- 权限
+- 运行策略
+
+---
+
+## 5.2 WorkflowSpec
+
+描述复杂工作流。
+
+```ts
+interface WorkflowSpec {
+  id: string
+  name: string
+  nodes: WorkflowNode[]
+  edges: WorkflowEdge[]
+  stateSchema: StateSchema
+  inputSchema?: Schema
+  outputSchema?: Schema
+}
+```
+
+它应该支持：
+
+- 顺序执行
+- 条件分支
+- 并行执行
+- 循环
+- 子工作流
+- 人类确认
+- 重试
+- 超时
+- 中断恢复
+- checkpoint
+- rollback / compensation
+
+---
+
+## 5.3 Node
+
+所有能力都可以变成节点。
+
+```ts
+type Node =
+  | LLMNode
+  | ToolNode
+  | AgentNode
+  | WorkflowNode
+  | RouterNode
+  | MemoryNode
+  | HumanApprovalNode
+  | CodeExecutionNode
+  | EvaluationNode
+```
+
+这样你就可以优雅地表达：
+
+```txt
+用户需求
+  → PlannerAgent
+  → 拆成多个 Task
+  → 分发给多个 SubAgent
+  → 每个 SubAgent 调用工具
+  → 汇总结果
+  → CriticAgent 审查
+  → 不通过则回到执行
+  → 通过则输出
+```
+
+---
+
+## 5.4 ToolSpec
+
+工具调用要统一。
+
+```ts
+interface ToolSpec {
+  name: string
+  description: string
+  inputSchema: Schema
+  outputSchema?: Schema
+  executor: ToolExecutor
+  permissions?: PermissionPolicy
+  timeout?: number
+  retryPolicy?: RetryPolicy
+}
+```
+
+工具类型可以包括：
+
+```txt
+Function Tool
+HTTP Tool
+CLI Tool
+MCP Tool
+Database Tool
+File Tool
+Browser Tool
+Code Interpreter Tool
+Another Agent Tool
+Workflow Tool
+```
+
+最关键的设计是：
+
+> **Agent、Workflow、CLI、HTTP API 都可以包装成 Tool。**
+
+这样你的系统扩展性会非常强。
+
+---
+
+## 5.5 MemorySpec
+
+记忆不要只做一个 vector store。
+
+你需要至少区分 5 种记忆：
+
+```txt
+1. Working Memory
+   当前任务短期记忆
+
+2. Episodic Memory
+   过去发生过什么事情
+
+3. Semantic Memory
+   稳定知识，例如用户偏好、项目背景
+
+4. Procedural Memory
+   做事流程，例如“这个项目发版步骤”
+
+5. Artifact Memory
+   文件、代码、报告、图表、执行产物
+```
+
+对应结构：
+
+```ts
+interface MemorySpec {
+  working?: WorkingMemoryConfig
+  episodic?: EpisodicMemoryConfig
+  semantic?: SemanticMemoryConfig
+  procedural?: ProceduralMemoryConfig
+  artifact?: ArtifactMemoryConfig
+}
+```
+
+---
+
+## 5.6 ContextPolicy
+
+上下文管理应该是独立模块。
+
+```ts
+interface ContextPolicy {
+  maxTokens: number
+  includeSystem: boolean
+  includeRecentMessages: number
+  retrievalStrategy: RetrievalStrategy
+  compressionStrategy: CompressionStrategy
+  priorityRules: ContextPriorityRule[]
+}
+```
+
+上下文管理要负责：
+
+- 哪些历史消息要放进 prompt
+- 哪些工具结果要保留
+- 哪些文件片段要引用
+- 哪些长期记忆要召回
+- 什么时候摘要
+- 什么时候丢弃
+- 什么时候重新检索
+- 如何避免上下文污染
+- 如何处理 token budget
+
+---
+
+# 6. 推荐的 Agent 执行模型
+
+你可以采用一个通用 Agent Loop：
+
+```txt
+Input
+  → Load Context
+  → Plan
+  → Decide Next Action
+  → Execute Tool / Call Agent / Run Workflow
+  → Observe Result
+  → Update Memory
+  → Reflect / Evaluate
+  → Continue or Finish
+```
+
+伪代码：
+
+```ts
+while (!state.done) {
+  context = contextManager.build(state)
+
+  decision = agent.decide({
+    goal,
+    state,
+    context,
+    tools,
+    memory
+  })
+
+  if (decision.type === "tool_call") {
+    result = await toolRuntime.call(decision.tool, decision.args)
+    state = reducer(state, result)
+  }
+
+  if (decision.type === "delegate") {
+    result = await agentRuntime.run(decision.agent, decision.task)
+    state = reducer(state, result)
+  }
+
+  if (decision.type === "run_workflow") {
+    result = await workflowEngine.run(decision.workflow, decision.input)
+    state = reducer(state, result)
+  }
+
+  memory.update(state)
+  evaluator.check(state)
+}
+```
+
+---
+
+# 7. 多 Agent 协作模型建议支持 4 种
+
+不同任务需要不同协作模式，不要只支持一种。
+
+## 7.1 Supervisor-Worker
+
+适合复杂任务拆解。
+
+```txt
+Supervisor Agent
+ ├── Research Agent
+ ├── Coding Agent
+ ├── Testing Agent
+ └── Review Agent
+```
+
+特点：
+
+- 一个主管 Agent 负责拆解和验收
+- 多个 Worker Agent 负责执行
+- 适合软件开发、研究、数据分析
+
+---
+
+## 7.2 Group Chat
+
+适合讨论型任务。
+
+```txt
+Agent A ↔ Agent B ↔ Agent C ↔ User
+```
+
+特点：
+
+- 多 Agent 多轮对话
+- 有 Moderator 或 Router 决定谁发言
+- 适合方案讨论、辩论、评审
+
+---
+
+## 7.3 Pipeline
+
+适合稳定流程。
+
+```txt
+需求分析 → 设计 → 编码 → 测试 → 文档 → 发布
+```
+
+特点：
+
+- 顺序明确
+- 可复用
+- 适合企业流程、代码生成流程、报告生成流程
+
+---
+
+## 7.4 Blackboard / Task Board
+
+适合长期持续推进任务。
+
+```txt
+Task Board
+ ├── todo
+ ├── in_progress
+ ├── blocked
+ ├── review
+ └── done
+```
+
+特点：
+
+- Agent 从任务池领取任务
+- 支持中断、恢复、长期运行
+- 适合异步任务、项目型任务
+
+---
+
+# 8. 你的系统一定要有 Durable Execution
+
+如果你想支持：
+
+- 多轮对话
+- 长任务
+- 子代理
+- 子工作流
+- 工具调用
+- CLI 调用
+- 人类确认
+- 失败重试
+- 持续推进
+
+那么必须有：
+
+```txt
+Event Log
+Checkpoint
+State Store
+Run ID
+Step ID
+Trace ID
+Resume
+Retry
+Cancel
+Pause
+Human Approval
+```
+
+否则系统一复杂就会失控。
+
+执行状态建议这样设计：
+
+```ts
+interface RunState {
+  runId: string
+  workflowId?: string
+  agentId?: string
+  status: "pending" | "running" | "paused" | "failed" | "completed" | "cancelled"
+  currentNode?: string
+  variables: Record<string, any>
+  messages: Message[]
+  toolCalls: ToolCallRecord[]
+  artifacts: Artifact[]
+  tasks: Task[]
+  memoryRefs: MemoryRef[]
+  events: Event[]
+}
+```
+
+---
+
+# 9. 你应该把“调用其他 Agent / CLI 工具”作为一等能力
+
+你想支持：
+
+> 能调用其他 agent / cli 工具并多轮对话并分配任务持续推进
+
+那建议统一成三种 Adapter：
+
+```txt
+AgentAdapter
+CLIAdapter
+WorkflowAdapter
+```
+
+## 9.1 AgentAdapter
+
+把任何外部 Agent 包装成工具。
+
+```ts
+const claudeCodeAgent = new AgentAdapter({
+  name: "claude_code",
+  command: "claude",
+  mode: "interactive",
+  inputProtocol: "text",
+  outputParser: claudeOutputParser
+})
+```
+
+## 9.2 CLIAdapter
+
+把命令行工具包装成工具。
+
+```ts
+const gitTool = new CLIAdapter({
+  name: "git",
+  command: "git",
+  allowedArgs: ["status", "diff", "log", "checkout"],
+  cwdPolicy: "workspace",
+  requireApproval: true
+})
+```
+
+## 9.3 WorkflowAdapter
+
+把工作流包装成工具。
+
+```ts
+const codeReviewWorkflow = new WorkflowAdapter({
+  name: "code_review",
+  workflowId: "review-pr"
+})
+```
+
+这样上层 Agent 可以自然调用：
+
+```txt
+call_tool("git.status")
+call_tool("claude_code.fix_bug")
+call_tool("workflow.code_review")
+```
+
+---
+
+# 10. 最小核心不要太大
+
+建议你的第一版 Agent Core 只做这些：
+
+```txt
+1. AgentSpec
+2. ToolSpec
+3. WorkflowSpec
+4. State Store
+5. Event Log
+6. Context Manager
+7. Memory Interface
+8. Model Gateway
+9. Tool Runtime
+10. Graph Executor
+```
+
+先不要急着做：
+
+- 太复杂的 UI
+- 太复杂的 marketplace
+- 太复杂的多租户
+- 太复杂的权限系统
+- 太复杂的自动优化
+- 太复杂的 Agent 社会结构
+
+你的第一版目标应该是：
+
+> 能稳定运行一个复杂工作流，支持子 Agent、工具调用、上下文压缩、记忆写入、失败恢复。
+
+---
+
+# 11. 推荐的调研表格
+
+你可以为每个项目建立这样的表：
+
+| 维度 | 问题 |
+|---|---|
+| 定位 | 这个项目是框架、应用、GUI、CLI、Agent 还是工作流引擎？ |
+| 核心抽象 | 它的核心对象是什么？ Agent / Chain / Graph / Task / Tool？ |
+| 执行模型 | 是循环、图、队列、对话，还是顺序 pipeline？ |
+| 工具调用 | 如何声明工具？如何执行工具？如何处理失败？ |
+| 多 Agent | 是否支持多 Agent？如何通信？ |
+| 工作流 | 是否支持 DAG、循环、条件、并行、子流程？ |
+| 记忆 | 是否有长期记忆、短期记忆、向量检索？ |
+| 上下文 | 如何控制 token？如何摘要？如何检索？ |
+| 状态管理 | 是否可暂停、恢复、checkpoint？ |
+| 人类介入 | 是否支持 approval、interrupt、feedback？ |
+| 外部集成 | 是否能调用 CLI、HTTP、MCP、浏览器、数据库？ |
+| 可观测性 | 是否有日志、trace、可视化、调试？ |
+| 扩展机制 | 插件、Adapter、Hook、Middleware？ |
+| 安全 | 权限、沙箱、命令白名单、敏感信息过滤？ |
+| 缺点 | 哪些设计不够优雅？哪些能力缺失？ |
+
+---
+
+# 12. 建议你最终归纳成“能力地图”
+
+不要只列功能，而是归纳成能力地图：
+
+```txt
+Agent Capability Map
+
+1. Reasoning
+   - planning
+   - reflection
+   - critique
+   - verification
+
+2. Acting
+   - tool calling
+   - cli execution
+   - browser control
+   - file operation
+   - code execution
+
+3. Orchestration
+   - graph workflow
+   - sub workflow
+   - parallel execution
+   - conditional routing
+   - retry
+   - human in the loop
+
+4. Collaboration
+   - sub agent
+   - group chat
+   - supervisor-worker
+   - task board
+   - delegation
+
+5. Memory
+   - short-term memory
+   - long-term memory
+   - semantic memory
+   - episodic memory
+   - artifact memory
+
+6. Context
+   - retrieval
+   - compression
+   - summarization
+   - prioritization
+   - token budgeting
+
+7. Runtime
+   - event log
+   - checkpoint
+   - resume
+   - cancel
+   - streaming
+   - trace
+
+8. Safety
+   - permission
+   - sandbox
+   - approval
+   - secret masking
+   - audit log
+
+9. Integration
+   - API
+   - CLI
+   - MCP
+   - file system
+   - git
+   - browser
+   - database
+
+10. Productization
+   - UI
+   - workspace
+   - session
+   - project
+   - history
+   - visualization
+```
+
+---
+
+# 13. 一个优雅的新 Agent 架构可以叫做 Kernel + Plugins + Graph
+
+你可以把它设计成：
+
+```txt
+AgentOS / AgentKernel
+ ├── Core
+ │    ├── Runtime
+ │    ├── Graph Engine
+ │    ├── State Store
+ │    ├── Event Bus
+ │    └── Scheduler
+ │
+ ├── Intelligence
+ │    ├── Model Gateway
+ │    ├── Planner
+ │    ├── Context Manager
+ │    ├── Memory Manager
+ │    └── Evaluator
+ │
+ ├── Capabilities
+ │    ├── Tools
+ │    ├── Agents
+ │    ├── Workflows
+ │    ├── CLI Adapters
+ │    └── MCP Adapters
+ │
+ ├── Security
+ │    ├── Permissions
+ │    ├── Sandbox
+ │    ├── Approval
+ │    └── Audit
+ │
+ ├── Observability
+ │    ├── Logs
+ │    ├── Traces
+ │    ├── Replay
+ │    └── Debugger
+ │
+ └── Interfaces
+      ├── CLI
+      ├── Web UI
+      ├── Desktop UI
+      ├── REST API
+      └── SDK
+```
+
+---
+
+# 14. 我建议你的架构原则
+
+你可以用这些原则约束设计：
+
+## 原则 1：一切都是 Node
+
+LLM、Tool、Agent、Workflow、Human、Memory 操作，全部都是节点。
+
+## 原则 2：一切执行都产生 Event
+
+每次模型调用、工具调用、状态变化、记忆写入都记录为事件。
+
+## 原则 3：Workflow 是 Graph，不只是 Chain
+
+必须支持循环、条件、并行、子图、暂停、恢复。
+
+## 原则 4：Agent 是可组合单元，不是固定类
+
+Agent 可以被调用，也可以调用别人。
+
+## 原则 5：Tool 是统一外部能力接口
+
+CLI、HTTP、函数、MCP、数据库、浏览器、其他 Agent，都包装为 Tool。
+
+## 原则 6：Memory 和 Context 分离
+
+Memory 是存储，Context 是选择与组织。
+
+## 原则 7：状态必须持久化
+
+长任务必须能 resume。
+
+## 原则 8：默认安全
+
+所有危险工具都需要权限、沙箱、审计。
+
+## 原则 9：可观察性是核心能力
+
+复杂 Agent 不可调试就不可用。
+
+## 原则 10：先做小核心，再做生态
+
+核心抽象越稳定，后面越容易扩展。
+
+---
+
+# 15. 结论
+
+所以你的思路是对的：
+
+> **先提取这些开源项目的功能特点，再基于它们抽象出一个更通用的 Agent 架构。**
+
+但建议你不要停留在“功能列表”，而是进一步提炼成：
+
+```txt
+功能 → 能力 → 抽象 → 接口 → 运行时 → 扩展机制
+```
+
+最终你要设计的不是一个“集合了所有功能的 Agent 工具”，而是一个：
+
+> **以 Graph Workflow 为执行骨架，以 Agent/Tool/Workflow 递归组合为核心，以 Memory/Context/Runtime 为基础设施，支持多 Agent 协作、CLI/外部工具调用、长任务持续推进的 Agent Kernel。**
+
+如果你后续要真正落地，我建议下一步先做两件事：
+
+1. **整理这 10 个项目的功能矩阵**
+2. **定义你自己的核心抽象：AgentSpec、ToolSpec、WorkflowSpec、MemorySpec、ContextPolicy、RunState**
+
+只要这几个抽象设计得好，后面复杂能力都可以自然长出来。
+---
+是的，**建议先提取这些开源项目的功能特点**，但不要停留在“功能清单”层面。更好的做法是：
+
+> **先做能力提取 → 再做能力抽象 → 再设计架构原语 → 最后落到模块边界和插件机制。**
+
+也就是说，不是简单地把这些项目的功能拼起来，而是要从它们身上提炼出：
+**哪些能力是 Agent 系统的共性能力？哪些只是某个项目的具体实现？哪些应该成为架构内核？哪些应该变成可替换插件？**
+
+---
+
+## 一、你的判断是对的，但顺序要更严谨
+
+你现在想做的是一个足够抽象、模块化、灵活、易扩展的 Agent 工具架构，并且要支持：
+
+- 复杂工作流组合
+- 子 Agent 使用
+- 工具调用
+- 多种工作流模式
+- 子工作流组合
+- 记忆处理
+- 上下文管理
+- 可扩展工具系统
+- 可能还包括 UI、权限、沙箱、审计、多人协作、人类介入等
+
+那么确实应该先分析这些项目，但建议按下面这个顺序来。
+
+---
+
+# 二、推荐的分析路径
+
+## 1. 先提取每个项目的功能特点
+
+你可以对这几个项目分别建立一个分析表：
+
+| 项目 | 核心定位 | 支持的 Agent 能力 | 工作流能力 | 工具调用 | 记忆/上下文 | UI/交互 | 可扩展性 | 值得借鉴点 |
+|---|---|---|---|---|---|---|---|---|
+| SpectrAI | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 |
+| desktop-cc-gui | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 |
+| AionUi | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 |
+| codeg | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 |
+| GenericAgent | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 |
+| ClaudeCodeRev | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 | 待分析 |
+
+这里重点不是看它们“有哪些页面、有哪些命令”，而是要提取底层能力。
+
+例如：
+
+- 它是否支持多 Agent？
+- 是否支持子任务分解？
+- 是否支持工具注册？
+- 工具调用是否有 schema？
+- 是否有上下文压缩？
+- 是否有历史消息管理？
+- 是否支持本地文件系统？
+- 是否支持代码编辑、代码执行、命令执行？
+- 是否有任务状态机？
+- 是否支持人类确认？
+- 是否有插件机制？
+- 是否有 UI 编排能力？
+- 是否支持工作流恢复？
+- 是否有审计日志？
+- 是否支持模型切换？
+- 是否能接入不同 LLM Provider？
+
+---
+
+## 2. 把“项目功能”转成“能力模型”
+
+不要直接说：
+
+> 这个项目有 A 功能，我也做 A 功能。
+> 那个项目有 B 功能，我也做 B 功能。
+
+这样容易做成一个功能堆砌系统。
+
+更好的方式是抽象成能力。
+
+例如：
+
+| 观察到的功能 | 抽象后的能力 |
+|---|---|
+| Claude Code 类工具可以读写文件 | 文件系统工具能力 |
+| 可以执行 shell 命令 | 本地执行工具能力 |
+| 可以分解任务 | Planning 能力 |
+| 可以让模型选择工具 | Tool Calling 能力 |
+| 可以保存历史会话 | Session Memory 能力 |
+| 可以摘要长上下文 | Context Compression 能力 |
+| 可以多个 Agent 协作 | Multi-Agent Orchestration 能力 |
+| 可以通过 GUI 操作 | Human-Agent Interaction 能力 |
+| 可以生成代码 | Code Generation 能力 |
+| 可以审查代码 | Code Review 能力 |
+| 可以恢复上次任务 | Checkpoint/Resume 能力 |
+
+你真正要设计的是这些能力背后的架构原语。
+
+---
+
+# 三、核心结论：你的新架构不应该围绕“Agent”本身设计，而应该围绕“任务、状态、工具、上下文、事件”设计
+
+很多 Agent 框架的问题是：一开始就把 Agent 做成一个巨大对象。
+
+例如：
+
+```ts
+class Agent {
+  model
+  tools
+  memory
+  prompt
+  run()
+}
+```
+
+这种设计早期很简单，但后期会非常难扩展。
+
+如果你要支持复杂工作流、子 Agent、子工作流、记忆、上下文管理，建议把系统设计成下面这种架构：
+
+```text
+Agent System
+├── Runtime Kernel
+├── Workflow Engine
+├── Agent Runtime
+├── Tool Runtime
+├── Memory System
+├── Context Manager
+├── Model Gateway
+├── Event Bus
+├── State Store
+├── Policy & Permission System
+├── Observability / Trace System
+└── UI / API Layer
+```
+
+也就是说，**Agent 只是运行时中的一种执行单元，不应该成为整个系统的唯一中心。**
+
+---
+
+# 四、建议的新 Agent 架构
+
+## 1. 总体架构
+
+```text
+┌──────────────────────────────────────────────┐
+│                  UI / API Layer              │
+│  Web UI / Desktop UI / CLI / SDK / REST API  │
+└──────────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────┐
+│              Orchestration Layer             │
+│  Workflow Engine / Task Scheduler / Planner  │
+└──────────────────────────────────────────────┘
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+┌────────────┐ ┌────────────┐ ┌────────────┐
+│ Agent      │ │ Tool       │ │ SubWorkflow│
+│ Runtime    │ │ Runtime    │ │ Runtime    │
+└────────────┘ └────────────┘ └────────────┘
+        │           │           │
+        └───────────┼───────────┘
+                    ▼
+┌──────────────────────────────────────────────┐
+│          Memory & Context Management          │
+│ Working / Session / Semantic / Episodic       │
+│ Context Packing / Compression / Retrieval     │
+└──────────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────┐
+│              Foundation Layer                │
+│ Model Gateway / State Store / Event Bus       │
+│ Permission / Sandbox / Trace / Artifact Store │
+└──────────────────────────────────────────────┘
+```
+
+---
+
+# 五、核心模块设计
+
+## 1. Runtime Kernel：运行时内核
+
+这是整个系统的底座。
+
+它负责：
+
+- 任务生命周期管理
+- 状态管理
+- 事件分发
+- 执行调度
+- 中断恢复
+- 错误重试
+- 资源限制
+- 权限校验
+- 日志追踪
+
+你可以把它理解成 Agent 系统的“操作系统内核”。
+
+它不关心具体是哪个 Agent，也不关心用的是 OpenAI、Claude、Gemini、本地模型。它只关心：
+
+```text
+谁要执行？
+执行什么？
+输入是什么？
+状态是什么？
+输出是什么？
+失败了怎么办？
+是否允许执行？
+执行过程如何记录？
+```
+
+---
+
+## 2. Workflow Engine：工作流引擎
+
+这是你这个系统最重要的部分之一。
+
+因为你明确提出要支持：
+
+- 复杂工作流组合
+- 不同工作流组合
+- 子工作流组合
+- 子 Agent 使用
+- 工具调用
+
+所以需要一个强大的 Workflow Engine。
+
+它应该支持多种执行模式：
+
+### 1. 顺序工作流
+
+```text
+Step A → Step B → Step C
+```
+
+适合：
+
+- 文档生成
+- 代码生成
+- 数据处理
+- 审查流程
+
+---
+
+### 2. DAG 工作流
+
+```text
+       ┌→ Step B ─┐
+Step A ┤          ├→ Step D
+       └→ Step C ─┘
+```
+
+适合：
+
+- 多路信息收集
+- 并行代码分析
+- 多模型投票
+- 多 Agent 分工
+
+---
+
+### 3. 状态机工作流
+
+```text
+Draft → Review → Revise → Approve → Done
+             ↑       │
+             └───────┘
+```
+
+适合：
+
+- 代码审查
+- PR 自动修复
+- 复杂审批
+- 人类介入流程
+
+---
+
+### 4. ReAct Loop
+
+```text
+Thought → Action → Observation → Thought → ...
+```
+
+适合：
+
+- 自主 Agent
+- 工具调用
+- 问题解决
+- 搜索、分析、执行
+
+---
+
+### 5. Planner-Executor 模式
+
+```text
+Planner Agent
+     │
+     ▼
+Task Plan
+     │
+     ▼
+Executor Agent / Tools / SubAgents
+```
+
+适合：
+
+- 复杂任务拆解
+- 软件开发任务
+- 多步骤研究任务
+- 自动化办公任务
+
+---
+
+### 6. Supervisor-Workers 模式
+
+```text
+Supervisor Agent
+ ├── Research Agent
+ ├── Coding Agent
+ ├── Review Agent
+ └── Test Agent
+```
+
+适合：
+
+- 多 Agent 协作
+- 复杂软件开发
+- 长周期任务
+- 多角色分工
+
+---
+
+### 7. Map-Reduce 模式
+
+```text
+Input
+ ├── Worker 1
+ ├── Worker 2
+ ├── Worker 3
+ └── Worker N
+       │
+       ▼
+    Aggregator
+```
+
+适合：
+
+- 大量文档分析
+- 大代码库分析
+- 多文件重构
+- 批量信息抽取
+
+---
+
+## 3. Agent Runtime：Agent 运行时
+
+Agent 不应该只是一个 prompt。
+
+一个好的 Agent 定义应该包含：
+
+```ts
+interface AgentSpec {
+  id: string
+  name: string
+  description: string
+
+  role: string
+  goal?: string
+  instructions: string
+
+  model: ModelSpec
+  tools?: ToolRef[]
+  memory?: MemoryPolicy
+  context?: ContextPolicy
+
+  inputSchema?: Schema
+  outputSchema?: Schema
+
+  permissions?: PermissionPolicy
+  execution?: ExecutionPolicy
+
+  hooks?: AgentHooks
+}
+```
+
+其中核心是：
+
+- 角色
+- 目标
+- 指令
+- 可用模型
+- 可用工具
+- 可访问记忆
+- 上下文策略
+- 输入输出结构
+- 权限策略
+- 生命周期钩子
+
+例如：
+
+```yaml
+agents:
+  code_reviewer:
+    role: "Senior Code Reviewer"
+    model: "claude-3.5-sonnet"
+    tools:
+      - read_file
+      - search_code
+      - git_diff
+    memory:
+      read:
+        - project_conventions
+        - past_reviews
+      write:
+        - review_findings
+    output_schema: CodeReviewReport
+```
+
+---
+
+## 4. Tool Runtime：工具运行时
+
+工具系统必须抽象得足够好。
+
+不要把工具简单写成函数列表。工具应该是有元数据、有权限、有 schema、有执行环境的能力单元。
+
+```ts
+interface ToolSpec {
+  id: string
+  name: string
+  description: string
+
+  inputSchema: JSONSchema
+  outputSchema: JSONSchema
+
+  executor: ToolExecutor
+
+  permissions: PermissionRequirement[]
+  timeout?: number
+  retry?: RetryPolicy
+
+  sandbox?: SandboxPolicy
+  sideEffects?: SideEffectLevel
+
+  tags?: string[]
+}
+```
+
+工具要区分几类：
+
+| 工具类型 | 示例 |
+|---|---|
+| 信息读取工具 | read_file、search_web、query_db |
+| 写入工具 | write_file、update_db、create_ticket |
+| 执行工具 | run_shell、run_python、run_tests |
+| 外部 API 工具 | GitHub、Slack、Notion、Jira |
+| 浏览器工具 | open_page、click、extract |
+| 代码工具 | grep、AST 分析、代码格式化 |
+| 记忆工具 | retrieve_memory、save_memory |
+| 人类交互工具 | ask_user、request_approval |
+
+重点是每个工具都要声明：
+
+- 输入结构
+- 输出结构
+- 是否有副作用
+- 是否需要确认
+- 是否可并发
+- 是否需要沙箱
+- 是否可以被哪些 Agent 调用
+- 执行失败如何处理
+
+---
+
+## 5. Memory System：记忆系统
+
+你提到“优秀的记忆处理”，这个非常关键。
+
+建议不要只有一个 memory，而是设计分层记忆系统。
+
+```text
+Memory System
+├── Working Memory
+├── Session Memory
+├── Episodic Memory
+├── Semantic Memory
+├── Procedural Memory
+├── Project Memory
+└── Artifact Memory
+```
+
+### 1. Working Memory
+
+当前任务的短期信息。
+
+例如：
+
+- 当前目标
+- 当前计划
+- 当前步骤
+- 当前工具返回
+- 当前推理摘要
+
+---
+
+### 2. Session Memory
+
+当前会话内的历史。
+
+例如：
+
+- 用户之前说过什么
+- Agent 已经做了什么
+- 已经尝试过哪些方案
+- 当前任务状态
+
+---
+
+### 3. Episodic Memory
+
+历史事件记忆。
+
+例如：
+
+- 上次修复了什么 bug
+- 某个任务为什么失败
+- 某个决策是怎么做出的
+
+---
+
+### 4. Semantic Memory
+
+长期知识。
+
+例如：
+
+- 项目架构知识
+- 用户偏好
+- 团队规范
+- 业务术语
+- 常用代码模式
+
+---
+
+### 5. Procedural Memory
+
+流程性记忆。
+
+例如：
+
+- 如何发布项目
+- 如何跑测试
+- 如何审查 PR
+- 如何生成周报
+
+---
+
+### 6. Artifact Memory
+
+产物记忆。
+
+例如：
+
+- 生成的文件
+- 分析报告
+- 代码 diff
+- 图片
+- 测试结果
+- 中间数据
+
+---
+
+## 6. Context Manager：上下文管理器
+
+上下文管理不要等到 token 爆了才处理，它应该是系统的核心能力。
+
+Context Manager 负责：
+
+- 消息裁剪
+- 上下文打包
+- 自动摘要
+- 检索增强
+- 重要性排序
+- token 预算控制
+- 多 Agent 上下文隔离
+- 子任务上下文继承
+- 工具结果压缩
+- 历史消息归档
+- 证据链保留
+
+建议设计成：
+
+```ts
+interface ContextManager {
+  buildContext(request: ContextBuildRequest): Promise<ModelContext>
+  compress(context: ModelContext): Promise<CompressedContext>
+  retrieve(query: string, scope: MemoryScope): Promise<MemoryItem[]>
+  summarize(messages: Message[]): Promise<Summary>
+  allocateBudget(parts: ContextPart[], maxTokens: number): ContextPart[]
+}
+```
+
+上下文应该分区：
+
+```text
+Model Context
+├── System Instructions
+├── Developer Instructions
+├── Agent Role
+├── Current Task
+├── Workflow State
+├── Relevant Memory
+├── Retrieved Knowledge
+├── Tool Results
+├── Recent Conversation
+├── Artifacts
+└── Output Format
+```
+
+这样你就可以精细控制每个部分的 token 预算。
+
+---
+
+# 六、最重要的抽象：一切都可以是 Node
+
+为了支持复杂工作流组合，建议你把 Agent、Tool、SubWorkflow、Human Approval、Condition、Router 都统一抽象成 Workflow Node。
+
+```ts
+type WorkflowNode =
+  | AgentNode
+  | ToolNode
+  | SubWorkflowNode
+  | ConditionNode
+  | RouterNode
+  | HumanNode
+  | ParallelNode
+  | JoinNode
+  | MemoryNode
+  | TransformNode
+```
+
+这样你的系统天然支持组合。
+
+例如：
+
+```yaml
+workflow:
+  name: code_review_and_fix
+
+  nodes:
+    - id: analyze_diff
+      type: agent
+      agent: code_reviewer
+
+    - id: run_tests
+      type: tool
+      tool: run_tests
+
+    - id: fix_code
+      type: agent
+      agent: coding_agent
+
+    - id: review_again
+      type: subworkflow
+      workflow: code_review_workflow
+
+    - id: ask_approval
+      type: human
+      prompt: "是否应用修改？"
+
+  edges:
+    - from: analyze_diff
+      to: run_tests
+
+    - from: run_tests
+      to: fix_code
+      condition: "result.failed == true"
+
+    - from: fix_code
+      to: review_again
+
+    - from: review_again
+      to: ask_approval
+```
+
+这个设计比“Agent 里面调用 Agent，Agent 里面调用工具，Agent 里面写死流程”要优雅很多。
+
+---
+
+# 七、推荐的领域模型
+
+你可以把系统核心对象抽象成这些：
+
+```text
+Task
+Workflow
+Node
+Edge
+Agent
+Tool
+Memory
+Context
+Event
+State
+Artifact
+Policy
+Trace
+```
+
+## 1. Task
+
+表示用户意图或系统任务。
+
+```ts
+interface Task {
+  id: string
+  title: string
+  description: string
+  input: unknown
+  status: TaskStatus
+  priority?: number
+  createdBy: UserRef
+  workflow?: WorkflowRef
+}
+```
+
+---
+
+## 2. Workflow
+
+表示任务如何被执行。
+
+```ts
+interface Workflow {
+  id: string
+  name: string
+  version: string
+  nodes: WorkflowNode[]
+  edges: WorkflowEdge[]
+  variables?: Record<string, unknown>
+  policies?: WorkflowPolicy
+}
+```
+
+---
+
+## 3. Node
+
+表示一个执行单元。
+
+```ts
+interface WorkflowNode {
+  id: string
+  type: "agent" | "tool" | "workflow" | "human" | "condition" | "transform"
+  input?: Mapping
+  output?: Mapping
+  retry?: RetryPolicy
+  timeout?: number
+}
+```
+
+---
+
+## 4. Agent
+
+表示一个智能执行者。
+
+```ts
+interface Agent {
+  id: string
+  spec: AgentSpec
+  run(input: AgentInput, context: AgentContext): Promise<AgentOutput>
+}
+```
+
+---
+
+## 5. Tool
+
+表示一个可调用能力。
+
+```ts
+interface Tool {
+  id: string
+  spec: ToolSpec
+  execute(input: ToolInput, context: ToolContext): Promise<ToolOutput>
+}
+```
+
+---
+
+## 6. Memory
+
+表示可检索、可写入的记忆。
+
+```ts
+interface MemoryItem {
+  id: string
+  type: "semantic" | "episodic" | "procedural" | "session" | "artifact"
+  content: string
+  metadata: Record<string, unknown>
+  importance: number
+  createdAt: string
+  updatedAt?: string
+  embedding?: number[]
+}
+```
+
+---
+
+## 7. Event
+
+表示系统中发生的所有事情。
+
+```ts
+interface Event {
+  id: string
+  type: string
+  taskId?: string
+  workflowRunId?: string
+  nodeId?: string
+  payload: unknown
+  timestamp: string
+}
+```
+
+如果你采用事件驱动和事件溯源，后面做审计、回放、调试、恢复会方便很多。
+
+---
+
+# 八、架构设计的关键原则
+
+## 原则 1：Agent 不直接拥有一切
+
+不要让 Agent 直接控制：
+
+- 所有工具
+- 所有记忆
+- 所有上下文
+- 所有流程
+- 所有权限
+- 所有状态
+
+否则 Agent 会变成上帝对象。
+
+应该是：
+
+```text
+Workflow Engine 调度 Agent
+Context Manager 组装上下文
+Tool Runtime 执行工具
+Memory System 管理记忆
+Policy Engine 控制权限
+State Store 保存状态
+```
+
+Agent 只负责在给定上下文和权限下做决策或生成结果。
+
+---
+
+## 原则 2：工作流优先，而不是 Prompt 优先
+
+Prompt 很重要，但不要把流程写死在 prompt 里。
+
+不推荐：
+
+```text
+你先分析需求，然后写代码，然后测试，然后修复，然后总结。
+```
+
+更推荐：
+
+```yaml
+nodes:
+  - requirement_analysis
+  - design_solution
+  - implement_code
+  - run_tests
+  - fix_errors
+  - summarize
+```
+
+这样流程可观察、可恢复、可调试、可复用。
+
+---
+
+## 原则 3：所有输入输出结构化
+
+Agent、Tool、Workflow Node 的输入输出尽量都 schema 化。
+
+例如：
+
+```json
+{
+  "summary": "string",
+  "issues": [
+    {
+      "severity": "high | medium | low",
+      "file": "string",
+      "line": "number",
+      "message": "string",
+      "suggestion": "string"
+    }
+  ],
+  "need_fix": "boolean"
+}
+```
+
+结构化输出有几个好处：
+
+- 更容易组合工作流
+- 更容易判断条件
+- 更容易回放
+- 更容易测试
+- 更容易替换模型
+- 更容易接 UI
+
+---
+
+## 原则 4：工具调用必须有权限和副作用控制
+
+特别是你要支持代码、文件、命令行、浏览器、外部 API 时，一定要有权限系统。
+
+例如：
+
+| 工具 | 风险 | 策略 |
+|---|---|---|
+| read_file | 低 | 可直接执行 |
+| write_file | 中 | 限制目录 |
+| delete_file | 高 | 需要确认 |
+| run_shell | 高 | 沙箱执行 |
+| call_external_api | 中/高 | API scope 控制 |
+| send_email | 高 | 人类确认 |
+| deploy | 极高 | 强制审批 |
+
+工具 metadata 中应该声明：
+
+```yaml
+side_effect: destructive
+requires_approval: true
+sandbox: docker
+allowed_agents:
+  - coding_agent
+  - devops_agent
+```
+
+---
+
+## 原则 5：上下文和记忆要分离
+
+很多系统把 memory 和 context 混在一起，这是不好的。
+
+区别是：
+
+| 概念 | 含义 |
+|---|---|
+| Memory | 系统长期保存的信息 |
+| Context | 本次模型调用实际放进去的信息 |
+
+Memory 是存储层，Context 是运行时输入层。
+
+流程应该是：
+
+```text
+Task → Retrieve Memory → Select Relevant Items → Compress → Build Context → Call Model
+```
+
+不是：
+
+```text
+把所有历史消息都塞给模型
+```
+
+---
+
+# 九、建议的模块分层
+
+## Layer 1：Foundation Layer
+
+```text
+Model Gateway
+State Store
+Event Bus
+Artifact Store
+Permission System
+Sandbox
+Logger
+Tracer
+Config Manager
+```
+
+这一层负责基础能力。
+
+---
+
+## Layer 2：Core Runtime Layer
+
+```text
+Workflow Engine
+Agent Runtime
+Tool Runtime
+Memory Manager
+Context Manager
+Planning Engine
+```
+
+这一层负责 Agent 核心运行。
+
+---
+
+## Layer 3：Capability Layer
+
+```text
+Code Agent
+Research Agent
+Review Agent
+Browser Agent
+Data Agent
+Office Agent
+DevOps Agent
+Personal Assistant Agent
+```
+
+这一层是具体能力。
+
+---
+
+## Layer 4：Application Layer
+
+```text
+IDE Assistant
+Desktop Agent
+Code Review Bot
+Document Automation
+Research Assistant
+Enterprise Workflow Agent
+```
+
+这一层是应用场景。
+
+---
+
+# 十、你可以这样设计插件机制
+
+为了易扩展，建议把以下全部做成插件：
+
+```text
+Model Provider Plugin
+Tool Plugin
+Memory Backend Plugin
+Workflow Node Plugin
+Agent Template Plugin
+Context Strategy Plugin
+Planner Plugin
+UI Panel Plugin
+Permission Policy Plugin
+Sandbox Plugin
+```
+
+例如：
+
+```ts
+interface Plugin {
+  id: string
+  name: string
+  version: string
+
+  register(ctx: PluginContext): void
+}
+```
+
+插件可以注册：
+
+```ts
+ctx.registerTool(...)
+ctx.registerAgent(...)
+ctx.registerWorkflowNode(...)
+ctx.registerMemoryBackend(...)
+ctx.registerModelProvider(...)
+ctx.registerContextStrategy(...)
+```
+
+---
+
+# 十一、建议你从这些开源项目中重点提取的维度
+
+你可以专门从每个项目看这些问题：
+
+## 1. Agent 定义方式
+
+- Agent 是怎么定义的？
+- 是 prompt 驱动还是配置驱动？
+- 是否支持角色？
+- 是否支持多 Agent？
+- 是否支持 Agent 间通信？
+- 是否支持 Agent 继承或组合？
+
+---
+
+## 2. Workflow 表达方式
+
+- 是否有显式工作流？
+- 是代码写死，还是 DSL 配置？
+- 是否支持 DAG？
+- 是否支持循环？
+- 是否支持条件分支？
+- 是否支持并行？
+- 是否支持子工作流？
+- 是否支持任务恢复？
+
+---
+
+## 3. 工具系统
+
+- 工具如何注册？
+- 工具是否有 schema？
+- 工具是否支持权限？
+- 工具是否有错误处理？
+- 工具是否支持异步？
+- 工具是否支持流式结果？
+- 工具是否有沙箱？
+
+---
+
+## 4. 记忆系统
+
+- 是否保存历史？
+- 是否有长期记忆？
+- 是否有向量检索？
+- 是否有摘要？
+- 是否支持用户级记忆？
+- 是否支持项目级记忆？
+- 是否支持任务级记忆？
+- 是否支持记忆遗忘？
+
+---
+
+## 5. 上下文管理
+
+- 是否有 token 预算？
+- 是否做消息裁剪？
+- 是否做上下文压缩？
+- 是否做检索增强？
+- 是否区分系统指令、任务、记忆、工具结果？
+- 是否支持多 Agent 上下文隔离？
+
+---
+
+## 6. 状态管理
+
+- 是否保存任务状态？
+- 是否可以恢复执行？
+- 是否可以回放？
+- 是否有 checkpoint？
+- 是否有任务日志？
+- 是否有执行 trace？
+
+---
+
+## 7. UI 和交互
+
+- 是否支持 GUI？
+- 是否支持 CLI？
+- 是否支持人类确认？
+- 是否支持中断任务？
+- 是否支持修改计划？
+- 是否支持查看执行轨迹？
+- 是否支持编辑上下文？
+
+---
+
+## 8. 安全与权限
+
+- 工具调用是否需要确认？
+- 是否限制文件读写范围？
+- 是否限制 shell 命令？
+- 是否有危险操作审批？
+- 是否支持密钥隔离？
+- 是否有审计日志？
+
+---
+
+# 十二、一个比较理想的新架构草案
+
+可以叫：
+
+```text
+Composable Agent Runtime
+```
+
+或者：
+
+```text
+Modular Agent Orchestration Framework
+```
+
+核心设计：
+
+```text
+┌────────────────────────────────────────────┐
+│ Application                                │
+│  - Desktop Agent                           │
+│  - Coding Agent                            │
+│  - Research Agent                          │
+│  - Workflow Automation                     │
+└────────────────────────────────────────────┘
+                    │
+                    ▼
+┌────────────────────────────────────────────┐
+│ Agent Orchestration                        │
+│  - Workflow Engine                         │
+│  - Planner                                 │
+│  - Scheduler                               │
+│  - SubAgent Manager                        │
+└────────────────────────────────────────────┘
+                    │
+                    ▼
+┌────────────────────────────────────────────┐
+│ Execution Runtime                          │
+│  - Agent Runtime                           │
+│  - Tool Runtime                            │
+│  - SubWorkflow Runtime                     │
+│  - Human-in-the-loop Runtime               │
+└────────────────────────────────────────────┘
+                    │
+                    ▼
+┌────────────────────────────────────────────┐
+│ Intelligence Layer                         │
+│  - Model Gateway                           │
+│  - Prompt Builder                          │
+│  - Context Manager                         │
+│  - Memory Retriever                        │
+└────────────────────────────────────────────┘
+                    │
+                    ▼
+┌────────────────────────────────────────────┐
+│ Persistence & Infrastructure               │
+│  - State Store                             │
+│  - Event Store                             │
+│  - Vector Store                            │
+│  - Artifact Store                          │
+│  - Permission System                       │
+│  - Sandbox                                 │
+└────────────────────────────────────────────┘
+```
+
+---
+
+# 十三、MVP 不要一开始做太大
+
+虽然你的目标是大而全，但建议 MVP 只做这些核心：
+
+## MVP 版本
+
+```text
+1. AgentSpec
+2. ToolSpec
+3. WorkflowSpec
+4. Workflow Engine
+5. Context Manager
+6. Memory Store
+7. Model Gateway
+8. State/Trace
+9. CLI 或简单 Web UI
+```
+
+先支持：
+
+- 一个 Agent 调工具
+- 多 Agent 顺序协作
+- 子工作流
+- 基础 memory
+- 基础 context packing
+- 工具 schema
+- workflow YAML/JSON
+- trace log
+
+不要一开始就做：
+
+- 完整可视化编排器
+- 复杂权限系统
+- 分布式执行
+- 多租户
+- 企业级插件市场
+- 所有模型适配
+- 所有工具适配
+
+---
+
+# 十四、最终回答你的问题
+
+是的，**你应该先提取上述开源项目的功能特点**。
+
+但更准确地说，你应该做三层提取：
+
+```text
+功能提取 → 能力抽象 → 架构原语设计
+```
+
+不要直接照搬这些项目的功能，而是要回答：
+
+1. 它们分别解决了什么问题？
+2. 它们用了什么 Agent 模式？
+3. 它们的工具系统怎么设计？
+4. 它们的上下文怎么管理？
+5. 它们的记忆怎么处理？
+6. 它们的工作流是否可组合？
+7. 哪些能力是共性的？
+8. 哪些能力应该成为你的内核？
+9. 哪些能力应该做成插件？
+10. 哪些能力只是 UI 或应用层功能？
+
+你真正要设计的是一个：
+
+```text
+以 Workflow Engine 为编排核心，
+以 Agent / Tool / SubWorkflow / Human 作为统一执行节点，
+以 Memory + Context Manager 作为智能输入管理层，
+以 Tool Runtime + Policy + Sandbox 作为安全执行层，
+以 Event Store + State Store + Trace 作为可观测与可恢复底座，
+以 Plugin System 保证长期扩展性的 Agent Runtime。
+```
+
+这样设计，才比较容易优雅地支持你说的：
+
+- 复杂工作流组合
+- 子 Agent
+- 工具调用
+- 子工作流
+- 多种工作流模式
+- 记忆处理
+- 上下文管理
+- 可扩展能力
+- UI/CLI/API 多端接入
+- 后续复杂应用演进。
+---
+
+“先分析，再设计”的思路很清晰，也是构建优秀系统的必经之路。但在具体设计之前，想先分享一个关键洞察，它可能会帮助你的设计更具前瞻性。
+
+综合来看，这些前沿项目揭示了一个核心趋势：在一个复杂的 Agent 系统中，真正为 AI “智力”部分编码的代码占比极小。例如，对 Claude Code 的逆向分析发现，其 **98.4% 的代码库是确定性操作框架（harness）**，而非 AI 决策逻辑。这意味着，未来的核心竞争力在于如何构建一个坚实、可控、高效的“操作框架”，来支撑那 1.6% 的智能。
+
+### 🔎 现有项目功能特点深度解析
+
+我为你系统梳理了这 10 个项目的核心特点和设计哲学，特别是它们可以为你所用的精华亮点：
+
+| 项目 | 核心定位 | 抽象精华 | 关键设计亮点为你所用 |
+| :--- | :--- | :--- | :--- |
+| **LangGraph** | 基于图的工作流编排 | 将工作流建模为有向图（节点+边），支持循环和条件分支，实现显式、可观测的流程控制。 | **状态机模式 (StateGraph)**：用状态驱动流程；**检查点机制 (Checkpointer)**：实现持久化执行与断点续传。 |
+| **CrewAI** | 多Agent协作框架 | 将Agent角色化、团队化，通过定义角色、目标和工具，让多个Agent以“团队”形式协作完成任务。 | **Agent-as-a-Team模式**：通过角色分工完成复杂任务；**流程管理 (Process)**：定义任务执行的顺序和策略。 |
+| **Microsoft AutoGen** | 多Agent对话框架 | 将Agent间的交互定义为可编程的对话，通过可定制、可对话的Agent组成“群聊”来解决任务。 | **可编程对话模式**：通过定义对话流程来编排Agent；**异步事件驱动架构**：实现高效、解耦的Agent间通信。 |
+| **GenericAgent** | 极简自进化框架 | 通过“上下文信息密度最大化”原则，用极少的原子工具实现复杂任务，自动将成功路径固化为可复用的“技能(Skill)”。 | **记忆分层 (L0/L1/L2)**：实现高效的信息管理；**技能自进化机制**：让系统能力持续增长。 |
+| **SpectrAI** | AI Agent桌面工作台 | 提供直观的Agent管理和编排界面，支持多会话、多模型并行、Agent团队协作（如Supervisor模式）。 | **结构化的MCP工具网关**：提供统一工具调用入口；**Agent Teams**：通过Supervisor模式将任务分发给多个子Agent协作。 |
+| **AionUi** | 统一Agent管理界面 | 将所有AI CLI工具和Agent纳入一个统一的图形化界面，提供协作、自动化能力。 | **统一CLI适配层**：实现不同格式CLI Agent的接入与通信；**内置Agent引擎**：提供基础Agent能力；**MCP统一配置**：一次配置，多Agent共享。 |
+| **Codeg** | 多Agent编码工作空间 | 提供一个统一工作区，聚合和管理不同AI编码助手的会话，支持它们在项目内协同工作。 | **Git Worktree并行开发**：支持Agent在多分支隔离并行工作；**对话聚合与结构化解析**：将不同来源的会话以统一形式呈现。 |
+| **desktop-cc-gui** | 多引擎AI工程平台 | 为专业开发者设计，将AI、终端、Git等开发工具整合在一个透明、可控的环境。 | **项目地图/记忆系统**：构建项目知识图谱，实现持久化语义记忆；**上下文账本 (Context Ledger)**：用于归因、审计和成本分析。 |
+| **ClaudeCodeRev** | 逆向工程参考 | 揭示了顶级Agent的实现细节：工具系统、子代理架构(Sidechain)、权限系统、分层压缩策略等。 | **5阶段上下文压缩管道**；**副链子代理架构**；**多层级工具调用成本模型**；**多层级权限系统**等可借鉴的设计。 |
+| **LangChain** | 通用LLM应用框架 | 提供模块化组件来“链式”调用LLM，是构建更复杂Agent系统的基石。 | **标准化抽象**：如模型、工具、向量存储等；**链式调用 (LCEL)**：提供统一的接口来组合和调用组件。 |
+
+### 🎨 新Agent架构设计方案
+
+基于对以上项目的分析，为你构思了一个名为 **“Cortex”（意为大脑皮层）** 的Agent架构设计。它旨在成为一个高度模块化、可扩展的系统。
+
+#### 🏗️ 整体架构概览
+
+这是一个分层的、面向领域的架构，体现了“关注点分离”的核心思想。
+
+```mermaid
+flowchart TB
+    subgraph "应用层"
+        A[CLI / API] 
+        B[桌面应用]
+        C[Web UI]
+    end
+
+    subgraph "编排与执行层"
+        direction LR
+        subgraph "工作流引擎 (Workflow Engine)"
+            D[图式工作流]
+            E[监督者模式]
+        end
+        F[Agent运行时<br>Agent Runtime]
+        G[工具注册表<br>Tool Registry]
+        H[知识与记忆中心<br>Knowledge & Memory Hub]
+    end
+
+    subgraph "核心能力层"
+        I[模型抽象层<br>Model Abstraction]
+        J[外部Agent适配器<br>External Agent Adapter]
+        K[MCP网关<br>MCP Gateway]
+        L[Skills 管理器<br>Skills Manager]
+    end
+
+    A --> F
+    B --> F
+    C --> F
+
+    F --> D
+    F --> E
+    F --> G
+    F --> H
+    F --> I
+    F --> J
+    F --> K
+    F --> L
+  
+    subgraph "基础设施层"
+        M[事件总线/消息队列]
+        N[持久化存储<br>文件/DB/向量库]
+    end
+
+    H --> N
+    G --> M
+    K --> M
+```
+
+#### 🔧 核心设计要点
+
+1.  **编排与执行层**：作为整个系统的大脑中枢，这一层决定了 Agent 如何思考和工作。
+    *   **工作流引擎**：不仅支持 **LangGraph 式的图工作流**来处理确定性的复杂任务，也支持 **CrewAI 式的监督者模式**，让一个“主管”Agent 动态地分析和分配任务给专家子Agent，实现灵活动态的流程。
+    *   **Agent 运行时**：负责实例化、执行和监控每个 Agent 的生命周期。它从 ClaudeCodeRev 的发现中汲取灵感，你只需要编写那 1.6% 的核心决策逻辑，框架会提供那 98.4% 的健壮操作基础。
+    *   **知识、记忆与技能**：这是一个分层系统，结合了 **GenericAgent 的按需记忆**和 **CrewAI/CC GUI 的项目知识图谱**。同时，借鉴 **SpectrAI 的技能系统**，系统能将成功经验固化为可复用的 Skill，实现自身能力的持续增长。
+
+2.  **核心能力层**：提供丰富的“工具”让 Agent 与外部世界交互。
+    *   **模型抽象层**：提供一个通用接口，便于未来无缝集成新的基础模型。
+    *   **外部Agent适配器**：这是实现“调用其他Agent/CLI工具”的关键。可以为每个外部 Agent（如 Claude Code, Gemini CLI）构建一个适配器，将其输入/输出规范转化为系统内部的标准化事件。
+    *   **MCP网关**：作为所有外部工具的统一入口，管理其注册、发现和调用。它能为每个外部 Agent 分配独立的对话历史上下文，并通过事件总线实现广播或点对点的通信协作。
+    *   **Skills 管理器**：在系统的生命周期内持续为 Agent 提供新的能力。
+
+3.  **核心抽象与工作流示例**
+    *   **核心抽象**：系统围绕 `Agent`, `Message`, `Tool`, `Memory`, `Workflow` 等核心概念构建。Agent 是执行者，Message 是通信载体，Tool 是能力接口，Memory 是知识库，Workflow 是任务蓝图。
+    *   **“分配子任务并持续跟踪”的实现**：一个 Supervisor Agent 可利用 **工作流引擎** 将一个复杂任务规划并分解为多个子任务。对于需要执行的子任务，Supervisor 会通过 **外部Agent适配器** 调用对应的 **CLI Agent**。在此期间，Supervisor Agent 将通过定期检查 **工作流引擎** 的状态和监听 **事件总线** 上的消息，来获取子任务的执行进度和结果，并根据需要进行干预，从而实现持续的跟踪和管理。
+
+### 💎 总结
+
+构建一个抽象、模块化且易扩展的新 Agent 工具，关键在于**分层、抽象和关注点分离**。上述“Cortex”架构设计，正是基于这个理念，将不同开源项目的优秀思想进行了融合与升华。建议你以此为起点，逐步迭代，打造出真正符合你期望的下一代 Agent 平台。
+
+
+---
+我现在想构建一个新的agent工具
+我期望新的agent 架构是足够抽象 模块化且灵活 易扩展的  并能支持非常复杂的工作流组合 子代理使用 工具调用 不同工作流组合 子工作流组合  优秀的记忆处理  上下文管理 能调用其他agent/cli工具并多轮对话并分配任务持续推进 等等
+请你整理整合上面三个分析

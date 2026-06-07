@@ -1,0 +1,10 @@
+# Example Agent Kernel configuration.
+#
+# Prefer api_key_env over api_key so secrets do not live in this file.
+
+[llm]
+provider = "openai-compatible"
+model = "gpt-4.1-mini"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 60
