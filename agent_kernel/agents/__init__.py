@@ -9,6 +9,11 @@ from agent_kernel.agents.connectors import (
 from agent_kernel.agents.loop import AgentLoop, AgentTurnResult
 from agent_kernel.agents.mailbox import build_mailbox_message
 from agent_kernel.agents.group_chat import GroupChatService
+from agent_kernel.agents.handoff import (
+  ChannelMembershipHandoffPolicy,
+  HandoffPolicy,
+  HandoffService,
+)
 from agent_kernel.agents.interaction_fabric import InteractionFabric
 from agent_kernel.agents.observer import ObserverService
 from agent_kernel.agents.session import AgentSessionService, oneshot_agent_spec
@@ -34,6 +39,9 @@ __all__ = [
   "FakeAgentConnector",
   "FakeWorkspaceBackend",
   "GroupChatService",
+  "ChannelMembershipHandoffPolicy",
+  "HandoffPolicy",
+  "HandoffService",
   "InteractionFabric",
   "ObserverService",
   "ArtifactMergeBackend",

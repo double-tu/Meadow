@@ -7,7 +7,7 @@ from agent_kernel.agents import (
   ObserverService,
   TaskBoardService,
 )
-from agent_kernel.domain import AgentPool, ArtifactRef, InteractionParticipant, ParticipantKind, PatchArtifact, ReviewRecord, WorkspaceLease
+from agent_kernel.domain import AgentPool, ArtifactRef, HandoffRecord, InteractionParticipant, ParticipantKind, PatchArtifact, ReviewRecord, WorkspaceLease
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.runtime import unit_of_work_factory
 
@@ -108,6 +108,24 @@ class InteractionFabricTests(unittest.TestCase):
     self.assertEqual(lease.to_dict()["status"], "active")
     self.assertEqual(patch.to_dict()["artifact_ref"]["artifact_id"], "artifact_1")
     self.assertEqual(review.to_dict()["decision"], "approved")
+
+  def test_handoff_record_is_serializable(self) -> None:
+    handoff = HandoffRecord(
+      handoff_id="handoff_1",
+      task_id="task_1",
+      from_participant_id="p1",
+      to_participant_id="p2",
+      reason="needs review",
+      state_summary="implementation complete",
+      expected_output="review result",
+      constraints=["preserve API"],
+      acceptance_criteria=["tests pass"],
+    )
+
+    data = handoff.to_dict()
+
+    self.assertEqual(data["status"], "requested")
+    self.assertEqual(data["acceptance_criteria"], ["tests pass"])
 
 
 if __name__ == "__main__":

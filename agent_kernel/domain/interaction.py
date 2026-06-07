@@ -188,3 +188,22 @@ class ReviewRecord(DomainModel):
   decision: Literal["approved", "changes_requested", "rejected"]
   comments: list[str] = field(default_factory=list)
   created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class HandoffRecord(DomainModel):
+  handoff_id: str
+  task_id: str
+  from_participant_id: str
+  to_participant_id: str
+  reason: str
+  state_summary: str
+  expected_output: str
+  source_channel_id: str | None = None
+  target_channel_id: str | None = None
+  constraints: list[str] = field(default_factory=list)
+  acceptance_criteria: list[str] = field(default_factory=list)
+  artifact_refs: list[ArtifactRef] = field(default_factory=list)
+  status: Literal["requested", "accepted", "rejected", "cancelled"] = "requested"
+  created_at: datetime = field(default_factory=utc_now)
+  updated_at: datetime = field(default_factory=utc_now)

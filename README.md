@@ -11,11 +11,13 @@ Implemented MVP areas:
 - Agent orchestration with sessions, mailbox, child agent spawn/await/cancel, and agent-as-workflow-node.
 - Capability runtime with policy checks, approval flow, audit records, local/process tools, timeout, and tool-call cancel/kill control.
 - Memory/context with working/artifact memory, context budget, sensitivity filtering, tool visibility pruning, large-memory artifact refs, and context ledger.
+- Episodic memory with deterministic summarizer/retriever interfaces and conservative semantic consolidation.
 - Observability/replay with timeline, artifact inspect, cost ledger, exact/partial/recovery replay, and eval assertions.
 - Extension manifest loader, contribution registry, and permission-to-grant mapping.
 - Autonomous exploration MVP with strategy planning, attempts, verification, trace distillation, draft workflow templates, and skill evolution records.
 - Multi-agent interaction fabric MVP with channels, messages, round-robin group chat, agent pools, taskboard basics, and observer findings.
 - Workspace isolation interfaces with patch artifact review/merge workflow and fake backend for tests.
+- Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
 - Human intervention with event append, working-memory steering, and CLI `intervene`.
 - Skill service and plan patch validation for controlled skill/workflow evolution.
 - MCP, Workbench, and persistent agent connector protocol boundaries with fake implementations.
@@ -98,8 +100,9 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - HTTP server is not implemented; only route/stream/workspace DTOs exist.
 - Tool-call cancel/kill only performs live process control inside the current runtime process; after restart, host commands persist control requests but cannot signal the original child process.
 - Real persistent CLI agent connector is not implemented; only protocol and fake connector exist.
+- Handoff has a persistent service and channel routing, but real multi-CLI session routing is not implemented.
 - Real Workbench/MCP adapters are not implemented; only contracts and fake clients exist.
 - Recovery scanner can reschedule or dead-letter stale steps and conservatively repair missing/misaligned RunState checkpoint metadata, but complex artifact/event repair workflows are not implemented.
 - Workspace isolation has protocol and fake-backed patch review workflow; real git worktree allocation and merge execution are not implemented.
-- Advanced semantic memory, vector search, and long-term consolidation are not implemented.
+- Advanced vector search, fact conflict detection, and background long-term consolidation are not implemented.
 - Advanced autonomous reflection and PlanPatch validation remain future work.

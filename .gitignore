@@ -50,3 +50,7 @@ temp/
 # Tooling/local state
 .agents/
 .codex/
+
+# External reference repositories
+external_repos/*
+!external_repos/README.md

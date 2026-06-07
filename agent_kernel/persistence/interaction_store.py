@@ -10,6 +10,7 @@ from agent_kernel.domain.interaction import (
   AgentPool,
   DiscussionTurn,
   GroupChatSession,
+  HandoffRecord,
   InteractionChannel,
   InteractionMessage,
   InteractionParticipant,
@@ -92,6 +93,16 @@ class InteractionStore:
 
   def list_review_records(self, patch_id: str) -> list[ReviewRecord]:
     return [ReviewRecord.from_dict(data) for data in self._list("review_record", patch_id)]
+
+  def save_handoff(self, item: HandoffRecord) -> None:
+    self._save(item.handoff_id, "handoff", item.task_id, item)
+
+  def get_handoff(self, handoff_id: str) -> HandoffRecord | None:
+    data = self._get(handoff_id)
+    return HandoffRecord.from_dict(data) if data is not None else None
+
+  def list_handoffs(self, task_id: str) -> list[HandoffRecord]:
+    return [HandoffRecord.from_dict(data) for data in self._list("handoff", task_id)]
 
   def _save(self, record_id: str, record_type: str, parent_id: str | None, value: Any) -> None:
     self._conn.execute(

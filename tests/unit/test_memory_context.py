@@ -136,6 +136,58 @@ class MemoryContextTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_episodic_memory_retrieval_and_consolidation(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      memory = MemoryFacade(uow_factory)
+      episode = memory.write_episode(
+        scope="project_1",
+        task_id="task_api",
+        event_ids=["evt_1", "evt_2"],
+        observations=["Fixed sqlite checkpoint resume bug", "Added recovery tests"],
+        outcome="runtime recovery passed",
+        importance=0.95,
+      )
+      memory.write_episode(
+        scope="project_1",
+        task_id="task_ui",
+        event_ids=["evt_3"],
+        observations=["Updated button colors"],
+        outcome="visual polish done",
+        importance=0.2,
+      )
+
+      retrieved = memory.retrieve_episodic("project_1", "checkpoint recovery sqlite")
+      semantic = memory.consolidate_episode("project_1", episode)
+
+      self.assertEqual(retrieved[0].memory_id, episode.memory_id)
+      self.assertEqual(episode.memory_type, "episodic")
+      self.assertIn("sqlite", episode.content["keywords"])
+      self.assertIsNotNone(semantic)
+      self.assertEqual(semantic.memory_type, "semantic")
+      self.assertEqual(semantic.content["source_episode_id"], episode.memory_id)
+      self.assertEqual(semantic.source_event_ids, ["evt_1", "evt_2"])
+    finally:
+      conn.close()
+
+  def test_low_importance_episode_is_not_consolidated(self) -> None:
+    conn = connect_sqlite()
+    try:
+      memory = MemoryFacade(unit_of_work_factory(conn))
+      episode = memory.write_episode(
+        scope="project_1",
+        task_id="task_minor",
+        event_ids=[],
+        observations=["Minor temporary note"],
+        outcome="done",
+        importance=0.1,
+      )
+
+      self.assertIsNone(memory.consolidate_episode("project_1", episode))
+    finally:
+      conn.close()
+
 
 if __name__ == "__main__":
   unittest.main()

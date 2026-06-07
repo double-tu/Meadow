@@ -96,7 +96,7 @@
 目标: 建立 Memory 与 Context 分离，并能解释每次上下文构建依据。
 
 - [x] 实现 working memory。
-- [ ] 实现 episodic memory。
+- [x] 实现 episodic memory。
 - [x] 实现 artifact memory。
 - [x] 实现 retrieval pack 基础对象和 context.built ledger。
 - [x] 实现 context candidates、budget partition。
@@ -157,7 +157,7 @@
 - [x] 实现 AgentPool 和 pool scheduler。
 - [x] 实现 persistent CLI AgentConnector 协议占位和 fake。
 - [x] 实现 TaskBoard 基础。
-- [ ] 实现 handoff。
+- [x] 实现 handoff。
 - [x] 实现 ObservationFinding 和 observer request_pause 基础。
 - [ ] 实现 cross-channel summary 和 decision artifact。
 - [x] 实现 workspace isolation、merge/review workflow 草案。
@@ -388,12 +388,12 @@
 - [ ] Process adapter 未实现 stdout/stderr stream、process group/session isolation、结构化终端协议和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
 - [ ] MCP/Workbench/CLI AgentConnector 已有协议和 fake；真实 MCP server、Workbench runtime、Codex/Claude/Gemini 持续 CLI session connector 尚未实现。
-- [ ] 多 Agent 协作目前只有基础 channel/round-robin/taskboard；缺少自由发言、主持人策略、handoff、跨 channel summary、decision artifact、多 CLI session routing。
+- [ ] 多 Agent 协作已有基础 channel/round-robin/taskboard/handoff；仍缺自由发言、主持人策略、跨 channel summary、decision artifact、多 CLI session routing。
 - [ ] Workspace isolation 已有接口协议、fake backend、patch artifact review/merge workflow 草案；真实 git worktree 分配、merge 执行和冲突处理仍缺失。
 - [ ] Observer 只能记录 request_pause finding，尚未真正驱动 Runtime pause、上下文纠偏或当前 step 中止。
 - [ ] Autonomous exploration 仍是确定性单策略 planner + 注入式 executor；已补 PlanPatchValidator/SkillService，但缺少多策略探索、失败反思 reflector、动态工具/工作流组合。
 - [ ] Skill 与 Workflow 的互调规则已有基础服务；仍缺 Agent 自动选择 skill、workflow 动态 patch 应用、子工作流注册与校验闭环。
-- [ ] Memory 缺少 episodic memory、长期 consolidation、vector/semantic retrieval、事实冲突检测。
+- [ ] Memory 已有 episodic memory、deterministic retrieval 和高重要度 episode 到 semantic 的基础 consolidation；仍缺 vector/semantic retrieval、后台长期 consolidation、事实冲突检测。
 - [ ] Recovery 已有 stale step scanner、event/checkpoint/artifact consistency check 和保守 metadata repair；仍缺复杂 artifact/event repair、不可恢复对象 repair workflow 和真实 worker 接管闭环。
 - [ ] HTTP/event stream/workspace DTO 已实现；HTTP server、SSE/WebSocket event stream 和 Web/Desktop 工作台仍未实现。
 - [ ] Extension SDK 目前只注册 metadata，不动态 import/执行 extension entrypoint；还不是完整插件运行时。
@@ -412,7 +412,8 @@
 - [x] P1: 补 MCP adapter fake、Workbench protocol interface、stream DTO。
 - [ ] P1: 补 Exploration reflector 和动态组合能力；PlanPatchValidator/SkillService 已完成基础版。
 - [x] P2: 实现 HTTP route DTO 和 event stream DTO，为 Web/Desktop task workspace 做数据面准备。
-- [ ] P2: 补 episodic memory、semantic retrieval、long-term consolidation。
+- [x] P2: 补 episodic memory 和 deterministic retrieval/consolidation 接口。
+- [ ] P2: 补 vector/semantic retrieval、background long-term consolidation、事实冲突检测。
 
 ## 进度日志
 
