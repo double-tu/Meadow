@@ -192,6 +192,19 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run_created_at
 ON tool_calls(run_id, created_at);
 
+CREATE TABLE IF NOT EXISTS recovery_jobs (
+  recovery_id TEXT PRIMARY KEY,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  job_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_jobs_target
+ON recovery_jobs(target_type, target_id, created_at);
+
 CREATE TABLE IF NOT EXISTS memory_items (
   memory_id TEXT PRIMARY KEY,
   memory_type TEXT NOT NULL,

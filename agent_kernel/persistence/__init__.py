@@ -12,6 +12,7 @@ from agent_kernel.persistence.grant_store import GrantStore
 from agent_kernel.persistence.interaction_store import InteractionStore
 from agent_kernel.persistence.memory_store import MemoryStore
 from agent_kernel.persistence.outbox_store import OutboxItem, OutboxStore
+from agent_kernel.persistence.recovery_store import RecoveryStore
 from agent_kernel.persistence.sqlite import connect_sqlite, initialize_schema
 from agent_kernel.persistence.state_store import StateStore
 from agent_kernel.persistence.step_store import StepStore
@@ -34,6 +35,7 @@ __all__ = [
   "InteractionStore",
   "OutboxItem",
   "OutboxStore",
+  "RecoveryStore",
   "MailboxStore",
   "MemoryStore",
   "StateStore",

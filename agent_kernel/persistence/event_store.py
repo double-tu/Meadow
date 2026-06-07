@@ -92,6 +92,27 @@ class EventStore:
       return None
     return self._row_to_event(row)
 
+  def list_all(self) -> list[RuntimeEvent]:
+    rows = self._conn.execute(
+      """
+      SELECT
+        event_id,
+        event_type,
+        run_id,
+        timestamp,
+        node_id,
+        step_id,
+        agent_id,
+        task_id,
+        causal_id,
+        payload_json,
+        artifact_refs_json
+      FROM runtime_events
+      ORDER BY timestamp ASC, event_id ASC
+      """
+    ).fetchall()
+    return [self._row_to_event(row) for row in rows]
+
   @staticmethod
   def _row_to_event(row: sqlite3.Row) -> RuntimeEvent:
     return RuntimeEvent.from_dict(
@@ -109,4 +130,3 @@ class EventStore:
         "artifact_refs": json.loads(row["artifact_refs_json"]),
       }
     )
-

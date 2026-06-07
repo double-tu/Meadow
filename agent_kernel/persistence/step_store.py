@@ -87,3 +87,14 @@ class StepStore:
     if row is None:
       return None
     return NodeStepRecord.from_dict(json.loads(row["state_json"]))
+
+  def list_recoverable(self) -> list[NodeStepRecord]:
+    rows = self._conn.execute(
+      """
+      SELECT state_json
+      FROM node_steps
+      WHERE status IN ('leased', 'running', 'retry_wait')
+      ORDER BY updated_at ASC, step_id ASC
+      """
+    ).fetchall()
+    return [NodeStepRecord.from_dict(json.loads(row["state_json"])) for row in rows]

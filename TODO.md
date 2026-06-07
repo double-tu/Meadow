@@ -394,7 +394,7 @@
 - [ ] Autonomous exploration 仍是确定性单策略 planner + 注入式 executor；已补 PlanPatchValidator/SkillService，但缺少多策略探索、失败反思 reflector、动态工具/工作流组合。
 - [ ] Skill 与 Workflow 的互调规则已有基础服务；仍缺 Agent 自动选择 skill、workflow 动态 patch 应用、子工作流注册与校验闭环。
 - [ ] Memory 缺少 episodic memory、长期 consolidation、vector/semantic retrieval、事实冲突检测。
-- [ ] Recovery 仍是 checkpoint/replay 草案级；缺少 worker crash scanner、lease expiry recovery、event/checkpoint/artifact consistency repair、不可恢复对象 repair workflow。
+- [ ] Recovery 已有 stale step scanner 和 event/checkpoint/artifact consistency check；仍缺自动 repair workflow、不可恢复对象 repair workflow 和真实 worker 接管闭环。
 - [ ] HTTP/event stream/workspace DTO 已实现；HTTP server、SSE/WebSocket event stream 和 Web/Desktop 工作台仍未实现。
 - [ ] Extension SDK 目前只注册 metadata，不动态 import/执行 extension entrypoint；还不是完整插件运行时。
 
@@ -402,7 +402,9 @@
 
 - [x] P0: 实现 HumanInterventionService + CLI `intervene`，支持追加纠偏事件、更新 working memory、pause/interrupted 当前 run。
 - [x] P0: 实现 CLI/API tool-call cancel/kill 控制请求，并补齐 ToolCall event 写入与测试。
-- [ ] P0: 实现持久化 recovery scanner，处理 expired lease、crash 后未完成 step、event/checkpoint/artifact 一致性检查。
+- [x] P0: 实现持久化 recovery scanner，处理 stale lease/crash 后未完成 step 的重调度或 dead-letter。
+- [x] P0: 补 event/checkpoint/artifact 一致性检查。
+- [ ] P0: 补 event/checkpoint/artifact 自动 repair workflow。
 - [x] P1: 定义 persistent CLI AgentConnector 协议，用 fake connector 先跑通 connector routing 测试。
 - [ ] P1: 实现 workspace isolation 草案: worktree allocation、artifactized patch、review/merge workflow。
 - [x] P1: 补 MCP adapter fake、Workbench protocol interface、stream DTO。

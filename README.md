@@ -6,7 +6,7 @@ Python MVP implementation of the Agent Kernel architecture described in `python-
 
 Implemented MVP areas:
 
-- Durable runtime with SQLite event log, state, checkpoint, retry, dead letter, budget, circuit breaker, and idempotency basics.
+- Durable runtime with SQLite event log, state, checkpoint, retry, dead letter, budget, circuit breaker, idempotency basics, stale-step recovery scanner, and recovery consistency checks.
 - Workflow graph execution with function, tool, and agent node executors.
 - Agent orchestration with sessions, mailbox, child agent spawn/await/cancel, and agent-as-workflow-node.
 - Capability runtime with policy checks, approval flow, audit records, local/process tools, timeout, and tool-call cancel/kill control.
@@ -98,6 +98,7 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - Tool-call cancel/kill only performs live process control inside the current runtime process; after restart, host commands persist control requests but cannot signal the original child process.
 - Real persistent CLI agent connector is not implemented; only protocol and fake connector exist.
 - Real Workbench/MCP adapters are not implemented; only contracts and fake clients exist.
+- Recovery scanner can reschedule or dead-letter stale steps and detect event/checkpoint/artifact consistency issues, but automated repair workflows are not implemented.
 - Full workspace isolation and merge/review workflow are not implemented.
 - Advanced semantic memory, vector search, and long-term consolidation are not implemented.
 - Advanced autonomous reflection and PlanPatch validation remain future work.

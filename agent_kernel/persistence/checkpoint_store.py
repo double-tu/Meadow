@@ -75,3 +75,23 @@ class CheckpointStore:
       created_at=datetime.fromisoformat(row["created_at"]),
     )
 
+  def list_by_run(self, run_id: str) -> list[CheckpointRecord]:
+    rows = self._conn.execute(
+      """
+      SELECT checkpoint_id, run_id, state_json, event_id, created_at
+      FROM checkpoints
+      WHERE run_id = ?
+      ORDER BY created_at ASC, checkpoint_id ASC
+      """,
+      (run_id,),
+    ).fetchall()
+    return [
+      CheckpointRecord(
+        checkpoint_id=row["checkpoint_id"],
+        run_id=row["run_id"],
+        state=RunState.from_dict(json.loads(row["state_json"])),
+        event_id=row["event_id"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+      )
+      for row in rows
+    ]

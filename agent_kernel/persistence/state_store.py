@@ -38,3 +38,8 @@ class StateStore:
       return None
     return RunState.from_dict(json.loads(row["state_json"]))
 
+  def list_all(self) -> list[RunState]:
+    rows = self._conn.execute(
+      "SELECT state_json FROM run_states ORDER BY updated_at ASC, run_id ASC"
+    ).fetchall()
+    return [RunState.from_dict(json.loads(row["state_json"])) for row in rows]
