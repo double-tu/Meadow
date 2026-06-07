@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+import json
 import os
 import signal
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from agent_kernel.domain.capability import ToolResult
 
@@ -86,10 +87,13 @@ class ProcessCommand:
 
 @dataclass(slots=True)
 class ProcessStreamEvent:
-  event: Literal["started", "stdout", "stderr", "exited", "timeout", "cancelled", "killed"]
+  event: Literal["started", "stdout", "stderr", "structured", "exited", "timeout", "cancelled", "killed"]
   tool_call_id: str | None = None
   process_id: int | None = None
   data: str = ""
+  name: str | None = None
+  payload: dict[str, Any] | None = None
+  sequence: int | None = None
   returncode: int | None = None
   error: dict[str, object] | None = None
 
@@ -287,6 +291,34 @@ class ProcessToolExecutor:
       if tool_call_id is not None:
         self._active.pop(tool_call_id, None)
 
+  async def stream_structured(
+    self,
+    name: str,
+    input: dict[str, object],
+    tool_call_id: str | None = None,
+  ) -> AsyncIterator[ProcessStreamEvent]:
+    """Stream process events and parse stdout JSONL frames as structured events."""
+
+    sequence = 0
+    async for event in self.stream(name, input, tool_call_id=tool_call_id):
+      if event.event != "stdout":
+        yield event
+        continue
+      parsed = self._parse_structured_stdout(event.data, sequence)
+      if parsed is None:
+        yield event
+        continue
+      sequence += 1
+      yield ProcessStreamEvent(
+        event="structured",
+        tool_call_id=event.tool_call_id,
+        process_id=event.process_id,
+        data=event.data,
+        name=parsed["name"],
+        payload=parsed["payload"],
+        sequence=sequence,
+      )
+
   async def cancel(self, tool_call_id: str, grace_seconds: float = 1.0) -> str:
     active = self._active.get(tool_call_id)
     if active is None:
@@ -337,6 +369,26 @@ class ProcessToolExecutor:
           data=data.decode("utf-8", errors="replace"),
         )
       )
+
+  @staticmethod
+  def _parse_structured_stdout(line: str, sequence: int) -> dict[str, Any] | None:
+    try:
+      frame = json.loads(line)
+    except json.JSONDecodeError:
+      return None
+    if not isinstance(frame, dict):
+      return None
+    event_name = frame.get("event") or frame.get("type") or frame.get("name")
+    if not isinstance(event_name, str) or not event_name:
+      return None
+    payload = frame.get("payload", {})
+    if not isinstance(payload, dict):
+      payload = {"value": payload}
+    return {
+      "name": event_name,
+      "payload": payload,
+      "sequence": sequence,
+    }
 
   @staticmethod
   async def _terminate_process(

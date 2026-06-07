@@ -16,6 +16,7 @@ from agent_kernel.domain.base import new_id, utc_now
 from agent_kernel.domain.capability import ToolResult
 from agent_kernel.domain.states import ToolCallStatus
 from agent_kernel.domain.tool_call import ToolCallRecord
+from agent_kernel.observability.audit import AuditSink
 from agent_kernel.persistence.audit_store import AuditRecord
 from agent_kernel.policy.engine import PolicyDecision, PolicyDecisionType, PolicyEngine
 
@@ -48,6 +49,7 @@ class CapabilityRuntime:
     mcp_tools: MCPToolExecutor | None = None,
     control_workbench: ControlWorkbench | None = None,
     workbench_client: WorkbenchClient | None = None,
+    audit_sink: AuditSink | None = None,
     uow_factory=None,
   ) -> None:
     self._registry = registry
@@ -57,6 +59,7 @@ class CapabilityRuntime:
     self._mcp_tools = mcp_tools
     self._control_workbench = control_workbench
     self._workbench_client = workbench_client
+    self._audit_sink = audit_sink
     self._uow_factory = uow_factory
 
   async def call(
@@ -366,16 +369,16 @@ class CapabilityRuntime:
     decision: str,
     payload: dict[str, Any],
   ) -> None:
-    if self._uow_factory is None:
-      return
-    with self._uow_factory() as uow:
-      uow.audit.add(
-        AuditRecord.create(
-          action="capability.call.policy_check",
-          target_ref=capability_id,
-          run_id=ctx.run_id,
-          actor_id=ctx.agent_id,
-          decision=decision,
-          payload=payload,
-        )
-      )
+    record = AuditRecord.create(
+      action="capability.call.policy_check",
+      target_ref=capability_id,
+      run_id=ctx.run_id,
+      actor_id=ctx.agent_id,
+      decision=decision,
+      payload=payload,
+    )
+    if self._uow_factory is not None:
+      with self._uow_factory() as uow:
+        uow.audit.add(record)
+    if self._audit_sink is not None:
+      self._audit_sink.emit(record)

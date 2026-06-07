@@ -2,7 +2,13 @@ import unittest
 
 from agent_kernel.context import ContextManager
 from agent_kernel.domain import RuntimeEventType
-from agent_kernel.memory import MemoryFacade
+from agent_kernel.memory import (
+  HTTPVectorStore,
+  HTTPVectorStoreEndpoint,
+  InMemoryVectorStore,
+  MemoryFacade,
+  VectorStoreSemanticRetriever,
+)
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.runtime import unit_of_work_factory
 
@@ -214,6 +220,73 @@ class MemoryContextTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_semantic_memory_retrieval_can_use_vector_store_backend(self) -> None:
+    conn = connect_sqlite()
+    try:
+      vector_store = InMemoryVectorStore()
+      memory = MemoryFacade(
+        unit_of_work_factory(conn),
+        semantic_retriever=VectorStoreSemanticRetriever(vector_store),
+      )
+      runtime = memory.write_semantic(
+        scope="project_1",
+        content={
+          "summary": "Runtime checkpoint recovery uses sqlite event log replay",
+          "keywords": ["runtime", "checkpoint", "sqlite", "recovery"],
+        },
+        importance=0.7,
+      )
+      memory.write_semantic(
+        scope="project_1",
+        content={"summary": "Button color polish and layout spacing"},
+        importance=1.0,
+      )
+
+      results = memory.retrieve_semantic("project_1", "sqlite checkpoint replay", limit=2)
+
+      self.assertEqual(results[0].memory.memory_id, runtime.memory_id)
+      self.assertGreater(results[0].score, 0)
+      self.assertIn("vector store", results[0].rationale)
+    finally:
+      conn.close()
+
+  def test_semantic_memory_retrieval_can_use_http_vector_store_backend(self) -> None:
+    conn = connect_sqlite()
+    try:
+      transport = _HTTPVectorStoreTransport()
+      store = HTTPVectorStore(
+        HTTPVectorStoreEndpoint(
+          base_url="https://vector.example",
+          headers={"Authorization": "Bearer test"},
+        ),
+        transport=transport.post,
+      )
+      memory = MemoryFacade(
+        unit_of_work_factory(conn),
+        semantic_retriever=VectorStoreSemanticRetriever(store),
+      )
+      runtime = memory.write_semantic(
+        scope="project_1",
+        content={"summary": "Runtime checkpoint recovery uses sqlite event log replay"},
+        importance=0.7,
+      )
+      memory.write_semantic(
+        scope="project_1",
+        content={"summary": "Button color polish and layout spacing"},
+        importance=1.0,
+      )
+      transport.match_id = runtime.memory_id
+
+      results = memory.retrieve_semantic("project_1", "sqlite checkpoint replay", limit=1)
+
+      self.assertEqual(results[0].memory.memory_id, runtime.memory_id)
+      self.assertEqual(transport.requests[0][0], "https://vector.example/upsert")
+      self.assertEqual(transport.requests[1][0], "https://vector.example/query")
+      self.assertEqual(transport.requests[1][1]["scope"], "project_1")
+      self.assertEqual(transport.requests[1][1]["filters"], {"memory_type": "semantic"})
+    finally:
+      conn.close()
+
   def test_fact_conflict_detection_finds_conflicting_semantic_values(self) -> None:
     conn = connect_sqlite()
     try:
@@ -271,6 +344,18 @@ class MemoryContextTests(unittest.TestCase):
       self.assertEqual(incoming.content["conflicts"][0]["incoming_value"], "manual")
     finally:
       conn.close()
+
+
+class _HTTPVectorStoreTransport:
+  def __init__(self) -> None:
+    self.requests = []
+    self.match_id = ""
+
+  def post(self, url, payload, endpoint):
+    self.requests.append((url, payload, dict(endpoint.headers)))
+    if url.endswith("/query"):
+      return {"matches": [{"document_id": self.match_id, "score": 0.91, "metadata": {"source": "http"}}]}
+    return {"ok": True}
 
 
 if __name__ == "__main__":

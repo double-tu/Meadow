@@ -14,6 +14,7 @@ from agent_kernel.capabilities.adapters import (
 )
 from agent_kernel.domain.base import utc_now
 from agent_kernel.domain.capability import CapabilityGrant, CapabilitySpec, SideEffectLevel, ToolResult
+from agent_kernel.observability import CompositeAuditSink, MemoryAuditSink
 from agent_kernel.policy import PolicyDecisionType, PolicyEngine
 
 
@@ -110,6 +111,64 @@ class CapabilityRuntimeTests(unittest.IsolatedAsyncioTestCase):
     self.assertIsNotNone(outcome.result.result_id)
     self.assertEqual(outcome.result.status, "succeeded")
     self.assertEqual(outcome.result.capability_id, "tool.raw")
+
+  async def test_audit_sink_receives_policy_and_result_records_without_persistence(self) -> None:
+    registry = CapabilityRegistry()
+    registry.register(
+      CapabilitySpec(
+        capability_id="tool.echo",
+        name="echo",
+        kind="tool",
+        input_schema={},
+        output_schema={},
+        side_effect_level=SideEffectLevel.NONE,
+      )
+    )
+    tools = LocalToolExecutor()
+    tools.register("tool.echo", lambda input: ToolResult(ok=True, output={"echo": input["text"]}))
+    sink = MemoryAuditSink()
+    runtime = CapabilityRuntime(registry, PolicyEngine(), tools, audit_sink=sink)
+
+    outcome = await runtime.call(
+      "tool.echo",
+      {"text": "hi"},
+      CapabilityCallContext(run_id="run_sink", agent_id="agent_sink"),
+    )
+
+    self.assertTrue(outcome.result.ok)
+    self.assertEqual([record.decision for record in sink.records], ["allow", "result"])
+    self.assertEqual(sink.records[0].action, "capability.call.policy_check")
+    self.assertEqual(sink.records[0].actor_id, "agent_sink")
+    self.assertEqual(sink.records[1].payload["result"]["output"], {"echo": "hi"})
+
+  async def test_composite_audit_sink_fans_out_records(self) -> None:
+    registry = CapabilityRegistry()
+    registry.register(
+      CapabilitySpec(
+        capability_id="tool.echo",
+        name="echo",
+        kind="tool",
+        input_schema={},
+        output_schema={},
+        side_effect_level=SideEffectLevel.NONE,
+      )
+    )
+    tools = LocalToolExecutor()
+    tools.register("tool.echo", lambda input: ToolResult(ok=True))
+    sink_a = MemoryAuditSink()
+    sink_b = MemoryAuditSink()
+    runtime = CapabilityRuntime(
+      registry,
+      PolicyEngine(),
+      tools,
+      audit_sink=CompositeAuditSink([sink_a, sink_b]),
+    )
+
+    await runtime.call("tool.echo", {}, CapabilityCallContext(run_id="run_composite_sink"))
+
+    self.assertEqual(len(sink_a.records), 2)
+    self.assertEqual(len(sink_b.records), 2)
+    self.assertEqual(sink_a.records[0].audit_id, sink_b.records[0].audit_id)
 
   async def test_denies_missing_required_grant(self) -> None:
     registry = CapabilityRegistry()

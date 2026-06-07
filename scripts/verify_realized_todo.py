@@ -43,7 +43,7 @@ from agent_kernel.autonomy import (
   TraceDistiller,
   WorkflowLibrary,
 )
-from agent_kernel.capabilities import CapabilityRegistry, CapabilityRuntime
+from agent_kernel.capabilities import CapabilityCallContext, CapabilityRegistry, CapabilityRuntime
 from agent_kernel.capabilities.adapters import (
   FakeMCPClient,
   FakeWorkbenchClient,
@@ -85,11 +85,18 @@ from agent_kernel.extensions import (
   ContributionRegistry,
   ExtensionManifestLoader,
   ExtensionPermissionMapper,
+  ExtensionRuntime,
 )
 from agent_kernel.hosts.dto import EventStreamEnvelope, TaskWorkspaceDTO, default_http_routes
-from agent_kernel.memory import MemoryFacade
+from agent_kernel.memory import (
+  HTTPVectorStore,
+  HTTPVectorStoreEndpoint,
+  InMemoryVectorStore,
+  MemoryFacade,
+  VectorStoreSemanticRetriever,
+)
 from agent_kernel.models import MockModelProvider, ModelGateway, OpenAICompatibleProvider
-from agent_kernel.observability import ArtifactInspectionService, CostService, TraceService
+from agent_kernel.observability import ArtifactInspectionService, CostService, MemoryAuditSink, TraceService
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.policy import (
   ApprovalService,
@@ -321,7 +328,8 @@ async def verify_phase3_capability_policy() -> None:
     )
     local_tools = LocalToolExecutor()
     local_tools.register("tool.echo", lambda input: ToolResult(ok=True, output={"echo": input["text"]}))
-    runtime = CapabilityRuntime(registry, PolicyEngine(), local_tools, uow_factory=uow_factory)
+    audit_sink = MemoryAuditSink()
+    runtime = CapabilityRuntime(registry, PolicyEngine(), local_tools, audit_sink=audit_sink, uow_factory=uow_factory)
     outcome = await runtime.call("tool.echo", {"text": "ok"}, ctx=_call_ctx("verify_capability"))
     _assert(outcome.result is not None and outcome.result.output["echo"] == "ok", "local capability failed")
 
@@ -368,6 +376,18 @@ async def verify_phase3_capability_policy() -> None:
     )
     process_outcome = await process_runtime.call("proc.echo", {}, ctx=_call_ctx("verify_process"))
     _assert("process-ok" in process_outcome.result.output["stdout"], "process tool did not execute")
+    process_tools.register(
+      "proc.structured",
+      [
+        sys.executable,
+        "-u",
+        "-c",
+        "import json; print(json.dumps(dict(event='progress', payload=dict(step=1))), flush=True)",
+      ],
+      timeout_seconds=5,
+    )
+    stream_events = [event async for event in process_tools.stream_structured("proc.structured", {})]
+    _assert(any(event.event == "structured" and event.name == "progress" for event in stream_events), "structured process stream failed")
 
     mcp = FakeMCPClient()
     mcp.register_response("server", "tool", ToolResult(ok=True, output={"mcp": "ok"}))
@@ -384,6 +404,9 @@ async def verify_phase3_capability_policy() -> None:
       audit = uow.audit.list_by_run("verify_capability")
     _assert(tool_calls[0].status == "succeeded", "tool call status not persisted")
     _assert(audit, "audit not persisted")
+    sink_decisions = [record.decision for record in audit_sink.records]
+    _assert(sink_decisions[:2] == ["allow", "result"], "audit sink did not emit success records")
+    _assert("require_approval" in sink_decisions, "audit sink did not emit approval record")
   finally:
     conn.close()
 
@@ -418,8 +441,49 @@ async def verify_phase4_memory_context() -> None:
     with UnitOfWork(conn) as uow:
       events = uow.events.list_by_run("verify_context")
     _assert(any(event.event_type == RuntimeEventType.CONTEXT_BUILT for event in events), "context ledger missing")
+
+    vector_memory = MemoryFacade(
+      uow_factory,
+      semantic_retriever=VectorStoreSemanticRetriever(InMemoryVectorStore()),
+    )
+    vector_memory.write_semantic(
+      "scope_vector",
+      {"summary": "Runtime checkpoint replay uses sqlite events", "keywords": ["runtime", "checkpoint", "sqlite"]},
+      importance=0.9,
+    )
+    vector_memory.write_semantic("scope_vector", {"summary": "Unrelated visual polish"}, importance=1.0)
+    vector_results = vector_memory.retrieve_semantic("scope_vector", "sqlite checkpoint replay", limit=1)
+    _assert(vector_results and "vector store" in vector_results[0].rationale, "vector store retrieval failed")
+
+    http_transport = _VerifyHTTPVectorTransport()
+    http_memory = MemoryFacade(
+      uow_factory,
+      semantic_retriever=VectorStoreSemanticRetriever(
+        HTTPVectorStore(
+          HTTPVectorStoreEndpoint(base_url="https://vector.verify"),
+          transport=http_transport.post,
+        )
+      ),
+    )
+    http_item = http_memory.write_semantic("scope_http_vector", {"summary": "HTTP vector checkpoint memory"})
+    http_transport.match_id = http_item.memory_id
+    http_results = http_memory.retrieve_semantic("scope_http_vector", "checkpoint", limit=1)
+    _assert(http_results and http_results[0].memory.memory_id == http_item.memory_id, "HTTP vector retrieval failed")
+    _assert(http_transport.urls == ["https://vector.verify/upsert", "https://vector.verify/query"], "HTTP vector routes wrong")
   finally:
     conn.close()
+
+
+class _VerifyHTTPVectorTransport:
+  def __init__(self) -> None:
+    self.urls: list[str] = []
+    self.match_id = ""
+
+  def post(self, url, payload, endpoint):
+    self.urls.append(url)
+    if url.endswith("/query"):
+      return {"matches": [{"document_id": self.match_id, "score": 0.8}]}
+    return {"ok": True}
 
 
 async def verify_phase5_observability_replay() -> None:
@@ -491,6 +555,61 @@ async def verify_phase6_extensions() -> None:
   grants = ExtensionPermissionMapper().grants_for_manifest(manifest, run_id="verify_extension")
   decision = PolicyEngine(grants=grants).decide(spec, run_id="verify_extension")
   _assert(decision.type == PolicyDecisionType.ALLOW, "extension permission did not map to allow grant")
+
+  with tempfile.TemporaryDirectory() as tmp:
+    module_path = Path(tmp) / "verify_dynamic_ext.py"
+    module_path.write_text(
+      "\n".join(
+        [
+          "def provide_echo(context):",
+          "    def echo(payload):",
+          "        return {'echo': payload['text'], 'capability_id': context.capability_id}",
+          "    return echo",
+        ]
+      ),
+      encoding="utf-8",
+    )
+    sys.path.insert(0, tmp)
+    try:
+      dynamic_manifest = ExtensionManifestLoader().load_dict(
+        {
+          "extension_id": "verify.dynamic",
+          "name": "Verify Dynamic Extension",
+          "version": "0.1.0",
+          "compatible_kernel": ">=0.1.0",
+          "side_effect_level": "none",
+          "contributes": [
+            {
+              "kind": "tool_provider",
+              "name": "echo",
+              "entrypoint": "verify_dynamic_ext:provide_echo",
+              "config_schema": {
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object"},
+              },
+            }
+          ],
+        }
+      )
+      dynamic_capabilities = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      ExtensionRuntime().load_manifest(
+        dynamic_manifest,
+        capability_registry=dynamic_capabilities,
+        local_tools=local_tools,
+        contribution_registry=ContributionRegistry(),
+      )
+      runtime = CapabilityRuntime(dynamic_capabilities, PolicyEngine(), local_tools)
+      outcome = await runtime.call(
+        "verify.dynamic.echo",
+        {"text": "dynamic-ok"},
+        CapabilityCallContext(run_id="verify_dynamic_extension"),
+      )
+    finally:
+      sys.path.remove(tmp)
+      sys.modules.pop("verify_dynamic_ext", None)
+  _assert(outcome.result is not None and outcome.result.output["echo"] == "dynamic-ok", "dynamic extension tool failed")
+  _assert(outcome.result.output["capability_id"] == "verify.dynamic.echo", "dynamic extension context failed")
 
 
 async def verify_phase7_autonomy() -> None:

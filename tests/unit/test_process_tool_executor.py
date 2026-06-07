@@ -61,6 +61,36 @@ class ProcessToolExecutorTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(events[-1].event, "exited")
     self.assertEqual(events[-1].returncode, 0)
 
+  async def test_process_tool_streams_structured_jsonl_events(self) -> None:
+    executor = ProcessToolExecutor()
+    executor.register(
+      "proc.structured",
+      [
+        sys.executable,
+        "-u",
+        "-c",
+        (
+          "import json\n"
+          "print(json.dumps(dict(event='progress', payload=dict(step=1))), flush=True)\n"
+          "print('plain stdout', flush=True)\n"
+          "print(json.dumps(dict(type='artifact', payload=dict(artifact_id='art_1'))), flush=True)\n"
+        ),
+      ],
+      timeout_seconds=2,
+    )
+
+    events = [event async for event in executor.stream_structured("proc.structured", {}, tool_call_id="tool_jsonl")]
+
+    structured = [event for event in events if event.event == "structured"]
+    stdout = [event for event in events if event.event == "stdout"]
+    self.assertEqual(structured[0].name, "progress")
+    self.assertEqual(structured[0].payload, {"step": 1})
+    self.assertEqual(structured[0].sequence, 1)
+    self.assertEqual(structured[1].name, "artifact")
+    self.assertEqual(structured[1].payload, {"artifact_id": "art_1"})
+    self.assertEqual(stdout[0].data, "plain stdout\n")
+    self.assertEqual(events[-1].event, "exited")
+
   async def test_process_tool_stream_timeout_terminates_process(self) -> None:
     executor = ProcessToolExecutor()
     executor.register(

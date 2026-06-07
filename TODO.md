@@ -79,6 +79,7 @@
 - [x] 实现 Process adapter timeout 与 tool_call 状态。
 - [x] 实现 Process adapter 外部 cancel/kill 控制。
 - [x] 实现 CLI/Process adapter stdout/stderr stream 基础 async iterator。
+- [x] 实现 Process adapter 结构化 JSONL stream 基础协议，将 stdout JSONL frame 解析为 structured event。
 - [x] 实现 Process adapter 可插拔隔离策略和 POSIX process group cancel/kill 基础接口。
 - [x] 实现 MCP adapter 接口、fake、stdio JSON-RPC client 和 MCP tool executor。
 - [x] 实现 Workbench 协议。
@@ -107,6 +108,7 @@
 - [x] 实现 episodic memory。
 - [x] 实现 artifact memory。
 - [x] 实现接口化 sparse semantic retrieval。
+- [x] 实现接口化 vector-store backed semantic retrieval，包含 VectorStore 协议、InMemoryVectorStore、HTTPVectorStore 和 VectorStoreSemanticRetriever。
 - [x] 实现结构化 fact conflict detection。
 - [x] 实现 retrieval pack 基础对象和 context.built ledger。
 - [x] 实现 context candidates、budget partition。
@@ -123,7 +125,7 @@
 
 - [x] 实现 trace timeline。
 - [x] 实现 cost ledger。
-- [ ] 实现 audit sink。
+- [x] 实现接口化 audit sink，支持 MemoryAuditSink 和 CompositeAuditSink，并接入 CapabilityRuntime 审计路径。
 - [x] 实现 exact replay。
 - [x] 实现 partial/recovery replay 草案。
 - [x] 实现 eval suite 基础接口。
@@ -138,9 +140,10 @@
 - [x] 实现 ExtensionManifest。
 - [x] 实现 ManifestLoader。
 - [x] 实现 ContributionRegistry。
+- [x] 实现 ExtensionRuntime 动态 import/entrypoint 执行基础能力，支持 tool provider 通过 callable 或 register(context) 对象注册到 LocalToolExecutor。
 - [x] 实现 permission declaration 到 PolicyEngine 的接入。
 - [x] 编写测试: 插件注册工具 provider、权限声明生效。
-- [x] 验收: 新能力可通过 manifest 注册，不修改内核代码。
+- [x] 验收: 新能力可通过 manifest 动态注册并执行，不修改内核代码。
 
 ### Phase 7 - Autonomous Exploration 与 Skill Evolution
 
@@ -406,7 +409,7 @@
 - [x] CapabilityRuntime、PolicyEngine、ApprovalService、GrantStore、AuditStore、Local/Process tool adapter 已具备基础闭环。
 - [x] Working/artifact memory、ContextManager、context ledger、sensitivity filtering、tool visibility pruning、长文本 artifact ref 已实现。
 - [x] Trace timeline、cost ledger、artifact inspect、exact/partial/recovery replay、eval assertions 已实现基础能力。
-- [x] Extension manifest loader、ContributionRegistry、permission-to-grant mapping 已实现。
+- [x] Extension manifest loader、ContributionRegistry、permission-to-grant mapping 和基础动态 entrypoint runtime 已实现。
 - [x] Autonomous exploration、trace distillation、draft workflow template、SkillService、PlanPatchValidator、skill evolution record 已有最小闭环。
 - [x] Interaction channel、message、round-robin group chat、agent pool、taskboard、observer finding 已有基础服务。
 - [x] HumanInterventionService、MCP stdio/fake、Workbench fake、AgentConnector fake、host DTO 已有接口级闭环。
@@ -417,7 +420,7 @@
 
 - [ ] HumanIntervention 已支持 CLI/HTTP、事件、working memory、`pause_and_resume` interrupt 和 `cancel_current_step_and_resume` 当前 step 标记中止；仍缺更细的 context priority partition 和执行中线程级抢占。
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
-- [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator、可插拔隔离策略和 POSIX process group cancel/kill；仍缺结构化终端协议、跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
+- [ ] Process adapter 已实现 stdout/stderr stream、结构化 JSONL stream、可插拔隔离策略和 POSIX process group cancel/kill；仍缺跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
 - [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；具体 UIA provider、产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
@@ -425,10 +428,10 @@
 - [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint；仍缺上下文纠偏和当前 step 中止。
 - [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService、deterministic failure reflector 和 deterministic tool/workflow composition；仍缺条件分支组合、组合质量优化和 learned composition policy。
 - [x] Skill 与 Workflow 的互调规则已有基础服务、Agent 自动选择 skill、compiled workflow 注册/解析和 workflow patch 应用闭环。
-- [ ] Memory 已有 episodic memory、deterministic retrieval、高重要度 episode 到 semantic 的基础 consolidation、sparse semantic retrieval 和结构化 fact conflict detection；仍缺外部 vector store-backed retrieval、后台长期 consolidation 和复杂事实归并策略。
+- [ ] Memory 已有 episodic memory、deterministic retrieval、高重要度 episode 到 semantic 的基础 consolidation、sparse/vector-store semantic retrieval 接口、通用 HTTP vector store connector 和结构化 fact conflict detection；仍缺厂商原生 vector DB connector、后台长期 consolidation 和复杂事实归并策略。
 - [ ] Recovery 已有 stale step scanner、event/checkpoint/artifact consistency check 和保守 metadata repair；仍缺复杂 artifact/event repair、不可恢复对象 repair workflow 和真实 worker 接管闭环。
 - [ ] HTTP/event stream/workspace DTO 已实现；HTTP host 已支持 task create、run inspect、event NDJSON/SSE stream、artifact inspect、run/tool-call 控制、审批和人工干预；WebSocket event stream 和完整 Web/Desktop 工作台仍未实现。
-- [ ] Extension SDK 目前只注册 metadata，不动态 import/执行 extension entrypoint；还不是完整插件运行时。
+- [ ] Extension SDK 已支持动态 import/执行 tool provider entrypoint 并注册 LocalToolExecutor；仍缺 sandbox/plugin-process 隔离、动态 workflow/model/context/policy provider 执行和更完整插件生命周期。
 
 ### 下一阶段建议优先级
 
@@ -445,7 +448,7 @@
 - [ ] P1: 补 Exploration 高级动态组合能力；多策略探索、PlanPatchValidator、SkillService、deterministic reflector 和线性 WorkflowComposer 已完成基础版。
 - [x] P2: 实现 HTTP route DTO 和 event stream DTO，为 Web/Desktop task workspace 做数据面准备。
 - [x] P2: 补 episodic memory 和 deterministic retrieval/consolidation 接口。
-- [ ] P2: 补外部 vector store-backed retrieval、background long-term consolidation、复杂事实归并策略；sparse semantic retrieval 和结构化 fact conflict detection 已完成基础版。
+- [ ] P2: 补厂商原生 vector DB connector、background long-term consolidation、复杂事实归并策略；sparse semantic retrieval、VectorStore retriever 接口、HTTPVectorStore 和结构化 fact conflict detection 已完成基础版。
 
 ## 进度日志
 
@@ -604,6 +607,7 @@
 
 - 新增 `SemanticRetriever`、`SemanticQuery`、`SemanticSearchResult` 协议/DTO。
 - 新增 `SparseSemanticRetriever`，用标准库稀疏向量余弦相似度提供可运行 semantic retrieval 基础版。
+- 新增 `VectorStore` 协议、`InMemoryVectorStore`、`HTTPVectorStore` 和 `VectorStoreSemanticRetriever`，让 semantic retrieval 可切换到外部 vector DB adapter。
 - 新增 `FactConflictDetector`、`FactStatement`、`FactConflict` 和 `StructuredFactConflictDetector`。
 - `MemoryFacade` 新增 `write_semantic`、`retrieve_semantic`、`detect_fact_conflicts`，支持写入 semantic fact 时附加 conflict metadata。
 - 新增测试覆盖 semantic retrieval 排序、结构化事实冲突检测和 conflict metadata 写回。
@@ -634,6 +638,7 @@
 - 新增 `ExtensionManifestLoader`，支持 dict/json manifest 加载。
 - 新增 `ContributionRegistry`，保存 manifest contributions。
 - ContributionRegistry 支持将 `tool_provider` contribution 注册为 `CapabilitySpec` 元数据。
+- 新增 `ExtensionRuntime`，支持通过 importlib 动态加载 `module:attribute` entrypoint，并让 callable 或 `register(context)` 对象注册 tool provider。
 - 新增 `ExtensionPermissionMapper`，将 `capability:*` permission 映射为 run-scoped `CapabilityGrant`。
 - 新增测试覆盖 manifest dict/json 加载、tool capability metadata 注册、extension permission grant 接入 PolicyEngine。
 - 验证命令: `python3 -m unittest discover -s tests`，结果 73 passed。

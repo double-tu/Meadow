@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import json
 import math
 import re
 from typing import Any, Protocol
+from urllib import error as url_error
+from urllib import request as url_request
 
 from agent_kernel.domain.memory import MemoryItem
 
@@ -33,6 +36,48 @@ class SemanticSearchResult:
 class SemanticRetriever(Protocol):
   def retrieve(self, query: SemanticQuery, memories: list[MemoryItem]) -> list[SemanticSearchResult]:
     """Rank candidate memories for a semantic query."""
+
+
+@dataclass(slots=True)
+class VectorStoreDocument:
+  document_id: str
+  scope: str
+  text: str
+  metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class VectorStoreMatch:
+  document_id: str
+  score: float
+  metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class VectorStore(Protocol):
+  def upsert(self, documents: list[VectorStoreDocument]) -> None:
+    ...
+
+  def query(
+    self,
+    scope: str,
+    text: str,
+    limit: int,
+    min_score: float = 0.0,
+    filters: dict[str, Any] | None = None,
+  ) -> list[VectorStoreMatch]:
+    ...
+
+
+@dataclass(slots=True)
+class HTTPVectorStoreEndpoint:
+  base_url: str
+  upsert_path: str = "/upsert"
+  query_path: str = "/query"
+  timeout_seconds: float = 30.0
+  headers: dict[str, str] = field(default_factory=dict)
+
+  def url(self, path: str) -> str:
+    return f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
 @dataclass(slots=True)
@@ -95,6 +140,181 @@ class SparseSemanticRetriever:
       reverse=True,
     )
     return results[: query.limit]
+
+
+class InMemoryVectorStore:
+  """Deterministic vector-store adapter for tests and local fallback."""
+
+  def __init__(self) -> None:
+    self._documents: dict[str, VectorStoreDocument] = {}
+
+  def upsert(self, documents: list[VectorStoreDocument]) -> None:
+    for document in documents:
+      self._documents[document.document_id] = document
+
+  def query(
+    self,
+    scope: str,
+    text: str,
+    limit: int,
+    min_score: float = 0.0,
+    filters: dict[str, Any] | None = None,
+  ) -> list[VectorStoreMatch]:
+    query_vector = _text_vector(text)
+    matches: list[VectorStoreMatch] = []
+    filters = filters or {}
+    for document in self._documents.values():
+      if document.scope != scope:
+        continue
+      if any(document.metadata.get(key) != value for key, value in filters.items()):
+        continue
+      score = _cosine_similarity(query_vector, _text_vector(document.text))
+      if score < min_score:
+        continue
+      matches.append(VectorStoreMatch(document_id=document.document_id, score=score, metadata=dict(document.metadata)))
+    matches.sort(key=lambda match: (match.score, match.document_id), reverse=True)
+    return matches[:limit]
+
+
+class HTTPVectorStore:
+  """HTTP JSON adapter for remote vector-store services."""
+
+  def __init__(
+    self,
+    endpoint: HTTPVectorStoreEndpoint | str,
+    transport: Any | None = None,
+  ) -> None:
+    self._endpoint = endpoint if isinstance(endpoint, HTTPVectorStoreEndpoint) else HTTPVectorStoreEndpoint(endpoint)
+    self._transport = transport or self._post_json
+
+  def upsert(self, documents: list[VectorStoreDocument]) -> None:
+    payload = {
+      "documents": [
+        {
+          "document_id": document.document_id,
+          "scope": document.scope,
+          "text": document.text,
+          "metadata": document.metadata,
+        }
+        for document in documents
+      ]
+    }
+    self._transport(self._endpoint.url(self._endpoint.upsert_path), payload, self._endpoint)
+
+  def query(
+    self,
+    scope: str,
+    text: str,
+    limit: int,
+    min_score: float = 0.0,
+    filters: dict[str, Any] | None = None,
+  ) -> list[VectorStoreMatch]:
+    payload = {
+      "scope": scope,
+      "text": text,
+      "limit": limit,
+      "min_score": min_score,
+      "filters": filters or {},
+    }
+    response = self._transport(self._endpoint.url(self._endpoint.query_path), payload, self._endpoint)
+    return [self._match_from_value(value) for value in self._extract_matches(response)]
+
+  @staticmethod
+  def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    endpoint: HTTPVectorStoreEndpoint,
+  ) -> dict[str, Any] | list[Any]:
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    request = url_request.Request(
+      url,
+      data=body,
+      headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        **endpoint.headers,
+      },
+      method="POST",
+    )
+    try:
+      with url_request.urlopen(request, timeout=endpoint.timeout_seconds) as response:
+        raw = response.read().decode("utf-8")
+    except url_error.HTTPError as exc:
+      raise RuntimeError(f"Vector store HTTP error {exc.code}: {exc.reason}") from exc
+    except url_error.URLError as exc:
+      raise RuntimeError(f"Vector store connection failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+      raise RuntimeError("Vector store request timed out.") from exc
+    try:
+      parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+      raise RuntimeError("Vector store returned invalid JSON.") from exc
+    if not isinstance(parsed, (dict, list)):
+      raise RuntimeError("Vector store response must be a JSON object or array.")
+    return parsed
+
+  @staticmethod
+  def _extract_matches(response: dict[str, Any] | list[Any]) -> list[Any]:
+    if isinstance(response, list):
+      return response
+    for key in ("matches", "results", "items", "documents"):
+      value = response.get(key)
+      if isinstance(value, list):
+        return value
+    return []
+
+  @staticmethod
+  def _match_from_value(value: Any) -> VectorStoreMatch:
+    if not isinstance(value, dict):
+      raise RuntimeError("Vector store match must be a JSON object.")
+    document_id = value.get("document_id") or value.get("id") or value.get("memory_id")
+    if not isinstance(document_id, str):
+      raise RuntimeError("Vector store match requires document_id.")
+    score = value.get("score", 0.0)
+    metadata = value.get("metadata", {})
+    return VectorStoreMatch(
+      document_id=document_id,
+      score=float(score),
+      metadata=metadata if isinstance(metadata, dict) else {},
+    )
+
+
+class VectorStoreSemanticRetriever:
+  """Semantic retriever backed by an injectable vector store.
+
+  The retriever indexes the provided candidate memories before querying the
+  store, so callers can keep using the existing SemanticRetriever interface.
+  Production hosts can replace InMemoryVectorStore with a remote vector DB
+  adapter without changing MemoryFacade or context code.
+  """
+
+  def __init__(self, vector_store: VectorStore) -> None:
+    self._vector_store = vector_store
+
+  def retrieve(self, query: SemanticQuery, memories: list[MemoryItem]) -> list[SemanticSearchResult]:
+    candidates = [memory for memory in memories if memory.memory_type in query.memory_types]
+    self._vector_store.upsert([_memory_document(memory) for memory in candidates])
+    by_id = {memory.memory_id: memory for memory in candidates}
+    matches = self._vector_store.query(
+      scope=query.scope,
+      text=query.text,
+      limit=query.limit,
+      min_score=query.min_score,
+      filters={"memory_type": next(iter(query.memory_types))} if len(query.memory_types) == 1 else None,
+    )
+    results: list[SemanticSearchResult] = []
+    for match in matches:
+      memory = by_id.get(match.document_id)
+      if memory is None:
+        continue
+      results.append(
+        SemanticSearchResult(
+          memory=memory,
+          score=match.score,
+          rationale=f"Matched by vector store document {match.document_id}.",
+        )
+      )
+    return results
 
 
 class StructuredFactConflictDetector:
@@ -166,6 +386,20 @@ def _memory_vector(memory: MemoryItem) -> Counter[str]:
   if isinstance(keywords, list):
     values.extend(str(keyword) for keyword in keywords)
   return _text_vector(" ".join(values))
+
+
+def _memory_document(memory: MemoryItem) -> VectorStoreDocument:
+  return VectorStoreDocument(
+    document_id=memory.memory_id,
+    scope=memory.scope,
+    text=_flatten_text(memory.content),
+    metadata={
+      "memory_id": memory.memory_id,
+      "memory_type": memory.memory_type,
+      "importance": memory.importance,
+      "created_by": memory.created_by,
+    },
+  )
 
 
 def _text_vector(text: str) -> Counter[str]:
