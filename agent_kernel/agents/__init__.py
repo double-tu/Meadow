@@ -14,6 +14,12 @@ from agent_kernel.agents.connectors import (
   StdioAgentCommand,
   StructuredStdioAgentConnector,
 )
+from agent_kernel.agents.conversation_runner import (
+  ContinuousAgentRunner,
+  ContinuousRunnerConfig,
+  ContinuousRunnerResult,
+  ContinuousToolCallRecord,
+)
 from agent_kernel.agents.loop import AgentLoop, AgentTurnResult
 from agent_kernel.agents.mailbox import build_mailbox_message
 from agent_kernel.agents.group_chat import (
@@ -58,6 +64,10 @@ __all__ = [
   "AgentTurnResult",
   "AgentPoolScheduler",
   "AgentSessionService",
+  "ContinuousAgentRunner",
+  "ContinuousRunnerConfig",
+  "ContinuousRunnerResult",
+  "ContinuousToolCallRecord",
   "ConnectorMessage",
   "ConnectorRoute",
   "ConnectorTurn",

@@ -35,6 +35,7 @@ class RuntimeEventType(StrEnum):
   TOOL_CALL_FAILED = "tool.call.failed"
   MEMORY_READ = "memory.read"
   MEMORY_WRITE = "memory.write"
+  MEMORY_EVOLUTION_CANDIDATE = "memory.evolution_candidate"
   CONTEXT_BUILT = "context.built"
   APPROVAL_REQUESTED = "approval.requested"
   APPROVAL_RESOLVED = "approval.resolved"
