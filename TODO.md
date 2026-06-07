@@ -102,7 +102,7 @@
 - [x] 实现 Workbench 协议。
 - [x] 实现通用 HTTP Workbench adapter，并接入 CapabilityRuntime policy/audit/tool_call 路径。
 - [x] 实现浏览器/桌面/移动控制 ControlWorkbench 协议与 fake backend，并接入 CapabilityRuntime policy/audit/tool_call 路径。
-- [x] 实现 `/link`-style HTTP browser backend，支持 session list、execute_js、navigate，并保留参考项目兼容别名。
+- [x] 实现 `/link`-style HTTP browser backend，支持 session list、execute_js、existing-tab navigate、无 target 时通过扩展 `tabs.create` 打开新页、page summary inspect、`tabs_only` 扫描，并保留参考项目兼容别名。
 - [x] 实现 ADB mobile backend，支持 devices、uiautomator dump 解析、tap、type_text、keyevent、screenshot。
 - [x] 实现 Win32 desktop backend，支持窗口枚举、截图、物理坐标点击、快捷键、剪贴板粘贴输入。
 - [x] 实现 DesktopUIDetector 协议与 UIA-style desktop tree detector，支持 dump_ui 节点归一化。
@@ -805,6 +805,16 @@
 - 补 HumanIntervention `cancel_current_step_and_resume`: 通过 `CurrentStepInterrupter` 协议把当前 RUNNING step 标记为 interrupted，run 保持可继续执行。
 - 补测试覆盖 intervene、skill service、plan patch、MCP stdio/fake、Workbench fake、connector、host DTO。
 - 当前浏览器控制已有 `/link`-style HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter、UIA-style tree detector 和 UIAutomation provider detector，视觉检测已有 driver 与 HTTP service adapter；生产级 CV 模型打包/部署仍待补。
+
+### 2026-06-08 00:00:00 CST
+
+- 复核 GenericAgent 浏览器链路: `TMWebDriver.py`、`simphtml.py`、`assets/tmwd_cdp_bridge/background.js`、`ga.py`，确认其核心能力是扩展协议下的 `chrome.tabs.query/create/switch`、`web_execute_js` 和可选 `tabs_only` 的 `web_scan`。
+- `BrowserLinkHTTPBackend.navigate` 在未指定 `target_id` 时改为优先走扩展 `tabs.create` 打开新标签页；指定目标页时仍使用 JS 导航，避免误改任意已打开标签。
+- `browser_scan`/`inspect` 增加页面摘要输出，返回 targets 之外的 `title`、`url`、`feed_titles`、`visible_cards`、`text`，用于让日常 Agent 在浏览器任务中获得可展示的页面内容。
+- `browser_scan` 增加 `tabs_only=true`，用于只枚举标签页，不拉取当前页大文本。
+- `CapabilityRuntime` 将 inspect payload 透传到 `ControlWorkbench.inspect_browser`，`AtomicCapabilityProvider` 的 `browser_scan` schema 同步暴露 `tabs_only`。
+- 已通过真实 `/control/commands` inspect 小红书页面摘要验收，并通过 `python3 -m unittest discover -s tests` 与 `python3 scripts/verify_realized_todo.py --no-real-llm`。
+- 剩余差距: 尚未完全复刻 GenericAgent `simphtml` 的可见 DOM 简化粒度，桌面端浏览器结果可视化、截图/交互 artifact handoff 和更细的页面元素选择仍待补。
 
 ### 2026-06-07 02:18:00 CST
 
