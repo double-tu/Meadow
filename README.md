@@ -9,7 +9,7 @@ Implemented MVP areas:
 - Durable runtime with SQLite event log, state, checkpoint, retry, dead letter, budget, circuit breaker, idempotency basics, stale-step recovery scanner, recovery consistency checks, and conservative repair.
 - Workflow graph execution with function, tool, and agent node executors.
 - Agent orchestration with sessions, mailbox, child agent spawn/await/cancel, skill-aware turns, and agent-as-workflow-node.
-- Capability runtime with policy checks, approval flow, audit records, standard `ToolResult` envelopes, local/process tools, process stdout/stderr and structured JSONL streaming, timeout, injectable process isolation strategy, POSIX process group control, and tool-call cancel/kill control.
+- Capability runtime with policy checks, grant filesystem/network scope checks, approval flow, audit records, standard `ToolResult` envelopes, local/process tools, governed file/HTTP side-effect adapters, process stdout/stderr and structured JSONL streaming, timeout, injectable process isolation strategy, POSIX process group control, and tool-call cancel/kill control.
 - Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, browser-link HTTP backend, Win32 desktop backend, UIA-style/UIAutomation desktop tree detectors, driver/HTTP vision detector adapters, and ADB mobile backend routed through capability policy/audit.
 - Memory/context with working/artifact memory, context budget, sensitivity filtering, tool visibility pruning, large-memory artifact refs, and context ledger.
 - Episodic memory with deterministic summarizer/retriever interfaces, conservative semantic consolidation, sparse/vector-store semantic retrieval interfaces, and structured fact conflict detection.
@@ -91,7 +91,7 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 
 - Runtime facts are persisted through event/state/checkpoint stores.
 - Large payloads should be stored as artifacts and referenced from events.
-- All side-effecting capabilities go through `CapabilityRuntime` and `PolicyEngine`.
+- Side-effecting capabilities should be exposed as capabilities and executed through `CapabilityRuntime` and `PolicyEngine`; governed file/HTTP adapters and process tools prove this path for file writes, network access, and command execution.
 - `ReplayService` does not re-execute model/tool calls.
 - Current CLI is a minimal host, not the final Web/Desktop workspace.
 - Browser control can use a `/link`-style HTTP backend, desktop control can use the optional Win32 desktop backend plus UIA-style/UIAutomation/vision detectors, and mobile control can use the ADB backend plus optional vision detector.

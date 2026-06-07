@@ -99,7 +99,9 @@
 - [x] 实现审批通过后 resume 当前 tool node。
 - [x] 实现进程工具运行时 cancel/kill 基础流程。
 - [x] 编写测试: grant 拒绝、approval interrupt、tool node success、approval resume、approval reject、expired grant、audit。
-- [ ] 验收: 写文件、执行命令、网络访问都经过 policy check 和 audit。
+- [x] 实现文件/网络副作用工具 adapter，基于 `FileWorkspace`、`HTTPClient` 协议注册到 LocalToolExecutor，并通过 CapabilityRuntime 统一执行。
+- [x] 实现 grant filesystem/network scope 校验，拒绝越权路径和越权 host。
+- [x] 验收: 写文件、执行命令、网络访问都经过 policy check、grant scope、audit 和 tool_call 记录。
 
 ### Phase 4 - Memory 与 Context
 
@@ -424,7 +426,7 @@
 - [ ] HumanIntervention 已支持 CLI/HTTP、事件、working memory、`pause_and_resume` interrupt 和 `cancel_current_step_and_resume` 当前 step 标记中止；仍缺更细的 context priority partition 和执行中线程级抢占。
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream、结构化 JSONL stream、可插拔隔离策略和 POSIX process group cancel/kill；仍缺跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
-- [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
+- [ ] Policy/Audit 已证明文件写入、命令执行、网络访问可通过 CapabilityRuntime 统一经过 policy check、grant scope、audit、tool_call 和 idempotency；仍缺对非 capability 旁路副作用的全局强制拦截/沙箱化。
 - [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style/UIAutomation desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
 - [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行、冲突 rollback 和 priority merge queue；仍缺冲突自动修复 workflow 和更完整 review policy。
@@ -775,6 +777,14 @@
 - 补 HumanIntervention `cancel_current_step_and_resume`: 通过 `CurrentStepInterrupter` 协议把当前 RUNNING step 标记为 interrupted，run 保持可继续执行。
 - 补测试覆盖 intervene、skill service、plan patch、MCP stdio/fake、Workbench fake、connector、host DTO。
 - 当前浏览器控制已有 `/link`-style HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter、UIA-style tree detector 和 UIAutomation provider detector，视觉检测已有 driver 与 HTTP service adapter；生产级 CV 模型打包/部署仍待补。
+
+### 2026-06-07 02:18:00 CST
+
+- 新增 `SideEffectToolProvider`，以中性、接口化方式将文件读写和 HTTP 请求注册为 local tool，不改 `CapabilityRuntime` 分发结构。
+- 新增 `FileWorkspace`、`LocalFileWorkspace`、`HTTPClient`、`UrllibHTTPClient` 协议/实现，后续可替换为沙箱 FS、远程 worker 或企业 HTTP proxy。
+- `PolicyEngine` 新增 `CapabilityScopeResolver` 和默认 resolver，支持基于 capability input 校验 grant 的 `filesystem_scope` 与 `network_scope`。
+- 新增测试覆盖文件写入、网络访问、命令执行均经过 policy、grant scope、audit、tool_call 和标准 `ToolResult` envelope；越权路径/host 在 adapter 执行前被拒绝。
+- 更新 `scripts/verify_realized_todo.py` Phase 3 验收，真实写入临时文件、执行本地命令、通过 fake HTTP client 验证网络治理路径。
 
 ## 风险与待决策
 

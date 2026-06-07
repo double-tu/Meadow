@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from pathlib import Path
 import sys
 import tempfile
@@ -47,8 +48,11 @@ from agent_kernel.capabilities import CapabilityCallContext, CapabilityRegistry,
 from agent_kernel.capabilities.adapters import (
   FakeMCPClient,
   FakeWorkbenchClient,
+  HTTPResponse,
+  LocalFileWorkspace,
   LocalToolExecutor,
   ProcessToolExecutor,
+  SideEffectToolProvider,
   UIAutomationDesktopDetector,
   WorkbenchCommand,
   WorkbenchResult,
@@ -81,7 +85,8 @@ from agent_kernel.domain import (
   WorkflowSpec,
 )
 from agent_kernel.domain.agent import AgentTaskResult
-from agent_kernel.domain.capability import SideEffectLevel
+from agent_kernel.domain.capability import CapabilityGrant, SideEffectLevel
+from agent_kernel.domain.base import utc_now
 from agent_kernel.evaluation import ReplayService
 from agent_kernel.evaluation.suites import ReplayEvalSuite
 from agent_kernel.extensions import (
@@ -379,6 +384,11 @@ async def verify_phase3_capability_policy() -> None:
     )
     process_outcome = await process_runtime.call("proc.echo", {}, ctx=_call_ctx("verify_process"))
     _assert("process-ok" in process_outcome.result.output["stdout"], "process tool did not execute")
+    with UnitOfWork(conn) as uow:
+      command_tool_calls = uow.tool_calls.list_by_run("verify_process")
+      command_audit = uow.audit.list_by_run("verify_process")
+    _assert(command_tool_calls[0].status == "succeeded", "command execution did not persist tool call")
+    _assert([record.decision for record in command_audit] == ["allow", "result"], "command execution audit missing")
     process_tools.register(
       "proc.structured",
       [
@@ -404,6 +414,89 @@ async def verify_phase3_capability_policy() -> None:
     uia_nodes = UIAutomationDesktopDetector(_VerifyUIAutomation()).dump(101)
     _assert(uia_nodes[0]["text"] == "Verify Window", "UIAutomation desktop detector failed")
     _assert(uia_nodes[1]["automation_id"] == "save", "UIAutomation child node missing")
+
+    with tempfile.TemporaryDirectory() as tmp:
+      side_effect_registry = CapabilityRegistry()
+      side_effect_registry.register(
+        CapabilitySpec(
+          capability_id="fs.write_text",
+          name="write text",
+          kind="tool",
+          input_schema={},
+          output_schema={},
+          side_effect_level=SideEffectLevel.WRITE,
+          required_grant="fs.write",
+        )
+      )
+      side_effect_registry.register(
+        CapabilitySpec(
+          capability_id="net.http_request",
+          name="http request",
+          kind="tool",
+          input_schema={},
+          output_schema={},
+          side_effect_level=SideEffectLevel.NETWORK,
+          required_grant="net.http",
+        )
+      )
+      side_effect_tools = LocalToolExecutor()
+      fake_http = _VerifyHTTPClient()
+      SideEffectToolProvider(
+        file_workspace=LocalFileWorkspace([tmp]),
+        http_client=fake_http,
+      ).register(side_effect_tools)
+      side_effect_grants = [
+        CapabilityGrant(
+          grant_id="verify_fs_grant",
+          capability_id="fs.write_text",
+          run_id="verify_fs_write",
+          expires_at=utc_now() + timedelta(minutes=5),
+          filesystem_scope=[tmp],
+        ),
+        CapabilityGrant(
+          grant_id="verify_net_grant",
+          capability_id="net.http_request",
+          run_id="verify_net",
+          expires_at=utc_now() + timedelta(minutes=5),
+          network_scope=["api.example.test"],
+        ),
+      ]
+      side_effect_runtime = CapabilityRuntime(
+        side_effect_registry,
+        PolicyEngine(grants=side_effect_grants),
+        side_effect_tools,
+        uow_factory=uow_factory,
+      )
+      fs_path = str(Path(tmp) / "verify.txt")
+      fs_outcome = await side_effect_runtime.call(
+        "fs.write_text",
+        {"path": fs_path, "content": "governed"},
+        ctx=_call_ctx("verify_fs_write"),
+      )
+      net_outcome = await side_effect_runtime.call(
+        "net.http_request",
+        {"url": "https://api.example.test/status", "method": "GET"},
+        ctx=_call_ctx("verify_net"),
+      )
+      net_denied = await side_effect_runtime.call(
+        "net.http_request",
+        {"url": "https://outside.example.test/status", "method": "GET"},
+        ctx=_call_ctx("verify_net"),
+      )
+      with UnitOfWork(conn) as uow:
+        fs_calls = uow.tool_calls.list_by_run("verify_fs_write")
+        fs_audit = uow.audit.list_by_run("verify_fs_write")
+        net_calls = uow.tool_calls.list_by_run("verify_net")
+        net_audit = uow.audit.list_by_run("verify_net")
+      _assert(fs_outcome.result is not None and fs_outcome.result.ok, "file write side-effect tool failed")
+      _assert(Path(fs_path).read_text(encoding="utf-8") == "governed", "file write did not touch real file")
+      _assert(fs_calls[0].status == "succeeded", "file write did not persist tool call")
+      _assert([record.decision for record in fs_audit] == ["allow", "result"], "file write audit missing")
+      _assert(net_outcome.result is not None and net_outcome.result.output["body"] == "ok", "network tool failed")
+      _assert(net_calls[0].status == "succeeded", "network tool did not persist tool call")
+      _assert(net_audit[0].decision == "allow", "network audit missing")
+      _assert(net_denied.result is not None and not net_denied.result.ok, "out-of-scope network call was not denied")
+      _assert(len(fake_http.requests) == 1, "denied network call reached HTTP client")
 
     with UnitOfWork(conn) as uow:
       tool_calls = uow.tool_calls.list_by_run("verify_process")
@@ -881,6 +974,23 @@ async def verify_phase9_cli_and_llm(config_path: Path | None, real_config: LLMCo
       conn.close()
     _assert(llm_payload["ok"], "CLI real llm-smoke failed")
     _assert(llm_payload["model"] == real_config.model, "CLI real llm-smoke used wrong model")
+
+
+class _VerifyHTTPClient:
+  def __init__(self) -> None:
+    self.requests: list[tuple[str, str]] = []
+
+  def request(
+    self,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    body: str | None = None,
+    timeout_seconds: float | None = None,
+  ) -> HTTPResponse:
+    self.requests.append((method, url))
+    return HTTPResponse(status=200, headers={"content-type": "text/plain"}, body="ok", url=url)
 
 
 async def run_checks(config_path: Path | None, include_real_llm: bool) -> None:

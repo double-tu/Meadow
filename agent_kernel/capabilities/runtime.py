@@ -75,6 +75,7 @@ class CapabilityRuntime:
       run_id=ctx.run_id,
       agent_id=ctx.agent_id,
       task_id=ctx.task_id,
+      input=input,
     )
     self._write_audit(
       ctx=ctx,
