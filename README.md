@@ -10,13 +10,13 @@ Implemented MVP areas:
 - Workflow graph execution with function, tool, and agent node executors.
 - Agent orchestration with sessions, mailbox, child agent spawn/await/cancel, skill-aware turns, and agent-as-workflow-node.
 - Capability runtime with policy checks, approval flow, audit records, standard `ToolResult` envelopes, local/process tools, process stdout/stderr and structured JSONL streaming, timeout, injectable process isolation strategy, POSIX process group control, and tool-call cancel/kill control.
-- Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, browser-link HTTP backend, Win32 desktop backend, UIA-style desktop tree detector, driver/HTTP vision detector adapters, and ADB mobile backend routed through capability policy/audit.
+- Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, browser-link HTTP backend, Win32 desktop backend, UIA-style/UIAutomation desktop tree detectors, driver/HTTP vision detector adapters, and ADB mobile backend routed through capability policy/audit.
 - Memory/context with working/artifact memory, context budget, sensitivity filtering, tool visibility pruning, large-memory artifact refs, and context ledger.
 - Episodic memory with deterministic summarizer/retriever interfaces, conservative semantic consolidation, sparse/vector-store semantic retrieval interfaces, and structured fact conflict detection.
 - Observability/replay with timeline, artifact inspect, cost ledger, audit sinks, exact/partial/recovery replay, and eval assertions.
 - Extension manifest loader, contribution registry, permission-to-grant mapping, and dynamic importlib entrypoint runtime for registering tool providers.
 - Autonomous exploration MVP with composable multi-strategy planning, dynamic tool/workflow composition, attempts, verification, failure reflection, trace distillation, draft workflow templates, and skill evolution records.
-- Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings with runtime pause control, connector routing, and channel/cross-channel decision artifacts.
+- Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings with runtime pause/context correction, connector routing, and channel/cross-channel decision artifacts.
 - Workspace isolation interfaces with fake backend, Git worktree backend, and priority merge queue for isolated patch review/merge workflows.
 - Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
 - Human intervention with event append, working-memory steering, CLI/HTTP `intervene`, pause-and-resume, and current-step interruption metadata.
@@ -94,7 +94,7 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - All side-effecting capabilities go through `CapabilityRuntime` and `PolicyEngine`.
 - `ReplayService` does not re-execute model/tool calls.
 - Current CLI is a minimal host, not the final Web/Desktop workspace.
-- Browser control can use a `/link`-style HTTP backend, desktop control can use the optional Win32 desktop backend plus UIA-style/vision detectors, and mobile control can use the ADB backend plus optional vision detector.
+- Browser control can use a `/link`-style HTTP backend, desktop control can use the optional Win32 desktop backend plus UIA-style/UIAutomation/vision detectors, and mobile control can use the ADB backend plus optional vision detector.
 
 ## Known MVP Gaps
 
@@ -102,7 +102,7 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - Tool-call cancel/kill and process stream control only operate inside the current runtime process; after restart, host commands persist control requests but cannot signal or reattach to the original process group.
 - Product CLI shim profiles for Codex/Claude/Gemini exist and run through a generic JSONL subprocess adapter; deeper product-native protocol adapters remain future work.
 - Handoff has a persistent service and channel routing; product CLI sessions can be connected through the generic JSONL shim profile path.
-- Generic Workbench has a JSON HTTP client adapter. MCP has a stdio JSON-RPC client/tool executor; control has browser-link HTTP, Win32 desktop/UIA-style/driver vision/HTTP vision, and ADB mobile backends. Product-specific Workbench adapters and production-grade CV model packaging remain future work.
+- Generic Workbench has a JSON HTTP client adapter. MCP has a stdio JSON-RPC client/tool executor; control has browser-link HTTP, Win32 desktop/UIA-style/UIAutomation/driver vision/HTTP vision, and ADB mobile backends. Product-specific Workbench adapters and production-grade CV model packaging remain future work.
 - Extension runtime can dynamically import entrypoints and register tool providers; sandboxed/plugin-process execution and richer contribution types remain future work.
 - Recovery scanner can reschedule or dead-letter stale steps and conservatively repair missing/misaligned RunState checkpoint metadata, but complex artifact/event repair workflows are not implemented.
 - Workspace isolation has protocol, fake-backed patch review workflow, Git worktree allocation/merge execution, and a priority merge queue; automatic conflict-resolution workflows and richer review policy are not implemented.

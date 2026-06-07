@@ -89,6 +89,7 @@
 - [x] 实现 ADB mobile backend，支持 devices、uiautomator dump 解析、tap、type_text、keyevent、screenshot。
 - [x] 实现 Win32 desktop backend，支持窗口枚举、截图、物理坐标点击、快捷键、剪贴板粘贴输入。
 - [x] 实现 DesktopUIDetector 协议与 UIA-style desktop tree detector，支持 dump_ui 节点归一化。
+- [x] 实现 UIAutomationDesktopDetector，基于可选 `uiautomation` provider 读取真实桌面控件树并归一化为 control nodes。
 - [x] 实现 VisionDetector 协议、driver adapter 与 HTTP vision service adapter，并接入 desktop/mobile dump_ui 视觉节点融合。
 - [x] 实现 CapabilityGrant、ApprovalRequest、PolicyEngine 基础能力。
 - [x] 实现 GrantStore 和 grant 过期检查。
@@ -182,6 +183,7 @@
 - [x] 实现 handoff。
 - [x] 实现 ObservationFinding 和 observer request_pause 基础。
 - [x] 实现 Observer request_pause 可选驱动 Runtime pause，并持久化 run.paused event/checkpoint。
+- [x] 实现 Observer context correction，将 observer finding 写入 working memory 作为后续上下文纠偏信号。
 - [x] 实现 channel summary 和 decision artifact 基础服务。
 - [x] 实现 cross-channel summary 和 decision artifact 聚合基础服务。
 - [x] 实现自由发言和主持人选人 speaker selector。
@@ -411,7 +413,7 @@
 - [x] Trace timeline、cost ledger、artifact inspect、exact/partial/recovery replay、eval assertions 已实现基础能力。
 - [x] Extension manifest loader、ContributionRegistry、permission-to-grant mapping 和基础动态 entrypoint runtime 已实现。
 - [x] Autonomous exploration、trace distillation、draft workflow template、SkillService、PlanPatchValidator、skill evolution record 已有最小闭环。
-- [x] Interaction channel、message、round-robin group chat、agent pool、taskboard、observer finding 已有基础服务。
+- [x] Interaction channel、message、round-robin group chat、agent pool、taskboard、observer finding/context correction 已有基础服务。
 - [x] HumanInterventionService、MCP stdio/fake、Workbench fake、AgentConnector fake、host DTO 已有接口级闭环。
 - [x] CLI host 已支持 sample-run、inspect、replay、approve、reject、cancel run、cancel/kill tool call、intervene、llm-smoke。
 - [x] HTTP host 已支持 run inspect、run events NDJSON/SSE、artifact inspect、cancel run、intervene、approve/reject、cancel/kill tool call。
@@ -422,10 +424,10 @@
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream、结构化 JSONL stream、可插拔隔离策略和 POSIX process group cancel/kill；仍缺跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
-- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；具体 UIA provider、产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
+- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style/UIAutomation desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
 - [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行、冲突 rollback 和 priority merge queue；仍缺冲突自动修复 workflow 和更完整 review policy。
-- [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint；仍缺上下文纠偏和当前 step 中止。
+- [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint，context correction 已可写入 working memory；仍缺 observer 直接中止当前 step。
 - [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService、deterministic failure reflector 和 deterministic tool/workflow composition；仍缺条件分支组合、组合质量优化和 learned composition policy。
 - [x] Skill 与 Workflow 的互调规则已有基础服务、Agent 自动选择 skill、compiled workflow 注册/解析和 workflow patch 应用闭环。
 - [ ] Memory 已有 episodic memory、deterministic retrieval、高重要度 episode 到 semantic 的基础 consolidation、sparse/vector-store semantic retrieval 接口、通用 HTTP vector store connector 和结构化 fact conflict detection；仍缺厂商原生 vector DB connector、后台长期 consolidation 和复杂事实归并策略。
@@ -665,8 +667,8 @@
 - 新增 `GroupChatService`，支持 round-robin speaker 和 discussion turns。
 - 新增 `AgentPoolScheduler`，支持基础 pool selection。
 - 新增 `TaskBoardService`，支持创建和分配任务项。
-- 新增 `ObserverService`，支持 observer request_pause finding。
-- 新增测试覆盖 channel message、round-robin group chat、agent pool selection、taskboard assign、observer request_pause。
+- 新增 `ObserverService`，支持 observer request_pause finding 和 context correction working memory。
+- 新增测试覆盖 channel message、round-robin group chat、agent pool selection、taskboard assign、observer request_pause/context correction。
 - 验证命令: `python3 -m unittest discover -s tests`，结果 79 passed。
 - 下一步: 进入 Phase 9 Hosts 与日常使用形态。
 
@@ -754,8 +756,9 @@
 - 新增 `ADBMobileBackend`，兼容 GenericAgent `adb_ui.py` 的能力边界，支持设备枚举、UI dump 解析、tap、text、keyevent 和 screenshot。
 - 新增 `Win32DesktopBackend`，通过可选 desktop driver 支持窗口枚举、截图、物理坐标 click、快捷键和剪贴板粘贴输入；公共 API 不照搬个人命名。
 - 新增 `DesktopUIDetector` 协议和 `UIAStyleDesktopDetector`，将 UIA-like 控件树归一化为 control nodes 并接入 desktop `dump_ui`。
+- 新增 `UIAutomationDesktopDetector`，通过可选 `uiautomation` provider 读取真实桌面控件树并接入 desktop `dump_ui`。
 - 新增 `VisionDetector` 协议、`DriverVisionDetector` 和 `HTTPVisionDetector`，将截图检测结果归一化为 control nodes，并接入 desktop/mobile `dump_ui`。
-- 后续真实平台 adapter 可继续接入具体 UIA provider 和 CV 模型/服务，不需要修改 runtime/policy/agent 层。
+- 后续真实平台 adapter 可继续接入更多 UIA provider 和 CV 模型/服务，不需要修改 runtime/policy/agent 层。
 - 新增 `AgentConnectorRouter`、`ConnectorRoute`、`RoutedConnectorTurn`，支持不同 participant 路由到不同 persistent connector/session，并把外部 session turn 写回 interaction channel。
 - 新增 `StructuredStdioAgentConnector` 和 `StdioAgentCommand`，使用 JSONL `start/message/turn/stop` 帧连接长驻 CLI shim，不依赖终端文本 marker 判断完成。
 - 新增 `ProductCLIConnectorSpec` 和 `ProductCLIConnectorFactory`，通过产品 shim 配置构建 connectors，并用多产品 JSONL shim 验证 routing。
@@ -770,7 +773,7 @@
 - 补 HTTP host task create: `POST /tasks` 默认通过 `TaskLauncher` 创建 Runtime run，可选择立即执行或保持 pending。
 - 补 HumanIntervention `cancel_current_step_and_resume`: 通过 `CurrentStepInterrupter` 协议把当前 RUNNING step 标记为 interrupted，run 保持可继续执行。
 - 补测试覆盖 intervene、skill service、plan patch、MCP stdio/fake、Workbench fake、connector、host DTO。
-- 当前浏览器控制已有 `/link`-style HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter 和 UIA-style tree detector，视觉检测已有 driver 与 HTTP service adapter；具体 UIA provider 和生产级 CV 模型打包/部署仍待补。
+- 当前浏览器控制已有 `/link`-style HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter、UIA-style tree detector 和 UIAutomation provider detector，视觉检测已有 driver 与 HTTP service adapter；生产级 CV 模型打包/部署仍待补。
 
 ## 风险与待决策
 

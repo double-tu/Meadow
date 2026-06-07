@@ -14,6 +14,7 @@ from agent_kernel.capabilities.adapters import (
   HTTPVisionDetector,
   HTTPVisionEndpoint,
   LocalToolExecutor,
+  UIAutomationDesktopDetector,
   UIAStyleDesktopDetector,
   Win32DesktopBackend,
 )
@@ -295,6 +296,24 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.output["nodes"][0]["cy"], 25)
     self.assertEqual(result.output["nodes"][1]["source"], "vision")
     self.assertEqual(result.output["nodes"][1]["label"], "Checkout")
+
+  async def test_uiautomation_desktop_detector_dumps_real_provider_shape(self) -> None:
+    backend = Win32DesktopBackend(
+      win32gui=_Win32Gui(),
+      ui_detector=UIAutomationDesktopDetector(_UIAutomationModule()),
+      desktop_driver=_DesktopDriver(),
+    )
+
+    result = await backend.execute(ControlTargetCommandFactory.desktop_dump_ui("101"))
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["nodes"][0]["text"], "Editor")
+    self.assertEqual(result.output["nodes"][0]["control_type"], "Window")
+    self.assertEqual(result.output["nodes"][0]["automation_id"], "editor")
+    self.assertEqual(result.output["nodes"][0]["bounds"], [0, 0, 200, 100])
+    self.assertEqual(result.output["nodes"][1]["text"], "Save")
+    self.assertEqual(result.output["nodes"][1]["cx"], 15)
+    self.assertEqual(result.output["nodes"][1]["cy"], 25)
 
   async def test_win32_desktop_backend_can_dump_vision_nodes_without_uia_detector(self) -> None:
     backend = Win32DesktopBackend(
@@ -609,6 +628,58 @@ class _UIADriver:
         "bounds": [10, 20, 20, 30],
       }
     ]
+
+
+class _UIARect:
+  def __init__(self, left: int, top: int, right: int, bottom: int) -> None:
+    self.left = left
+    self.top = top
+    self.right = right
+    self.bottom = bottom
+
+
+class _UIAControl:
+  def __init__(
+    self,
+    name: str,
+    control_type: str,
+    automation_id: str,
+    rect: _UIARect,
+    children: list["_UIAControl"] | None = None,
+  ) -> None:
+    self.Name = name
+    self.ControlTypeName = control_type
+    self.AutomationId = automation_id
+    self.ClassName = control_type
+    self.BoundingRectangle = rect
+    self.IsEnabled = True
+    self._children = children or []
+
+  def GetChildren(self) -> list["_UIAControl"]:
+    return self._children
+
+
+class _UIAutomationModule:
+  def __init__(self) -> None:
+    self.root = _UIAControl(
+      "Editor",
+      "Window",
+      "editor",
+      _UIARect(0, 0, 200, 100),
+      [
+        _UIAControl(
+          "Save",
+          "Button",
+          "save",
+          _UIARect(10, 20, 20, 30),
+        )
+      ],
+    )
+    self.handles: list[int] = []
+
+  def ControlFromHandle(self, hwnd: int) -> _UIAControl:
+    self.handles.append(hwnd)
+    return self.root
 
 
 class _VisionDriver:

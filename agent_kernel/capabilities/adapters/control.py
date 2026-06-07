@@ -496,6 +496,81 @@ class UIAStyleDesktopDetector:
     return (bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2
 
 
+class UIAutomationDesktopDetector:
+  """Desktop UI detector backed by the optional `uiautomation` package."""
+
+  def __init__(self, uiautomation: Any | None = None, max_depth: int = 8) -> None:
+    self._uiautomation = uiautomation
+    self._max_depth = max_depth
+
+  def dump(self, target: int | str) -> list[dict[str, Any]]:
+    uiautomation = self._load_uiautomation()
+    root = self._root_control(uiautomation, target)
+    nodes: list[dict[str, Any]] = []
+    self._collect(root, nodes, depth=0)
+    return nodes
+
+  def _load_uiautomation(self) -> Any:
+    if self._uiautomation is not None:
+      return self._uiautomation
+    import importlib
+
+    try:
+      self._uiautomation = importlib.import_module("uiautomation")
+    except ImportError as exc:
+      raise RuntimeError("uiautomation package is not available.") from exc
+    return self._uiautomation
+
+  @staticmethod
+  def _root_control(uiautomation: Any, target: int | str) -> Any:
+    if target not in ("", None) and hasattr(uiautomation, "ControlFromHandle"):
+      return uiautomation.ControlFromHandle(int(target) if str(target).isdigit() else target)
+    if hasattr(uiautomation, "GetRootControl"):
+      return uiautomation.GetRootControl()
+    raise RuntimeError("uiautomation module must expose ControlFromHandle or GetRootControl.")
+
+  def _collect(self, control: Any, nodes: list[dict[str, Any]], depth: int) -> None:
+    if control is None or depth > self._max_depth:
+      return
+    nodes.append(UIAStyleDesktopDetector._normalize_element(self._control_to_mapping(control)))
+    for child in self._children(control):
+      self._collect(child, nodes, depth + 1)
+
+  @staticmethod
+  def _children(control: Any) -> list[Any]:
+    if hasattr(control, "GetChildren"):
+      children = control.GetChildren()
+    elif hasattr(control, "children"):
+      children = control.children
+    else:
+      children = []
+    return list(children or [])
+
+  @staticmethod
+  def _control_to_mapping(control: Any) -> dict[str, Any]:
+    rect = getattr(control, "BoundingRectangle", None)
+    return {
+      "name": getattr(control, "Name", getattr(control, "name", "")),
+      "control_type": getattr(control, "ControlTypeName", getattr(control, "control_type", "")),
+      "automation_id": getattr(control, "AutomationId", getattr(control, "automation_id", "")),
+      "class_name": getattr(control, "ClassName", getattr(control, "class_name", "")),
+      "bounds": UIAutomationDesktopDetector._rect_to_bounds(rect),
+      "clickable": bool(getattr(control, "IsEnabled", getattr(control, "enabled", True))),
+      "enabled": getattr(control, "IsEnabled", getattr(control, "enabled", None)),
+    }
+
+  @staticmethod
+  def _rect_to_bounds(rect: Any) -> list[int]:
+    if rect is None:
+      return [0, 0, 0, 0]
+    return [
+      int(getattr(rect, "left", getattr(rect, "Left", 0))),
+      int(getattr(rect, "top", getattr(rect, "Top", 0))),
+      int(getattr(rect, "right", getattr(rect, "Right", 0))),
+      int(getattr(rect, "bottom", getattr(rect, "Bottom", 0))),
+    ]
+
+
 class ADBMobileBackend:
   """Mobile control backend using adb-compatible commands."""
 

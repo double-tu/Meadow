@@ -49,6 +49,7 @@ from agent_kernel.capabilities.adapters import (
   FakeWorkbenchClient,
   LocalToolExecutor,
   ProcessToolExecutor,
+  UIAutomationDesktopDetector,
   WorkbenchCommand,
   WorkbenchResult,
 )
@@ -398,6 +399,9 @@ async def verify_phase3_capability_policy() -> None:
     workbench.register_response("inspect", WorkbenchResult(ok=True, output={"status": "ok"}))
     wb_result = await workbench.execute(WorkbenchCommand(command_id="cmd_1", kind="inspect"))
     _assert(wb_result.output["status"] == "ok", "fake workbench adapter failed")
+    uia_nodes = UIAutomationDesktopDetector(_VerifyUIAutomation()).dump(101)
+    _assert(uia_nodes[0]["text"] == "Verify Window", "UIAutomation desktop detector failed")
+    _assert(uia_nodes[1]["automation_id"] == "save", "UIAutomation child node missing")
 
     with UnitOfWork(conn) as uow:
       tool_calls = uow.tool_calls.list_by_run("verify_process")
@@ -415,6 +419,38 @@ def _call_ctx(run_id: str):
   from agent_kernel.capabilities.runtime import CapabilityCallContext
 
   return CapabilityCallContext(run_id=run_id, agent_id="agent_verify")
+
+
+class _VerifyUIARect:
+  def __init__(self, left: int, top: int, right: int, bottom: int) -> None:
+    self.left = left
+    self.top = top
+    self.right = right
+    self.bottom = bottom
+
+
+class _VerifyUIAControl:
+  def __init__(self, name: str, control_type: str, automation_id: str, children=None) -> None:
+    self.Name = name
+    self.ControlTypeName = control_type
+    self.AutomationId = automation_id
+    self.ClassName = control_type
+    self.BoundingRectangle = _VerifyUIARect(0, 0, 10, 10)
+    self.IsEnabled = True
+    self._children = children or []
+
+  def GetChildren(self):
+    return self._children
+
+
+class _VerifyUIAutomation:
+  def ControlFromHandle(self, hwnd: int):
+    return _VerifyUIAControl(
+      "Verify Window",
+      "Window",
+      "window",
+      [_VerifyUIAControl("Save", "Button", "save")],
+    )
 
 
 async def verify_phase4_memory_context() -> None:
@@ -719,8 +755,15 @@ async def verify_phase8_interaction() -> None:
     item = TaskBoardService(uow_factory).create_item("implement API", assignee_pool_id=pool.pool_id)
     assigned = TaskBoardService(uow_factory).assign(item, selected)
     finding = ObserverService(uow_factory).request_pause("observer", "run_observed", "stop")
+    correction, steering_memory = ObserverService(uow_factory).request_context_correction(
+      "observer",
+      "run_observed",
+      "prefer read-only verification",
+    )
     _assert(assigned.status == "doing", "taskboard assign failed")
     _assert(finding.action == "request_pause", "observer finding failed")
+    _assert(correction.action == "intervene", "observer correction finding failed")
+    _assert(steering_memory.content["kind"] == "observer_context_correction", "observer correction memory failed")
 
     connector = FakeAgentConnector()
     connector.queue_response(

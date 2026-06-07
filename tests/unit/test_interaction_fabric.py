@@ -9,6 +9,8 @@ from agent_kernel.agents import (
   ObserverService,
   TaskBoardService,
 )
+from agent_kernel.context import ContextManager
+from agent_kernel.memory import MemoryFacade
 from agent_kernel.domain import (
   AgentPool,
   ArtifactRef,
@@ -264,6 +266,37 @@ class InteractionFabricTests(unittest.TestCase):
       self.assertEqual(pause_events[-1].payload["source"], "observer")
       self.assertEqual(pause_events[-1].payload["finding_id"], finding.finding_id)
       self.assertEqual(findings[0].finding_id, finding.finding_id)
+    finally:
+      conn.close()
+
+  def test_observer_context_correction_writes_steering_memory(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      memory_facade = MemoryFacade(uow_factory)
+      finding, memory = ObserverService(uow_factory, memory=memory_facade).request_context_correction(
+        observer_id="observer_1",
+        target_run_id="run_context",
+        message="Prefer the safer read-only plan.",
+        evidence_event_refs=["evt_1"],
+      )
+
+      context = ContextManager(uow_factory, memory=memory_facade, max_tokens=512).build(
+        run_id="run_context_next",
+        scope="run_context",
+        model_ref="mock-small",
+        messages=[],
+      )
+
+      with UnitOfWork(conn) as uow:
+        findings = uow.interactions.list_findings("run_context")
+        memories = uow.memory.list_by_scope("run_context", memory_type="working", limit=10)
+
+      self.assertEqual(finding.action, "intervene")
+      self.assertEqual(findings[0].finding_id, finding.finding_id)
+      self.assertEqual(memory.content["kind"], "observer_context_correction")
+      self.assertEqual(memories[0].content["finding_id"], finding.finding_id)
+      self.assertIn(memory.memory_id, [ref.memory_id for ref in context.memory_refs])
     finally:
       conn.close()
 
