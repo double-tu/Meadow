@@ -53,6 +53,30 @@ class HTTPHostTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_http_host_streams_run_events_as_sse(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      engine = RuntimeEngine(uow_factory, NodeExecutorRegistry())
+      engine.create_run(build_three_node_workflow(), input={}, run_id="run_sse")
+      handler = make_handler(HTTPHost(uow_factory))
+
+      status, headers, body = _dispatch_fake_request_with_headers(
+        handler,
+        "GET",
+        "/runs/run_sse/events?format=sse",
+        headers={"Accept": "text/event-stream"},
+      )
+      text = body.decode("utf-8")
+
+      self.assertIn("200 OK", status)
+      self.assertEqual(headers["Content-Type"], "text/event-stream; charset=utf-8")
+      self.assertIn("event: run.created", text)
+      self.assertIn("data: ", text)
+      self.assertTrue(text.endswith("\n\n"))
+    finally:
+      conn.close()
+
   def test_http_host_exposes_runtime_write_controls(self) -> None:
     conn = connect_sqlite()
     try:
@@ -139,6 +163,60 @@ class HTTPHostTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_http_host_can_create_task_backed_by_runtime_run(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      handler = make_handler(HTTPHost(uow_factory))
+
+      status, _headers, body = _dispatch_fake_request_with_headers(
+        handler,
+        "POST",
+        "/tasks",
+        {
+          "title": "replace generic agent flow",
+          "run_id": "run_http_task",
+          "input": {"text": "hello"},
+        },
+      )
+      payload = json.loads(body.decode("utf-8"))
+
+      self.assertIn("201 Created", status)
+      self.assertTrue(payload["ok"])
+      self.assertEqual(payload["task"]["run_id"], "run_http_task")
+      self.assertEqual(payload["task"]["status"], "completed")
+      self.assertEqual(payload["run"]["variables"]["echo"], "replace generic agent flow")
+      with UnitOfWork(conn) as uow:
+        state = uow.states.get("run_http_task")
+        events = uow.events.list_by_run("run_http_task")
+      self.assertEqual(state.status, RunStatus.COMPLETED)
+      self.assertIn(RuntimeEventType.RUN_CREATED, [event.event_type for event in events])
+      self.assertIn(RuntimeEventType.RUN_COMPLETED, [event.event_type for event in events])
+    finally:
+      conn.close()
+
+  def test_http_host_can_create_task_without_starting_run(self) -> None:
+    conn = connect_sqlite()
+    try:
+      handler = make_handler(HTTPHost(unit_of_work_factory(conn)))
+
+      payload = self._request_json(
+        handler,
+        "POST",
+        "/tasks",
+        {
+          "title": "draft task",
+          "run_id": "run_http_task_pending",
+          "start": False,
+        },
+      )
+
+      self.assertTrue(payload["ok"])
+      self.assertEqual(payload["task"]["status"], "pending")
+      self.assertEqual(payload["run"]["current_node_id"], "echo")
+    finally:
+      conn.close()
+
   def test_http_host_rejects_invalid_json_body(self) -> None:
     conn = connect_sqlite()
     try:
@@ -198,21 +276,43 @@ def _dispatch_fake_request(
   path: str,
   payload: dict[str, object] | bytes | None = None,
 ) -> bytes:
+  _, _, body = _dispatch_fake_request_with_headers(handler, method, path, payload)
+  return body
+
+
+def _dispatch_fake_request_with_headers(
+  handler,
+  method: str,
+  path: str,
+  payload: dict[str, object] | bytes | None = None,
+  headers: dict[str, str] | None = None,
+) -> tuple[str, dict[str, str], bytes]:
   body = b""
   if isinstance(payload, bytes):
     body = payload
   elif payload is not None:
     body = json.dumps(payload).encode("utf-8")
+  header_lines = [
+    f"{method} {path} HTTP/1.1",
+    "Host: test",
+    "Connection: close",
+    f"Content-Length: {len(body)}",
+    "Content-Type: application/json",
+  ]
+  for key, value in (headers or {}).items():
+    header_lines.append(f"{key}: {value}")
   request = (
-    f"{method} {path} HTTP/1.1\r\n"
-    "Host: test\r\n"
-    "Connection: close\r\n"
-    f"Content-Length: {len(body)}\r\n"
-    "Content-Type: application/json\r\n"
-    "\r\n"
+    "\r\n".join(header_lines) + "\r\n\r\n"
   ).encode("ascii") + body
   fake_socket = _FakeSocket(request)
   handler(fake_socket, ("127.0.0.1", 0), object())
   raw = fake_socket.output.getvalue()
-  _, _, body = raw.partition(b"\r\n\r\n")
-  return body
+  head, _, response_body = raw.partition(b"\r\n\r\n")
+  lines = head.decode("iso-8859-1").split("\r\n")
+  response_headers: dict[str, str] = {}
+  for line in lines[1:]:
+    if ":" not in line:
+      continue
+    key, value = line.split(":", 1)
+    response_headers[key] = value.strip()
+  return lines[0], response_headers, response_body

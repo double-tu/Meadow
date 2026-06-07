@@ -51,7 +51,7 @@ def default_http_routes() -> list[HTTPRouteSpec]:
     HTTPRouteSpec(method="GET", path="/runs/{run_id}", description="Inspect run state."),
     HTTPRouteSpec(method="POST", path="/runs/{run_id}/cancel", description="Cancel run."),
     HTTPRouteSpec(method="POST", path="/runs/{run_id}/interventions", description="Append human intervention."),
-    HTTPRouteSpec(method="GET", path="/runs/{run_id}/events", description="Stream run events."),
+    HTTPRouteSpec(method="GET", path="/runs/{run_id}/events", description="Stream run events as NDJSON or SSE."),
     HTTPRouteSpec(method="GET", path="/artifacts/{artifact_id}", description="Inspect artifact."),
     HTTPRouteSpec(method="POST", path="/approvals/{approval_id}/approve", description="Approve request."),
     HTTPRouteSpec(method="POST", path="/approvals/{approval_id}/reject", description="Reject request."),

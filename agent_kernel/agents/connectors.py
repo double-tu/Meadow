@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from dataclasses import field
 import json
-from typing import Any, Protocol
+import sys
+from typing import Any, Literal, Protocol
 
 from agent_kernel.domain.base import new_id
 
@@ -131,6 +133,95 @@ class ProductCLIConnectorSpec:
     )
 
 
+@dataclass(slots=True)
+class ProductCLIShimProfile:
+  """Builds a JSONL shim command for a concrete product CLI.
+
+  The profile owns product-specific command-line details while the connector
+  still speaks Meadow's stable JSONL protocol.
+  """
+
+  product: Literal["codex", "claude", "gemini"] | str
+  executable: str
+  default_args: list[str] = field(default_factory=list)
+  prompt_mode: Literal["stdin", "argument", "json_stdin"] = "stdin"
+  prompt_argument: str | None = None
+  output_format: Literal["text", "json"] = "text"
+  request_timeout_seconds: float = 120.0
+
+  @classmethod
+  def codex(
+    cls,
+    executable: str = "codex",
+    default_args: list[str] | None = None,
+    **kwargs: Any,
+  ) -> "ProductCLIShimProfile":
+    return cls(product="codex", executable=executable, default_args=default_args or [], **kwargs)
+
+  @classmethod
+  def claude(
+    cls,
+    executable: str = "claude",
+    default_args: list[str] | None = None,
+    **kwargs: Any,
+  ) -> "ProductCLIShimProfile":
+    return cls(product="claude", executable=executable, default_args=default_args or [], **kwargs)
+
+  @classmethod
+  def gemini(
+    cls,
+    executable: str = "gemini",
+    default_args: list[str] | None = None,
+    **kwargs: Any,
+  ) -> "ProductCLIShimProfile":
+    return cls(product="gemini", executable=executable, default_args=default_args or [], **kwargs)
+
+  def to_connector_spec(
+    self,
+    connector_id: str,
+    cwd: str | None = None,
+    startup_timeout_seconds: float = 5.0,
+    turn_timeout_seconds: float | None = None,
+    metadata: dict[str, Any] | None = None,
+  ) -> ProductCLIConnectorSpec:
+    return ProductCLIConnectorSpec(
+      connector_id=connector_id,
+      product=str(self.product),
+      argv=self.to_shim_argv(),
+      cwd=cwd,
+      startup_timeout_seconds=startup_timeout_seconds,
+      turn_timeout_seconds=turn_timeout_seconds or max(60.0, self.request_timeout_seconds + 5.0),
+      metadata={
+        "shim": "agent_kernel.agents.cli_shim",
+        "prompt_mode": self.prompt_mode,
+        **(metadata or {}),
+      },
+    )
+
+  def to_shim_argv(self) -> list[str]:
+    argv = [
+      sys.executable,
+      "-u",
+      "-m",
+      "agent_kernel.agents.cli_shim",
+      "--product",
+      str(self.product),
+      "--executable",
+      self.executable,
+      "--prompt-mode",
+      self.prompt_mode,
+      "--output-format",
+      self.output_format,
+      "--timeout-seconds",
+      str(self.request_timeout_seconds),
+    ]
+    if self.prompt_argument is not None:
+      argv.extend(["--prompt-argument", self.prompt_argument])
+    if self.default_args:
+      argv.extend(["--args-json", json.dumps(self.default_args, ensure_ascii=False)])
+    return argv
+
+
 class StructuredStdioAgentConnector:
   """Persistent JSONL stdio connector for external agent session shims."""
 
@@ -238,6 +329,25 @@ class ProductCLIConnectorFactory:
 
   def build(self, spec: ProductCLIConnectorSpec) -> StructuredStdioAgentConnector:
     return StructuredStdioAgentConnector(spec.to_command())
+
+  def build_profile(
+    self,
+    connector_id: str,
+    profile: ProductCLIShimProfile,
+    cwd: str | None = None,
+    startup_timeout_seconds: float = 5.0,
+    turn_timeout_seconds: float | None = None,
+    metadata: dict[str, Any] | None = None,
+  ) -> StructuredStdioAgentConnector:
+    return self.build(
+      profile.to_connector_spec(
+        connector_id=connector_id,
+        cwd=cwd,
+        startup_timeout_seconds=startup_timeout_seconds,
+        turn_timeout_seconds=turn_timeout_seconds,
+        metadata=metadata,
+      )
+    )
 
   def build_many(
     self,

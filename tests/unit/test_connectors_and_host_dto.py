@@ -10,6 +10,7 @@ from agent_kernel.agents import (
   InteractionFabric,
   ProductCLIConnectorFactory,
   ProductCLIConnectorSpec,
+  ProductCLIShimProfile,
   StdioAgentCommand,
   StructuredStdioAgentConnector,
 )
@@ -200,6 +201,59 @@ class ConnectorsAndHostDTOTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(messages[1].content["connector_id"], "review_cli")
     finally:
       conn.close()
+
+  async def test_product_cli_shim_profile_runs_real_subprocess_cli(self) -> None:
+    profile = ProductCLIShimProfile.codex(
+      executable=sys.executable,
+      default_args=[
+        "-c",
+        (
+          "import sys\n"
+          "prompt = sys.stdin.read()\n"
+          "print('codex-shim:' + prompt.strip())\n"
+        ),
+      ],
+      request_timeout_seconds=2,
+    )
+    spec = profile.to_connector_spec(
+      "codex_cli",
+      startup_timeout_seconds=2,
+      turn_timeout_seconds=4,
+      metadata={"role": "implementation"},
+    )
+    connector = ProductCLIConnectorFactory().build(spec)
+
+    await connector.start("session_codex", metadata={"agent": "codex"})
+    turn = await connector.send(
+      ConnectorMessage(
+        message_id="msg_codex",
+        session_id="session_codex",
+        content={"task": "implement feature"},
+      )
+    )
+    await connector.stop("session_codex", "done")
+
+    self.assertTrue(turn.completed)
+    self.assertEqual(turn.output["product"], "codex")
+    self.assertEqual(turn.output["stdout"], "codex-shim:implement feature\n")
+    self.assertEqual(spec.metadata["shim"], "agent_kernel.agents.cli_shim")
+
+  def test_product_cli_shim_profiles_generate_neutral_specs(self) -> None:
+    profiles = [
+      ProductCLIShimProfile.codex(executable="codex", default_args=["--model", "fast"]),
+      ProductCLIShimProfile.claude(executable="claude", prompt_mode="argument", prompt_argument="-p"),
+      ProductCLIShimProfile.gemini(executable="gemini", prompt_mode="json_stdin", output_format="json"),
+    ]
+
+    specs = [
+      profile.to_connector_spec(f"{profile.product}_cli", startup_timeout_seconds=1)
+      for profile in profiles
+    ]
+
+    self.assertEqual([spec.product for spec in specs], ["codex", "claude", "gemini"])
+    self.assertTrue(all("agent_kernel.agents.cli_shim" in spec.argv for spec in specs))
+    self.assertIn("--prompt-argument", specs[1].argv)
+    self.assertIn("json_stdin", specs[2].argv)
 
   async def test_host_dtos_are_serializable(self) -> None:
     envelope = EventStreamEnvelope(

@@ -21,8 +21,8 @@ Implemented MVP areas:
 - Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
 - Human intervention with event append, working-memory steering, and CLI `intervene`.
 - Skill service, compiled workflow registration/resolution, plan patch validation, and workflow patch application for controlled skill/workflow evolution.
-- MCP stdio client/tool executor, generic Workbench protocol/fake/HTTP client, control Workbench, persistent agent connector protocol, structured stdio connector, product CLI connector factory, and multi-session connector router boundaries.
-- Host DTOs plus HTTP host for run inspect, run event NDJSON stream, artifact inspect, run cancel, human intervention, approval resolution, and tool-call cancel/kill requests.
+- MCP stdio client/tool executor, generic Workbench protocol/fake/HTTP client, control Workbench, persistent agent connector protocol, structured stdio connector, product CLI shim profiles, product CLI connector factory, and multi-session connector router boundaries.
+- Host DTOs plus HTTP host for task create, run inspect, run event NDJSON/SSE stream, artifact inspect, run cancel, human intervention, approval resolution, and tool-call cancel/kill requests.
 - CLI host for sample run, inspect, replay, approve, reject, cancel, cancel/kill tool call, intervene, and llm-smoke.
 - OpenAI-compatible LLM smoke command configured by environment variables or TOML/JSON config.
 
@@ -98,10 +98,10 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 
 ## Known MVP Gaps
 
-- HTTP host has JSON control endpoints for run cancel, human intervention, approval resolution, and tool-call cancel/kill; SSE/WebSocket streaming and task creation endpoints are not implemented.
+- HTTP host has task creation backed by a default runtime workflow, JSON control endpoints for run cancel, human intervention, approval resolution, and tool-call cancel/kill plus NDJSON/SSE event streams; WebSocket streaming and the full Web/Desktop workspace are not implemented.
 - Tool-call cancel/kill and process stream control only operate inside the current runtime process; after restart, host commands persist control requests but cannot signal or reattach to the original process group.
-- Product-specific Codex/Claude/Gemini CLI connector shims are not implemented; protocol, fake connector, structured JSONL stdio connector, product CLI connector factory, and multi-session router exist.
-- Handoff has a persistent service and channel routing, but product-specific CLI session adapters are not implemented.
+- Product CLI shim profiles for Codex/Claude/Gemini exist and run through a generic JSONL subprocess adapter; deeper product-native protocol adapters remain future work.
+- Handoff has a persistent service and channel routing; product CLI sessions can be connected through the generic JSONL shim profile path.
 - Generic Workbench has a JSON HTTP client adapter. MCP has a stdio JSON-RPC client/tool executor; control has TMWebDriver HTTP browser, Win32 desktop/UIA-style, and ADB mobile backends. Product-specific Workbench adapters remain future work.
 - Recovery scanner can reschedule or dead-letter stale steps and conservatively repair missing/misaligned RunState checkpoint metadata, but complex artifact/event repair workflows are not implemented.
 - Workspace isolation has protocol, fake-backed patch review workflow, and Git worktree allocation/merge execution; advanced multi-agent merge queues and conflict-resolution workflows are not implemented.

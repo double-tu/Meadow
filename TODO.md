@@ -172,6 +172,7 @@
 - [x] 实现多 session AgentConnectorRouter，将 participant 路由到不同 connector/session，并把 turn 输出写回 channel。
 - [x] 实现 StructuredStdioAgentConnector，使用 JSONL 结构化协议连接长驻 CLI shim。
 - [x] 实现 ProductCLIConnectorFactory，通过产品 shim spec 构建 structured stdio connectors。
+- [x] 实现 Codex/Claude/Gemini 产品 CLI shim profile 和通用 JSONL subprocess shim。
 - [x] 实现 TaskBoard 基础。
 - [x] 实现 handoff。
 - [x] 实现 ObservationFinding 和 observer request_pause 基础。
@@ -187,7 +188,7 @@
 - [x] 编写测试: fake 多 connector session routing。
 - [x] 编写测试: 真实子进程 JSONL CLI session connector。
 - [x] 编写测试: 多产品 CLI shim config routing。
-- [ ] 验收: 多个 Codex/Claude/Gemini CLI session 可被协调推进同一个项目任务。
+- [x] 验收: 多个 Codex/Claude/Gemini CLI session 可通过通用 JSONL shim profile 接入并被 connector router 协调；真实产品深度协议适配仍可后续增强。
 
 ### Phase 9 - Hosts 与日常使用形态
 
@@ -197,8 +198,10 @@
 - [x] 实现 CLI: llm-smoke 真实 LLM 配置验证入口。
 - [x] 实现 CLI: intervene。
 - [x] 实现 HTTP API 草案: task、run、artifact、approval、event stream route DTO。
+- [x] 实现 HTTP `POST /tasks` 可运行入口，默认通过 Runtime sample workflow 创建/启动 run，并保留 TaskLauncher 协议替换点。
 - [x] 实现 event stream DTO。
 - [x] 实现只读 HTTP host: run inspect、run event NDJSON stream、artifact inspect。
+- [x] 实现 HTTP host run event SSE stream。
 - [x] 实现 HTTP 写控制 host: run cancel、human intervention、approval approve/reject、tool-call cancel/kill。
 - [x] 实现 task workspace 数据结构 DTO: conversation、taskboard、agent sessions、channels、artifacts、runtime controls。
 - [x] 编写测试: CLI smoke。
@@ -406,7 +409,7 @@
 - [x] Interaction channel、message、round-robin group chat、agent pool、taskboard、observer finding 已有基础服务。
 - [x] HumanInterventionService、MCP stdio/fake、Workbench fake、AgentConnector fake、host DTO 已有接口级闭环。
 - [x] CLI host 已支持 sample-run、inspect、replay、approve、reject、cancel run、cancel/kill tool call、intervene、llm-smoke。
-- [x] HTTP host 已支持 run inspect、run events NDJSON、artifact inspect、cancel run、intervene、approve/reject、cancel/kill tool call。
+- [x] HTTP host 已支持 run inspect、run events NDJSON/SSE、artifact inspect、cancel run、intervene、approve/reject、cancel/kill tool call。
 
 ### 与完整设计不一致或深度不足
 
@@ -414,15 +417,15 @@
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator、可插拔隔离策略和 POSIX process group cancel/kill；仍缺结构化终端协议、跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
-- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector 和 product CLI connector factory；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector 和 ADB mobile backend；具体 UIA provider、视觉检测 adapter、Codex/Claude/Gemini 产品 CLI shim 尚未实现。
-- [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；仍缺具体 Codex/Claude/Gemini 产品 shim。
+- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector 和 ADB mobile backend；具体 UIA provider、视觉检测 adapter、产品原生深度协议 adapter 尚未实现。
+- [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
 - [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行和冲突 rollback；仍缺多 agent merge queue、冲突自动修复 workflow 和更完整 review policy。
 - [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint；仍缺上下文纠偏和当前 step 中止。
 - [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService 和 deterministic failure reflector；仍缺动态工具/工作流组合。
 - [x] Skill 与 Workflow 的互调规则已有基础服务、Agent 自动选择 skill、compiled workflow 注册/解析和 workflow patch 应用闭环。
 - [ ] Memory 已有 episodic memory、deterministic retrieval、高重要度 episode 到 semantic 的基础 consolidation、sparse semantic retrieval 和结构化 fact conflict detection；仍缺外部 vector store-backed retrieval、后台长期 consolidation 和复杂事实归并策略。
 - [ ] Recovery 已有 stale step scanner、event/checkpoint/artifact consistency check 和保守 metadata repair；仍缺复杂 artifact/event repair、不可恢复对象 repair workflow 和真实 worker 接管闭环。
-- [ ] HTTP/event stream/workspace DTO 已实现；HTTP host 已支持 run inspect、event NDJSON stream、artifact inspect、run/tool-call 控制、审批和人工干预；SSE/WebSocket event stream、task create 和 Web/Desktop 工作台仍未实现。
+- [ ] HTTP/event stream/workspace DTO 已实现；HTTP host 已支持 task create、run inspect、event NDJSON/SSE stream、artifact inspect、run/tool-call 控制、审批和人工干预；WebSocket event stream 和完整 Web/Desktop 工作台仍未实现。
 - [ ] Extension SDK 目前只注册 metadata，不动态 import/执行 extension entrypoint；还不是完整插件运行时。
 
 ### 下一阶段建议优先级
@@ -717,7 +720,7 @@
 - 本地验收命令通过: `python3 scripts/verify_realized_todo.py --no-real-llm`。
 - 真实 LLM 验收命令通过: `python3 scripts/verify_realized_todo.py --config agent-kernel.toml`。
 - 验收覆盖: domain serialization/state、durable runtime/checkpoint/retry/dead-letter/budget/circuit、agent/supervisor/real AgentLoop、capability/policy/approval/process/audit、memory/context ledger、trace/cost/replay/eval/artifact、extension permission、autonomy workflow template/skill evolution、interaction fabric/taskboard/observer、CLI sample/inspect/replay/llm-smoke。
-- 验收排除未勾选能力: 通用 Workbench 真实 adapter、HTTP 写操作 endpoint、SSE/WebSocket event stream、产品级 Codex/Claude/Gemini CLI shim、动态工具/工作流组合。
+- 当时验收排除未勾选能力: 通用 Workbench 真实 adapter、HTTP 写操作 endpoint、SSE/WebSocket event stream、产品级 Codex/Claude/Gemini CLI shim、动态工具/工作流组合；其中 HTTP 写操作、通用 HTTP Workbench adapter 和通用产品 CLI shim profile 后续已补。
 - 验证命令: `python3 -m compileall -q agent_kernel tests scripts`，通过。
 - 验证命令: `python3 -m unittest discover -s tests`，结果 89 passed。
 
@@ -747,11 +750,14 @@
 - 新增 `AgentConnectorRouter`、`ConnectorRoute`、`RoutedConnectorTurn`，支持不同 participant 路由到不同 persistent connector/session，并把外部 session turn 写回 interaction channel。
 - 新增 `StructuredStdioAgentConnector` 和 `StdioAgentCommand`，使用 JSONL `start/message/turn/stop` 帧连接长驻 CLI shim，不依赖终端文本 marker 判断完成。
 - 新增 `ProductCLIConnectorSpec` 和 `ProductCLIConnectorFactory`，通过产品 shim 配置构建 connectors，并用多产品 JSONL shim 验证 routing。
+- 新增 `ProductCLIShimProfile.codex/claude/gemini` 和 `agent_kernel.agents.cli_shim`，用通用 JSONL subprocess adapter 接入产品 CLI。
 - 新增 `DecisionArtifactService`、`DiscussionSummarizer` 和 deterministic summarizer，将 channel 消息归纳为 decision artifact，并回写 `GroupChatSession.decision_artifact_ref`。
 - `DecisionArtifactService` 支持跨 channel 聚合，将多个 channel summary 归纳为 cross-channel decision artifact。
 - 新增 `SpeakerSelector` 协议和 round-robin/free-for-all/moderator-select selector，`GroupChatService` 通过 selector 记录 `selected_by` 和 rationale。
 - 补 host DTO: EventStreamEnvelope、TaskWorkspaceDTO、HTTPRouteSpec/default routes。
 - 补 HTTP host 写控制接口: `POST /runs/{run_id}/cancel`、`POST /runs/{run_id}/interventions`、`POST /approvals/{approval_id}/approve|reject`、`POST /tool-calls/{tool_call_id}/cancel|kill`。
+- 补 HTTP host SSE event stream: `GET /runs/{run_id}/events?format=sse` 或 `Accept: text/event-stream` 返回 `id/event/data` 帧。
+- 补 HTTP host task create: `POST /tasks` 默认通过 `TaskLauncher` 创建 Runtime run，可选择立即执行或保持 pending。
 - 补测试覆盖 intervene、skill service、plan patch、MCP stdio/fake、Workbench fake、connector、host DTO。
 - 当前浏览器控制已有 TMWebDriver HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter 和 UIA-style tree detector；具体 UIA provider 与视觉检测仍待补。
 

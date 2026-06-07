@@ -8,18 +8,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import sqlite3
 from typing import Any, Protocol
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from agent_kernel.app.tool_call_control import ToolCallControlOutcome, ToolCallControlService
 from agent_kernel.domain.errors import DomainError
 from agent_kernel.domain.policy import ApprovalRequest
 from agent_kernel.domain.run import RunState
 from agent_kernel.domain.capability import CapabilityGrant
+from agent_kernel.domain.workflow import EdgeSpec, ExecutionCommand, NodeContext, NodeResult, NodeSpec, WorkflowSpec
 from agent_kernel.hosts.dto import EventStreamEnvelope, error_response, ok_response
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.policy import ApprovalService, HumanInterventionService, InterventionOutcome
 from agent_kernel.runtime import RuntimeEngine, unit_of_work_factory
-from agent_kernel.workflow import NodeExecutorRegistry
+from agent_kernel.workflow import FunctionNodeExecutor, NodeExecutorRegistry
+
+
+class TaskLauncher(Protocol):
+  async def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+    """Create a task entry point and optionally start its run."""
 
 
 class RunControl(Protocol):
@@ -67,12 +73,14 @@ class HTTPHost:
     approval_control: ApprovalControl | None = None,
     intervention_control: InterventionControl | None = None,
     tool_call_control: ToolCallControl | None = None,
+    task_launcher: TaskLauncher | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._run_control = run_control or RuntimeEngine(uow_factory, NodeExecutorRegistry())
     self._approval_control = approval_control or ApprovalService(uow_factory)
     self._intervention_control = intervention_control or HumanInterventionService(uow_factory)
     self._tool_call_control = tool_call_control or ToolCallControlService(uow_factory)
+    self._task_launcher = task_launcher or SampleWorkflowTaskLauncher(uow_factory)
 
   def inspect_run(self, run_id: str) -> dict[str, Any]:
     with self._uow_factory() as uow:
@@ -158,13 +166,18 @@ class HTTPHost:
     outcome = await self._tool_call_control.kill(tool_call_id)
     return _tool_call_control_response(outcome)
 
+  async def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+    return await self._task_launcher.create_task(payload)
+
 
 def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
   class AgentKernelHTTPRequestHandler(BaseHTTPRequestHandler):
     server_version = "AgentKernelHTTP/0.1"
 
     def do_GET(self) -> None:
-      path = urlparse(self.path).path
+      parsed = urlparse(self.path)
+      path = parsed.path
+      query = parse_qs(parsed.query)
       segments = [unquote(segment) for segment in path.split("/") if segment]
       try:
         if len(segments) == 2 and segments[0] == "runs":
@@ -172,6 +185,9 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           return
         if len(segments) == 3 and segments[0] == "runs" and segments[2] == "events":
           envelopes = host.list_run_events(segments[1])
+          if self._wants_sse(query):
+            self._write_sse(HTTPStatus.OK, envelopes)
+            return
           self._write_ndjson(HTTPStatus.OK, [envelope.to_dict() for envelope in envelopes])
           return
         if len(segments) == 2 and segments[0] == "artifacts":
@@ -209,6 +225,10 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
         if len(segments) == 3 and segments[0] == "tool-calls" and segments[2] == "kill":
           response = asyncio.run(host.kill_tool_call(segments[1]))
           self._write_json(HTTPStatus.OK, response)
+          return
+        if len(segments) == 1 and segments[0] == "tasks":
+          response = asyncio.run(host.create_task(payload))
+          self._write_json(HTTPStatus.CREATED, response)
           return
         self._write_json(HTTPStatus.NOT_FOUND, error_response("route not found", path=path))
       except KeyError as exc:
@@ -251,7 +271,67 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
       self.end_headers()
       self.wfile.write(body)
 
+    def _write_sse(self, status: HTTPStatus, envelopes: list[EventStreamEnvelope]) -> None:
+      body = b"".join(_sse_frame(envelope) for envelope in envelopes)
+      self.send_response(status.value)
+      self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+      self.send_header("Cache-Control", "no-cache")
+      self.send_header("Connection", "keep-alive")
+      self.send_header("Content-Length", str(len(body)))
+      self.end_headers()
+      self.wfile.write(body)
+
+    def _wants_sse(self, query: dict[str, list[str]]) -> bool:
+      formats = {value.lower() for value in query.get("format", [])}
+      if "sse" in formats:
+        return True
+      return "text/event-stream" in self.headers.get("Accept", "")
+
   return AgentKernelHTTPRequestHandler
+
+
+class SampleWorkflowTaskLauncher:
+  """Default HTTP task launcher backed by the durable runtime sample workflow."""
+
+  def __init__(self, uow_factory) -> None:
+    self._uow_factory = uow_factory
+
+  async def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+    title = payload.get("title") or payload.get("text") or payload.get("prompt") or "HTTP task"
+    if not isinstance(title, str) or not title.strip():
+      raise ValueError("Task title must be a non-empty string.")
+    run_id = payload.get("run_id")
+    if run_id is not None and not isinstance(run_id, str):
+      raise ValueError("run_id must be a string when provided.")
+    input_payload = payload.get("input", {})
+    if input_payload is not None and not isinstance(input_payload, dict):
+      raise ValueError("input must be a JSON object when provided.")
+    start = bool(payload.get("start", True))
+    workflow = _sample_task_workflow()
+    registry = NodeExecutorRegistry()
+    registry.register("echo", lambda: FunctionNodeExecutor(_sample_task_echo_node))
+    registry.register(
+      "finish",
+      lambda: FunctionNodeExecutor(lambda ctx: NodeResult(command=ExecutionCommand(type="finish"))),
+    )
+    engine = RuntimeEngine(self._uow_factory, registry)
+    created = engine.create_run(
+      workflow,
+      input={
+        "title": title,
+        **(input_payload or {}),
+      },
+      run_id=run_id,
+    )
+    state = await engine.run_until_waiting(workflow, created.run_id) if start else created
+    return ok_response(
+      task={
+        "title": title,
+        "run_id": state.run_id,
+        "status": state.status.value if hasattr(state.status, "value") else state.status,
+      },
+      run=state.to_dict(),
+    )
 
 
 def build_server(conn: sqlite3.Connection, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
@@ -266,6 +346,26 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8080) -> None:
     server.serve_forever()
   finally:
     conn.close()
+
+
+def _sample_task_workflow() -> WorkflowSpec:
+  return WorkflowSpec(
+    workflow_id="wf_http_task",
+    version="0.1.0",
+    name="http-task",
+    input_schema={},
+    output_schema={},
+    nodes=[
+      NodeSpec(node_id="echo", kind="echo"),
+      NodeSpec(node_id="finish", kind="finish"),
+    ],
+    edges=[EdgeSpec(from_node="echo", to_node="finish")],
+    start_node_id="echo",
+  )
+
+
+def _sample_task_echo_node(ctx: NodeContext) -> NodeResult:
+  return NodeResult(state_patch={"echo": ctx.input.get("title") or ctx.input.get("text")})
 
 
 def _tool_call_control_response(outcome: ToolCallControlOutcome) -> dict[str, Any]:
@@ -304,3 +404,9 @@ def _positive_float(value: object, *, default: float, field: str) -> float:
   if parsed <= 0:
     raise ValueError(f"{field} must be a positive number.")
   return parsed
+
+
+def _sse_frame(envelope: EventStreamEnvelope) -> bytes:
+  data = json.dumps(envelope.to_dict(), ensure_ascii=False, sort_keys=True)
+  frame = f"id: {envelope.event_id}\nevent: {envelope.event_type}\ndata: {data}\n\n"
+  return frame.encode("utf-8")
