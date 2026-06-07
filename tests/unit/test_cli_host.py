@@ -10,7 +10,15 @@ from agent_kernel.hosts.cli import main
 from agent_kernel.persistence import connect_sqlite
 from agent_kernel.policy import ApprovalService
 from agent_kernel.runtime import unit_of_work_factory
-from agent_kernel.domain import RunState, RunStatus, ToolCallRecord, ToolCallStatus
+from agent_kernel.domain import (
+  NodeStepRecord,
+  NodeStepStatus,
+  RunState,
+  RunStatus,
+  RuntimeEventType,
+  ToolCallRecord,
+  ToolCallStatus,
+)
 
 
 class CliHostTests(unittest.TestCase):
@@ -77,6 +85,56 @@ class CliHostTests(unittest.TestCase):
       self.assertEqual(payload["run_status"], "interrupted")
       self.assertEqual(payload["intervention"]["content"], "wrong direction")
       self.assertIsNotNone(payload["memory_id"])
+
+  def test_intervene_command_can_cancel_current_step_and_resume(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      db = str(Path(tmp) / "kernel.sqlite")
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          uow.states.save(
+            RunState(run_id="run_step_intervene", status=RunStatus.RUNNING, current_node_id="work")
+          )
+          uow.steps.save(
+            NodeStepRecord(
+              step_id="step_running",
+              run_id="run_step_intervene",
+              node_id="work",
+              status=NodeStepStatus.RUNNING,
+            )
+          )
+      finally:
+        conn.close()
+
+      payload = self._run_cli(
+        [
+          "--db",
+          db,
+          "intervene",
+          "run_step_intervene",
+          "--content",
+          "stop this step and retry",
+          "--mode",
+          "cancel_current_step_and_resume",
+        ]
+      )
+
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          state = uow.states.get("run_step_intervene")
+          step = uow.steps.get("step_running")
+          events = uow.events.list_by_run("run_step_intervene")
+      finally:
+        conn.close()
+
+      self.assertTrue(payload["ok"])
+      self.assertEqual(payload["run_status"], "running")
+      self.assertEqual(payload["interrupted_step_id"], "step_running")
+      self.assertEqual(state.status, RunStatus.RUNNING)
+      self.assertEqual(step.status, NodeStepStatus.INTERRUPTED)
+      self.assertIn(RuntimeEventType.HUMAN_INTERVENTION, [event.event_type for event in events])
+      self.assertIn(RuntimeEventType.STEP_FAILED, [event.event_type for event in events])
 
   def test_tool_call_control_commands_record_pending_requests(self) -> None:
     with tempfile.TemporaryDirectory() as tmp:

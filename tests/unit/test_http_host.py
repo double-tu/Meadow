@@ -4,6 +4,8 @@ import unittest
 
 from agent_kernel.domain import (
   ArtifactRef,
+  NodeStepRecord,
+  NodeStepStatus,
   RunState,
   RunStatus,
   RuntimeEvent,
@@ -214,6 +216,41 @@ class HTTPHostTests(unittest.TestCase):
       self.assertTrue(payload["ok"])
       self.assertEqual(payload["task"]["status"], "pending")
       self.assertEqual(payload["run"]["current_node_id"], "echo")
+    finally:
+      conn.close()
+
+  def test_http_intervention_can_cancel_current_step_and_resume(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      with UnitOfWork(conn) as uow:
+        uow.states.save(RunState(run_id="run_http_step", status=RunStatus.RUNNING, current_node_id="work"))
+        uow.steps.save(
+          NodeStepRecord(
+            step_id="step_http_running",
+            run_id="run_http_step",
+            node_id="work",
+            status=NodeStepStatus.RUNNING,
+          )
+        )
+      handler = make_handler(HTTPHost(uow_factory))
+
+      payload = self._request_json(
+        handler,
+        "POST",
+        "/runs/run_http_step/interventions",
+        {
+          "content": "interrupt current step",
+          "mode": "cancel_current_step_and_resume",
+        },
+      )
+
+      with UnitOfWork(conn) as uow:
+        step = uow.steps.get("step_http_running")
+      self.assertTrue(payload["ok"])
+      self.assertEqual(payload["run_status"], "running")
+      self.assertEqual(payload["interrupted_step_id"], "step_http_running")
+      self.assertEqual(step.status, NodeStepStatus.INTERRUPTED)
     finally:
       conn.close()
 

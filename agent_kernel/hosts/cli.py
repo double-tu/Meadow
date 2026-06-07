@@ -149,6 +149,7 @@ async def _dispatch(args: argparse.Namespace, conn) -> dict[str, Any]:
       intervention=outcome.intervention.to_dict(),
       run_status=outcome.run_status.value if hasattr(outcome.run_status, "value") else outcome.run_status,
       memory_id=outcome.memory_id,
+      interrupted_step_id=outcome.interrupted_step_id,
     )
   if args.command == "llm-smoke":
     config = LLMConfig.load(args.config)

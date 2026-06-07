@@ -413,7 +413,7 @@
 
 ### 与完整设计不一致或深度不足
 
-- [ ] HumanIntervention 已支持 CLI/HTTP、事件、working memory 和 `pause_and_resume` interrupt；仍缺 `cancel_current_step_and_resume` 和更细的 context priority partition。
+- [ ] HumanIntervention 已支持 CLI/HTTP、事件、working memory、`pause_and_resume` interrupt 和 `cancel_current_step_and_resume` 当前 step 标记中止；仍缺更细的 context priority partition 和执行中线程级抢占。
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator、可插拔隔离策略和 POSIX process group cancel/kill；仍缺结构化终端协议、跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
@@ -758,6 +758,7 @@
 - 补 HTTP host 写控制接口: `POST /runs/{run_id}/cancel`、`POST /runs/{run_id}/interventions`、`POST /approvals/{approval_id}/approve|reject`、`POST /tool-calls/{tool_call_id}/cancel|kill`。
 - 补 HTTP host SSE event stream: `GET /runs/{run_id}/events?format=sse` 或 `Accept: text/event-stream` 返回 `id/event/data` 帧。
 - 补 HTTP host task create: `POST /tasks` 默认通过 `TaskLauncher` 创建 Runtime run，可选择立即执行或保持 pending。
+- 补 HumanIntervention `cancel_current_step_and_resume`: 通过 `CurrentStepInterrupter` 协议把当前 RUNNING step 标记为 interrupted，run 保持可继续执行。
 - 补测试覆盖 intervene、skill service、plan patch、MCP stdio/fake、Workbench fake、connector、host DTO。
 - 当前浏览器控制已有 TMWebDriver HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter 和 UIA-style tree detector；具体 UIA provider 与视觉检测仍待补。
 

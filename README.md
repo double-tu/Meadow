@@ -19,7 +19,7 @@ Implemented MVP areas:
 - Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings with runtime pause control, connector routing, and channel/cross-channel decision artifacts.
 - Workspace isolation interfaces with fake backend and Git worktree backend for isolated patch review/merge workflows.
 - Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
-- Human intervention with event append, working-memory steering, and CLI `intervene`.
+- Human intervention with event append, working-memory steering, CLI/HTTP `intervene`, pause-and-resume, and current-step interruption metadata.
 - Skill service, compiled workflow registration/resolution, plan patch validation, and workflow patch application for controlled skill/workflow evolution.
 - MCP stdio client/tool executor, generic Workbench protocol/fake/HTTP client, control Workbench, persistent agent connector protocol, structured stdio connector, product CLI shim profiles, product CLI connector factory, and multi-session connector router boundaries.
 - Host DTOs plus HTTP host for task create, run inspect, run event NDJSON/SSE stream, artifact inspect, run cancel, human intervention, approval resolution, and tool-call cancel/kill requests.

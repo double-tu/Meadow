@@ -142,6 +142,7 @@ class HTTPHost:
       intervention=outcome.intervention.to_dict(),
       run_status=outcome.run_status.value if hasattr(outcome.run_status, "value") else outcome.run_status,
       memory_id=outcome.memory_id,
+      interrupted_step_id=outcome.interrupted_step_id,
     )
 
   def approve(self, approval_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
