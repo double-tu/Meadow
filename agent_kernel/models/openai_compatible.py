@@ -33,6 +33,8 @@ class OpenAICompatibleProvider:
       "model": model_ref,
       "messages": [_normalize_message(message) for message in context.messages],
     }
+    if context.tool_schemas:
+      payload["tools"] = context.tool_schemas
     headers = {
       "Authorization": f"Bearer {self._api_key}",
       "Content-Type": "application/json",
@@ -69,6 +71,9 @@ def _parse_chat_completion_response(response: dict[str, Any]) -> dict[str, objec
   if not isinstance(content, str):
     content = json.dumps(content, ensure_ascii=False, sort_keys=True)
   parsed: dict[str, object] = {"content": content}
+  tool_calls = message.get("tool_calls")
+  if isinstance(tool_calls, list):
+    parsed["tool_calls"] = tool_calls
   usage = response.get("usage")
   if isinstance(usage, dict):
     parsed["usage"] = usage

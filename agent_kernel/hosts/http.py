@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -12,21 +13,33 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from agent_kernel.app.tool_call_control import ToolCallControlOutcome, ToolCallControlService
 from agent_kernel.app.config_center import ConfigCenterService
+from agent_kernel.app.conversation_task_hub import ConversationTaskHub
 from agent_kernel.app.control_plane import ControlPlaneService
 from agent_kernel.app.desktop_chat import DesktopChatService
 from agent_kernel.app.desktop_workspace import DesktopWorkspaceService
 from agent_kernel.app.mcp_config import MCPConfigService
+from agent_kernel.app.orchestration_tools import (
+  CompositeToolCatalog,
+  OrchestrationCapabilityIds,
+  OrchestrationCapabilityProvider,
+)
 from agent_kernel.app.scheduled_tasks import ScheduledTaskService
 from agent_kernel.autonomy import SkillService
+from agent_kernel.autonomy.builtin_skills import ensure_builtin_atomic_skills
+from agent_kernel.capabilities import AtomicCapabilityIds, AtomicCapabilityProvider, CapabilityRegistry, CapabilityRuntime
+from agent_kernel.capabilities.adapters import LocalFileWorkspace, LocalToolExecutor, UrllibHTTPClient
 from agent_kernel.domain.delegation import DelegationTaskReport
 from agent_kernel.domain.errors import DomainError
 from agent_kernel.domain.policy import ApprovalRequest
 from agent_kernel.domain.run import RunState
 from agent_kernel.domain.capability import CapabilityGrant
 from agent_kernel.domain.workflow import EdgeSpec, ExecutionCommand, NodeContext, NodeResult, NodeSpec, WorkflowSpec
+from agent_kernel.domain.base import utc_now
 from agent_kernel.hosts.dto import EventStreamEnvelope, error_response, ok_response
+from agent_kernel.config import LLMConfig
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.policy import ApprovalService, HumanInterventionService, InterventionOutcome
+from agent_kernel.policy.engine import PolicyEngine
 from agent_kernel.runtime import RuntimeEngine, unit_of_work_factory
 from agent_kernel.workflow import FunctionNodeExecutor, NodeExecutorRegistry
 
@@ -123,6 +136,7 @@ class HTTPHost:
     desktop_chat_service: DesktopChatService | None = None,
     config_center_service: ConfigCenterService | None = None,
     skill_service: SkillService | None = None,
+    default_llm_config: LLMConfig | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._run_control = run_control or RuntimeEngine(uow_factory, NodeExecutorRegistry())
@@ -138,13 +152,41 @@ class HTTPHost:
     )
     self._control_plane = control_plane or ControlPlaneService.from_config({"browser": {"enabled": False}})
     self._desktop_workspace_service = desktop_workspace_service or DesktopWorkspaceService(uow_factory)
+    self._config_center_service = config_center_service or ConfigCenterService(uow_factory)
+    self._skill_service = skill_service or SkillService(uow_factory)
+    ensure_builtin_atomic_skills(self._skill_service)
+    atomic_capabilities = AtomicCapabilityProvider(
+      file_workspace=LocalFileWorkspace(["."]),
+      http_client=UrllibHTTPClient(),
+      delegation=delegation_control,
+    )
+    orchestration_capabilities = OrchestrationCapabilityProvider(
+      uow_factory=uow_factory,
+      task_launcher=self._task_launcher,
+      run_control=self._run_control,
+      delegation_control=delegation_control,
+    )
+    capability_registry = CapabilityRegistry()
+    local_tools = LocalToolExecutor()
+    atomic_capabilities.register(capability_registry, local_tools)
+    orchestration_capabilities.register(capability_registry, local_tools)
+    capability_runtime = CapabilityRuntime(
+      capability_registry,
+      PolicyEngine(grants=_default_desktop_atomic_grants()),
+      local_tools,
+      control_workbench=self._control_plane.workbench,
+      uow_factory=uow_factory,
+    )
     self._desktop_chat_service = desktop_chat_service or DesktopChatService(
       uow_factory,
       self._task_launcher,
       run_control=self._run_control,
+      skill_service=self._skill_service,
+      capability_runtime=capability_runtime,
+      atomic_capabilities=CompositeToolCatalog([atomic_capabilities, orchestration_capabilities]),
+      conversation_task_hub=ConversationTaskHub(uow_factory, self._task_launcher),
+      default_llm_config=default_llm_config,
     )
-    self._config_center_service = config_center_service or ConfigCenterService(uow_factory)
-    self._skill_service = skill_service or SkillService(uow_factory)
 
   def inspect_run(self, run_id: str) -> dict[str, Any]:
     with self._uow_factory() as uow:
@@ -727,15 +769,36 @@ class SampleWorkflowTaskLauncher:
     )
 
 
-def build_server(conn: sqlite3.Connection, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
-  http_host = HTTPHost(unit_of_work_factory(conn))
+def build_server(
+  conn: sqlite3.Connection,
+  host: str = "127.0.0.1",
+  port: int = 0,
+  *,
+  control_config: dict[str, Any] | None = None,
+  default_llm_config: LLMConfig | None = None,
+) -> ThreadingHTTPServer:
+  control_plane = ControlPlaneService.from_config(control_config) if control_config is not None else None
+  http_host = HTTPHost(unit_of_work_factory(conn), control_plane=control_plane, default_llm_config=default_llm_config)
   return ThreadingHTTPServer((host, port), make_handler(http_host))
 
 
-def serve(db_path: str, host: str = "127.0.0.1", port: int = 8080) -> None:
+def serve(
+  db_path: str,
+  host: str = "127.0.0.1",
+  port: int = 8080,
+  *,
+  control_config: dict[str, Any] | None = None,
+  default_llm_config: LLMConfig | None = None,
+) -> None:
   conn = connect_sqlite(db_path, check_same_thread=False)
   try:
-    server = build_server(conn, host=host, port=port)
+    server = build_server(
+      conn,
+      host=host,
+      port=port,
+      control_config=control_config,
+      default_llm_config=default_llm_config,
+    )
     server.serve_forever()
   finally:
     conn.close()
@@ -759,6 +822,49 @@ def _sample_task_workflow() -> WorkflowSpec:
 
 def _sample_task_echo_node(ctx: NodeContext) -> NodeResult:
   return NodeResult(state_patch={"echo": ctx.input.get("title") or ctx.input.get("text")})
+
+
+def _default_desktop_atomic_grants() -> list[CapabilityGrant]:
+  expires_at = utc_now() + timedelta(days=1)
+  capability_ids = [
+    AtomicCapabilityIds.WORKSPACE_READ,
+    AtomicCapabilityIds.WORKSPACE_WRITE,
+    AtomicCapabilityIds.WORKSPACE_PATCH,
+    AtomicCapabilityIds.CODE_EXECUTE,
+    AtomicCapabilityIds.HTTP_REQUEST,
+    AtomicCapabilityIds.BROWSER_SCAN,
+    AtomicCapabilityIds.BROWSER_EXECUTE_JS,
+    AtomicCapabilityIds.BROWSER_NAVIGATE,
+    AtomicCapabilityIds.DESKTOP_SCREENSHOT,
+    AtomicCapabilityIds.DESKTOP_DUMP_UI,
+    AtomicCapabilityIds.DESKTOP_CLICK,
+    AtomicCapabilityIds.DESKTOP_KEY,
+    AtomicCapabilityIds.DESKTOP_TYPE_TEXT,
+    AtomicCapabilityIds.MOBILE_SCREENSHOT,
+    AtomicCapabilityIds.MOBILE_DUMP_UI,
+    AtomicCapabilityIds.MOBILE_TAP,
+    AtomicCapabilityIds.MOBILE_KEY,
+    AtomicCapabilityIds.MOBILE_TYPE_TEXT,
+    AtomicCapabilityIds.MEMORY_CHECKPOINT,
+    AtomicCapabilityIds.MEMORY_EVOLUTION_NOTE,
+    AtomicCapabilityIds.USER_INPUT_REQUEST,
+    AtomicCapabilityIds.AGENT_DELEGATE,
+    AtomicCapabilityIds.AGENT_DELEGATION_STATUS,
+    AtomicCapabilityIds.AGENT_CANCEL_DELEGATION,
+    OrchestrationCapabilityIds.TASK_CREATE,
+    OrchestrationCapabilityIds.WORKFLOW_RUN,
+    OrchestrationCapabilityIds.TASK_STATUS,
+    OrchestrationCapabilityIds.TASK_CANCEL,
+    OrchestrationCapabilityIds.AGENT_PARALLEL_DELEGATE,
+  ]
+  return [
+    CapabilityGrant(
+      grant_id=f"desktop_grant_{capability_id}",
+      capability_id=capability_id,
+      expires_at=expires_at,
+    )
+    for capability_id in capability_ids
+  ]
 
 
 def _tool_call_control_response(outcome: ToolCallControlOutcome) -> dict[str, Any]:

@@ -7,6 +7,12 @@ from datetime import datetime
 import os
 from typing import Any, Protocol
 
+from agent_kernel.app.conversation_task_hub import ConversationTaskHub
+from agent_kernel.agents import ContinuousAgentRunner, ContinuousRunnerConfig
+from agent_kernel.autonomy.builtin_skills import ensure_builtin_atomic_skills
+from agent_kernel.autonomy.skill_service import SkillService
+from agent_kernel.capabilities.atomic import AtomicCapabilityProvider
+from agent_kernel.capabilities.runtime import CapabilityRuntime
 from agent_kernel.config import LLMConfig
 from agent_kernel.domain.base import DomainModel, new_id, utc_now
 from agent_kernel.domain.context import ModelContext
@@ -55,6 +61,11 @@ class DesktopChatService:
     model_gateway: ModelGateway | None = None,
     model_provider_name: str | None = None,
     model_ref: str | None = None,
+    skill_service: SkillService | None = None,
+    capability_runtime: CapabilityRuntime | None = None,
+    atomic_capabilities: AtomicCapabilityProvider | None = None,
+    conversation_task_hub: ConversationTaskHub | None = None,
+    default_llm_config: LLMConfig | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._launcher = launcher
@@ -62,6 +73,11 @@ class DesktopChatService:
     self._model_gateway = model_gateway
     self._model_provider_name = model_provider_name
     self._model_ref = model_ref
+    self._skill_service = skill_service
+    self._capability_runtime = capability_runtime
+    self._atomic_capabilities = atomic_capabilities
+    self._conversation_task_hub = conversation_task_hub
+    self._default_llm_config = default_llm_config
 
   def create_session(self, data: dict[str, Any] | None = None) -> DesktopChatSession:
     raw = data or {}
@@ -116,19 +132,48 @@ class DesktopChatService:
         updated_at=utc_now(),
       )
     )
-    launcher_result = await self._launcher.create_task(
-      {
-        "title": content.strip(),
-        "run_id": run_id,
-        "input": {
-          "chat_session_id": session_id,
-          "message_id": user_message.message_id,
-          "selected_skill_ids": selected_skill_ids,
-          "mode": data.get("mode") or "agent",
+    if self._conversation_task_hub is not None:
+      turn = await self._conversation_task_hub.start_daily_turn(
+        thread_id=session_id,
+        message_id=user_message.message_id,
+        content=content.strip(),
+        run_id=run_id,
+        workspace_id=str(metadata.get("workspace_id") or "default"),
+        title=session.title,
+        metadata=metadata,
+        selected_skill_ids=selected_skill_ids,
+        mode=str(data.get("mode") or "agent"),
+      )
+      launcher_result = {
+        **turn.launcher_result,
+        "conversation_task": {
+          "thread": turn.thread.to_dict(),
+          "message": turn.message.to_dict(),
+          "objective": turn.objective.to_dict(),
+          "task": turn.task.to_dict(),
+          "run_id": turn.run_id,
         },
       }
+    else:
+      launcher_result = await self._launcher.create_task(
+        {
+          "title": content.strip(),
+          "run_id": run_id,
+          "input": {
+            "chat_session_id": session_id,
+            "message_id": user_message.message_id,
+            "selected_skill_ids": selected_skill_ids,
+            "mode": data.get("mode") or "agent",
+          },
+        }
+      )
+    llm_result = await self._complete_with_llm(
+      session_id,
+      content.strip(),
+      selected_skill_ids,
+      run_id,
+      current_message_id=user_message.message_id,
     )
-    llm_result = await self._complete_with_llm(session_id, content.strip(), selected_skill_ids)
     assistant_content = str(llm_result.get("content") or "")
     assistant_message = DesktopChatMessage(
       message_id=new_id("chat_msg"),
@@ -219,6 +264,8 @@ class DesktopChatService:
     session_id: str,
     user_content: str,
     selected_skill_ids: list[str],
+    run_id: str,
+    current_message_id: str | None = None,
   ) -> dict[str, Any]:
     try:
       gateway, provider_name, model_ref = self._resolve_model_gateway()
@@ -232,7 +279,24 @@ class DesktopChatService:
         ),
         "error": {"type": "llm_not_configured", "message": str(exc)},
       }
-    messages = self._build_llm_messages(session_id, user_content, selected_skill_ids)
+    continuous_result = await self._complete_with_continuous_agent(
+      session_id=session_id,
+      user_content=user_content,
+      selected_skill_ids=selected_skill_ids,
+      run_id=run_id,
+      gateway=gateway,
+      provider_name=provider_name,
+      model_ref=model_ref,
+      current_message_id=current_message_id,
+    )
+    if continuous_result is not None:
+      return continuous_result
+    messages = self._build_llm_messages(
+      session_id,
+      user_content,
+      selected_skill_ids,
+      exclude_message_id=current_message_id,
+    )
     try:
       result = await gateway.complete(provider_name, model_ref, ModelContext(messages=messages))
     except Exception as exc:
@@ -247,6 +311,72 @@ class DesktopChatService:
         "raw": result,
       }
     return {"content": content, **{key: value for key, value in result.items() if key != "content"}}
+
+  async def _complete_with_continuous_agent(
+    self,
+    *,
+    session_id: str,
+    user_content: str,
+    selected_skill_ids: list[str],
+    run_id: str,
+    gateway: ModelGateway,
+    provider_name: str,
+    model_ref: str,
+    current_message_id: str | None = None,
+  ) -> dict[str, Any] | None:
+    if self._skill_service is None or self._capability_runtime is None or self._atomic_capabilities is None:
+      return None
+    ensure_builtin_atomic_skills(self._skill_service)
+    active_skills = self._skill_service.list_active()
+    if selected_skill_ids:
+      selected_id_set = set(selected_skill_ids)
+      selected = [skill for skill in active_skills if skill.skill_id in selected_id_set]
+      active_skills = selected or active_skills
+    runner = ContinuousAgentRunner(
+      uow_factory=self._uow_factory,
+      model_gateway=gateway,
+      capability_runtime=self._capability_runtime,
+      tool_catalog=self._atomic_capabilities,
+      skills=active_skills,
+    )
+    try:
+      outcome = await runner.run(
+        run_id=run_id,
+        user_message=user_content,
+        history_messages=self._recent_runner_history(session_id, exclude_message_id=current_message_id),
+        task_id=session_id,
+        agent_id="desktop_daily_agent",
+        scope=session_id,
+        config=ContinuousRunnerConfig(provider_name=provider_name, model_ref=model_ref, max_turns=8),
+      )
+    except Exception as exc:
+      return {
+        "content": f"日常 Agent 执行失败：{exc}",
+        "error": {"type": "daily_agent_execution_failed", "message": str(exc)},
+      }
+    content = _assistant_content_from_runner_output(outcome.output)
+    return {
+      "content": content,
+      "daily_agent": {
+        "run_id": outcome.run_id,
+        "status": outcome.status,
+        "turns": outcome.turns,
+        "output": outcome.output,
+        "pending": outcome.pending,
+        "tool_calls": [
+          {
+            "name": call.name,
+            "capability_id": call.capability_id,
+            "input": call.input,
+            "ok": call.ok,
+            "output": call.output,
+            "error": call.error,
+            "requires_approval": call.requires_approval,
+          }
+          for call in outcome.tool_calls
+        ],
+      },
+    }
 
   def _resolve_model_gateway(self) -> tuple[ModelGateway, str, str]:
     if self._model_gateway is not None and self._model_provider_name and self._model_ref:
@@ -267,19 +397,41 @@ class DesktopChatService:
     with self._uow_factory() as uow:
       record = uow.interactions.get_record("config_section", "llm")
     data = record.get("data", {}) if isinstance(record, dict) and isinstance(record.get("data"), dict) else {}
-    provider = str(data.get("provider") or os.getenv("AGENT_KERNEL_LLM_PROVIDER") or "openai-compatible")
-    model = _string_or_none(data.get("model")) or os.getenv("AGENT_KERNEL_LLM_MODEL") or os.getenv("OPENAI_MODEL")
+    defaults = self._default_llm_config
+    provider = str(
+      data.get("provider")
+      or (defaults.provider if defaults is not None else None)
+      or os.getenv("AGENT_KERNEL_LLM_PROVIDER")
+      or "openai-compatible"
+    )
+    model = (
+      _string_or_none(data.get("model"))
+      or (defaults.model if defaults is not None else None)
+      or os.getenv("AGENT_KERNEL_LLM_MODEL")
+      or os.getenv("OPENAI_MODEL")
+    )
     api_key_env = _string_or_none(data.get("api_key_env"))
     api_key = (
       os.getenv(api_key_env) if api_key_env else None
-    ) or _string_or_none(data.get("api_key")) or os.getenv("AGENT_KERNEL_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+    )
+    api_key = (
+      api_key
+      or _string_or_none(data.get("api_key"))
+      or (defaults.api_key if defaults is not None else None)
+      or os.getenv("AGENT_KERNEL_LLM_API_KEY")
+      or os.getenv("OPENAI_API_KEY")
+    )
     base_url = (
       _string_or_none(data.get("base_url"))
+      or (defaults.base_url if defaults is not None else None)
       or os.getenv("AGENT_KERNEL_LLM_BASE_URL")
       or os.getenv("OPENAI_BASE_URL")
       or "https://api.openai.com/v1"
     )
-    timeout = data.get("timeout_seconds", os.getenv("AGENT_KERNEL_LLM_TIMEOUT_SECONDS", 60))
+    timeout = data.get(
+      "timeout_seconds",
+      defaults.timeout_seconds if defaults is not None else os.getenv("AGENT_KERNEL_LLM_TIMEOUT_SECONDS", 60),
+    )
     missing = []
     if not model:
       missing.append("llm.model")
@@ -300,8 +452,13 @@ class DesktopChatService:
     session_id: str,
     user_content: str,
     selected_skill_ids: list[str],
+    exclude_message_id: str | None = None,
   ) -> list[dict[str, Any]]:
-    history = self.list_messages(session_id)[-12:]
+    history = [
+      message
+      for message in self.list_messages(session_id)[-12:]
+      if exclude_message_id is None or message.message_id != exclude_message_id
+    ]
     messages: list[dict[str, Any]] = [
       {
         "role": "system",
@@ -319,6 +476,15 @@ class DesktopChatService:
         messages.append({"role": message.role, "content": message.content})
     messages.append({"role": "user", "content": user_content})
     return messages
+
+  def _recent_runner_history(self, session_id: str, *, exclude_message_id: str | None = None) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for message in self.list_messages(session_id)[-12:]:
+      if exclude_message_id is not None and message.message_id == exclude_message_id:
+        continue
+      if message.role in {"user", "assistant"} and message.content.strip():
+        history.append({"role": message.role, "content": message.content})
+    return history
 
   def _save_session(self, session: DesktopChatSession) -> None:
     with self._uow_factory() as uow:
@@ -354,3 +520,18 @@ def _string_or_none(value: object) -> str | None:
     return None
   text = str(value).strip()
   return text or None
+
+
+def _assistant_content_from_runner_output(output: dict[str, Any]) -> str:
+  content = output.get("content")
+  if isinstance(content, str) and content.strip():
+    return content.strip()
+  summary = output.get("summary")
+  if isinstance(summary, str) and summary.strip():
+    return summary.strip()
+  value = output.get("value")
+  if isinstance(value, str) and value.strip():
+    return value.strip()
+  if output:
+    return str(output)
+  return "日常 Agent 已完成运行，但没有返回可展示内容。"

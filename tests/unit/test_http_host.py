@@ -4,11 +4,17 @@ import unittest
 from datetime import timedelta
 
 from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
+from agent_kernel.app.conversation_task_hub import ConversationTaskHub
 from agent_kernel.app.control_plane import ControlPlaneService
 from agent_kernel.app.desktop_chat import DesktopChatService
+from agent_kernel.app.orchestration_tools import CompositeToolCatalog, OrchestrationCapabilityIds, OrchestrationCapabilityProvider
+from agent_kernel.autonomy import SkillService
+from agent_kernel.capabilities import CapabilityRegistry, CapabilityRuntime
+from agent_kernel.capabilities.adapters import LocalToolExecutor
 from agent_kernel.capabilities.adapters.control import ControlResult, ControlTarget, ControlWorkbench, FakeControlBackend
 from agent_kernel.domain import (
   ArtifactRef,
+  CapabilityGrant,
   NodeStepRecord,
   NodeStepStatus,
   RunState,
@@ -20,9 +26,11 @@ from agent_kernel.domain import (
 )
 from agent_kernel.domain.base import utc_now
 from agent_kernel.hosts.http import HTTPHost, SampleWorkflowTaskLauncher, make_handler
+from agent_kernel.config import LLMConfig
 from agent_kernel.models import MockModelProvider, ModelGateway
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.policy import ApprovalService
+from agent_kernel.policy.engine import PolicyEngine
 from agent_kernel.runtime import RuntimeEngine, unit_of_work_factory
 from agent_kernel.workflow import NodeExecutorRegistry
 from tests.integration.test_runtime_engine import build_three_node_workflow
@@ -587,12 +595,215 @@ class HTTPHostTests(unittest.TestCase):
       self.assertEqual(empty_messages["messages"], [])
       self.assertEqual(created_skill["skill"]["status"], "active")
       self.assertEqual(updated_skill["skill"]["description"], "评审代码风险和回归风险")
-      self.assertEqual(skills["skills"][0]["skill_id"], skill_id)
+      self.assertIn(skill_id, [skill["skill_id"] for skill in skills["skills"]])
       self.assertEqual(deprecated["skill"]["status"], "deprecated")
       self.assertGreaterEqual(len(config_sections["config_sections"]), 1)
       self.assertEqual(updated_config["config_section"]["data"]["model"], "gpt-test")
       self.assertEqual(updated_config["config_section"]["data"]["api_key"], "***")
       self.assertEqual(llm_config["config_section"]["data"]["api_key"], "***")
+    finally:
+      conn.close()
+
+  def test_default_chat_entry_records_conversation_task_links(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      handler = make_handler(HTTPHost(uow_factory))
+
+      created_session = self._request_json(handler, "POST", "/chat/sessions", {"title": "日常对话"})
+      session_id = created_session["chat_session"]["session_id"]
+      sent = self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "帮我搜索今天的天气", "metadata": {"workspace_id": "workspace_default"}},
+      )
+
+      assistant = sent["messages"][1]
+      conversation_task = assistant["metadata"]["task_result"]["conversation_task"]
+      with UnitOfWork(conn) as uow:
+        thread_record_id = f"conversation_thread:{session_id}"
+        thread = uow.interactions.get_record("conversation_thread", thread_record_id)
+        message = uow.interactions.get_record(
+          "conversation_message",
+          f"conversation_message:{sent['messages'][0]['message_id']}",
+        )
+        task = uow.interactions.get_record("task", f"task:{conversation_task['task']['task_id']}")
+        links = uow.interactions.list_records("thread_task_link", thread_record_id)
+
+      self.assertEqual(conversation_task["thread"]["thread_id"], session_id)
+      self.assertEqual(conversation_task["message"]["content"]["text"], "帮我搜索今天的天气")
+      self.assertEqual(conversation_task["task"]["status"], "ready")
+      self.assertEqual(conversation_task["run_id"], assistant["run_id"])
+      self.assertEqual(thread["workspace_id"], "workspace_default")
+      self.assertEqual(message["role"], "user")
+      self.assertEqual(task["title"], "帮我搜索今天的天气")
+      self.assertEqual(links[0]["run_id"], assistant["run_id"])
+    finally:
+      conn.close()
+
+  def test_default_chat_daily_agent_executes_model_selected_tool(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      gateway = ModelGateway()
+      provider = MockModelProvider(
+        responses=[
+          {
+            "tool_calls": [
+              {
+                "name": "task_status",
+                "input": {"run_id": "chat_tool_run"},
+              }
+            ]
+          },
+          {
+            "finish": True,
+            "output": {"content": "已经查询到任务运行状态。"},
+          },
+        ]
+      )
+      gateway.register_provider("mock", provider)
+      launcher = SampleWorkflowTaskLauncher(uow_factory)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      orchestration = OrchestrationCapabilityProvider(
+        uow_factory=uow_factory,
+        task_launcher=launcher,
+        run_control=RuntimeEngine(uow_factory, NodeExecutorRegistry()),
+      )
+      orchestration.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_task_status",
+              capability_id=OrchestrationCapabilityIds.TASK_STATUS,
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        uow_factory=uow_factory,
+      )
+      chat_service = DesktopChatService(
+        uow_factory,
+        launcher,
+        model_gateway=gateway,
+        model_provider_name="mock",
+        model_ref="mock-model",
+        skill_service=SkillService(uow_factory),
+        capability_runtime=runtime,
+        atomic_capabilities=CompositeToolCatalog([orchestration]),
+        conversation_task_hub=ConversationTaskHub(uow_factory, launcher),
+      )
+      handler = make_handler(HTTPHost(uow_factory, desktop_chat_service=chat_service))
+
+      created_session = self._request_json(handler, "POST", "/chat/sessions", {"title": "日常对话"})
+      session_id = created_session["chat_session"]["session_id"]
+      sent = self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "查一下当前任务状态", "run_id": "chat_tool_run"},
+      )
+
+      self.assertEqual(sent["messages"][1]["content"], "已经查询到任务运行状态。")
+      daily_agent = sent["messages"][1]["metadata"]["llm_result"]["daily_agent"]
+      self.assertEqual(daily_agent["tool_calls"][0]["name"], "task_status")
+      self.assertEqual(daily_agent["tool_calls"][0]["capability_id"], "meadow.task.status")
+      self.assertTrue(daily_agent["tool_calls"][0]["ok"])
+      tool_names = [schema["function"]["name"] for schema in provider.calls[0][1].tool_schemas]
+      self.assertIn("task_status", tool_names)
+      with UnitOfWork(conn) as uow:
+        tool_calls = uow.tool_calls.list_by_run("chat_tool_run")
+      self.assertEqual(tool_calls[0].capability_id, "meadow.task.status")
+    finally:
+      conn.close()
+
+  def test_default_chat_daily_agent_receives_session_history(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      gateway = ModelGateway()
+      provider = MockModelProvider(
+        responses=[
+          {"finish": True, "output": {"content": "我需要先知道城市。"}},
+          {"finish": True, "output": {"content": "深圳今天多云。"}},
+        ]
+      )
+      gateway.register_provider("mock", provider)
+      launcher = SampleWorkflowTaskLauncher(uow_factory)
+      runtime = CapabilityRuntime(
+        CapabilityRegistry(),
+        PolicyEngine(grants=[]),
+        LocalToolExecutor(),
+        uow_factory=uow_factory,
+      )
+      chat_service = DesktopChatService(
+        uow_factory,
+        launcher,
+        model_gateway=gateway,
+        model_provider_name="mock",
+        model_ref="mock-model",
+        skill_service=SkillService(uow_factory),
+        capability_runtime=runtime,
+        atomic_capabilities=CompositeToolCatalog([]),
+        conversation_task_hub=ConversationTaskHub(uow_factory, launcher),
+      )
+      handler = make_handler(HTTPHost(uow_factory, desktop_chat_service=chat_service))
+
+      created_session = self._request_json(handler, "POST", "/chat/sessions", {"title": "日常对话"})
+      session_id = created_session["chat_session"]["session_id"]
+      self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "帮我用浏览器查看一下今天的天气"},
+      )
+      second = self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "深圳"},
+      )
+
+      self.assertEqual(second["messages"][1]["content"], "深圳今天多云。")
+      second_context = provider.calls[1][1]
+      history = [
+        message
+        for message in second_context.messages
+        if message.get("role") in {"user", "assistant"} and isinstance(message.get("content"), str)
+      ]
+      self.assertEqual(history[-3]["content"], "帮我用浏览器查看一下今天的天气")
+      self.assertEqual(history[-2]["content"], "我需要先知道城市。")
+      self.assertEqual(history[-1]["content"], "深圳")
+    finally:
+      conn.close()
+
+  def test_desktop_chat_uses_default_llm_config_when_config_center_is_empty(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      service = DesktopChatService(
+        uow_factory,
+        SampleWorkflowTaskLauncher(uow_factory),
+        default_llm_config=LLMConfig(
+          provider="openai-compatible",
+          model="model-from-file",
+          api_key="key-from-file",
+          base_url="https://llm.example/v1",
+          timeout_seconds=99,
+        ),
+      )
+
+      config = service._load_llm_config()
+
+      self.assertEqual(config.model, "model-from-file")
+      self.assertEqual(config.api_key, "key-from-file")
+      self.assertEqual(config.base_url, "https://llm.example/v1")
+      self.assertEqual(config.timeout_seconds, 99)
     finally:
       conn.close()
 

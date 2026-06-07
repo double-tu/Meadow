@@ -7,6 +7,7 @@ const state = {
   configSection: "llm",
   sending: false,
   chatError: "",
+  optimisticMessages: [],
 };
 
 const viewMeta = {
@@ -154,10 +155,13 @@ function renderChatMain(session, messages, skills) {
     box.append(errorBlock(state.chatError));
   }
   if (!messages.length) {
-    box.append(empty("直接输入日常问题、任务或要组合的工作流。"));
+    if (!state.optimisticMessages.length) {
+      box.append(empty("直接输入日常问题、任务或要组合的工作流。"));
+    }
   } else {
     for (const message of messages) box.append(messageBubble(message));
   }
+  for (const message of state.optimisticMessages) box.append(messageBubble(message));
   if (state.sending) {
     box.append(div("message assistant", div("message-meta", "Meadow"), document.createTextNode("执行中... 正在创建任务并等待结果。")));
   }
@@ -187,20 +191,32 @@ async function sendChatMessage(textareaNode, skills) {
   const content = textareaNode.value.trim();
   if (!content) return;
   textareaNode.value = "";
+  state.optimisticMessages = [
+    {
+      message_id: `optimistic_${Date.now()}`,
+      session_id: state.chatSessionId,
+      role: "user",
+      content,
+      metadata: { optimistic: true },
+    },
+  ];
   state.sending = true;
   state.chatError = "";
   await render();
+  let sent = false;
   try {
     await apiPost(`/chat/sessions/${encodeURIComponent(state.chatSessionId)}/messages`, {
       content,
       selected_skill_ids: skills.map((skill) => skill.skill_id),
       mode: "agent",
     });
+    sent = true;
   } catch (error) {
     state.chatError = error.message || String(error);
   } finally {
     state.sending = false;
   }
+  if (sent) state.optimisticMessages = [];
   await render();
 }
 
@@ -223,7 +239,8 @@ function renderChatInspector(skills, approvals, workspaces, mcp) {
 function messageBubble(message) {
   const node = div(`message ${message.role}`);
   const meta = div("message-meta");
-  meta.textContent = message.role === "user" ? "你" : `Meadow${message.run_id ? ` · ${message.run_id}` : ""}`;
+  const suffix = message.metadata?.optimistic ? " · 发送中" : "";
+  meta.textContent = message.role === "user" ? `你${suffix}` : `Meadow${message.run_id ? ` · ${message.run_id}` : ""}`;
   const content = document.createElement("div");
   content.textContent = message.content;
   node.append(meta, content);

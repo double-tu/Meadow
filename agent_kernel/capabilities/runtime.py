@@ -244,7 +244,7 @@ class CapabilityRuntime:
     if not isinstance(payload, dict):
       raise TypeError("payload must be a dictionary.")
     if action == "inspect_browser":
-      return await workbench.inspect_browser(target_id)
+      return await workbench.inspect_browser(target_id, payload=payload)
     if action == "execute_js":
       code = payload.get("code")
       if not isinstance(code, str):

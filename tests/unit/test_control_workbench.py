@@ -1,10 +1,12 @@
 from datetime import timedelta
+import json
 import unittest
 
 from agent_kernel.capabilities import CapabilityCallContext, CapabilityRegistry, CapabilityRuntime
 from agent_kernel.capabilities.adapters import (
   ADBMobileBackend,
   BrowserLinkHTTPBackend,
+  ControlCommand,
   CommandResult,
   ControlResult,
   ControlTarget,
@@ -194,7 +196,7 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(transport.requests[-1]["cmd"], "execute_js")
     self.assertEqual(transport.requests[-1]["sessionId"], "tab_1")
 
-  async def test_browser_link_http_backend_navigate_uses_execute_js_bridge_command(self) -> None:
+  async def test_browser_link_http_backend_navigate_existing_target_uses_execute_js_bridge_command(self) -> None:
     transport = _BrowserLinkTransport()
     backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
 
@@ -207,6 +209,44 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(transport.requests[-1]["cmd"], "execute_js")
     self.assertIn("window.location.href", transport.requests[-1]["code"])
     self.assertIn("https://meadow.example", transport.requests[-1]["code"])
+
+  async def test_browser_link_http_backend_navigate_without_target_creates_tab_via_extension(self) -> None:
+    transport = _BrowserLinkTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
+
+    result = await backend.execute(
+      ControlCommand.create("browser", "navigate", target_id=None, payload={"url": "https://meadow.example"})
+    )
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["target_id"], "tab_2")
+    self.assertEqual(transport.requests[-1]["cmd"], "execute_js")
+    command = json.loads(transport.requests[-1]["code"])
+    self.assertEqual(command["cmd"], "tabs")
+    self.assertEqual(command["method"], "create")
+    self.assertEqual(command["url"], "https://meadow.example")
+
+  async def test_browser_link_http_backend_inspect_fetches_page_summary(self) -> None:
+    transport = _BrowserLinkTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
+
+    result = await backend.execute(ControlCommand.create("browser", "inspect", target_id="tab_1"))
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["active_target_id"], "tab_1")
+    self.assertEqual(result.output["page"]["title"], "Example Page")
+    self.assertEqual(result.output["page"]["feed_titles"], ["推荐 A", "推荐 B"])
+
+  async def test_browser_link_http_backend_inspect_tabs_only_skips_page_summary(self) -> None:
+    transport = _BrowserLinkTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
+
+    result = await backend.execute(ControlCommand.create("browser", "inspect", payload={"tabs_only": True}))
+
+    self.assertTrue(result.ok)
+    self.assertIn("targets", result.output)
+    self.assertNotIn("page", result.output)
+    self.assertEqual([request["cmd"] for request in transport.requests], ["get_all_sessions"])
 
   async def test_adb_mobile_backend_lists_devices_and_parses_ui_dump(self) -> None:
     runner = _ADBRunner()
@@ -512,7 +552,40 @@ class _BrowserLinkTransport:
           }
         ]
       }
+    if payload.get("cmd") == "find_session":
+      return {
+        "r": [
+          [
+            "tab_1",
+            {
+              "url": "https://example.test",
+              "title": "Example",
+              "type": "ext_ws",
+            },
+          ]
+        ]
+      }
     if payload.get("cmd") == "execute_js":
+      code = payload.get("code")
+      if isinstance(code, str):
+        try:
+          command = json.loads(code)
+        except json.JSONDecodeError:
+          command = None
+        if isinstance(command, dict) and command.get("cmd") == "tabs" and command.get("method") == "create":
+          return {"r": {"data": {"id": "tab_2", "url": command["url"], "title": "Created"}}}
+        if "feed_titles" in code:
+          return {
+            "r": {
+              "data": {
+                "url": "https://example.test",
+                "title": "Example Page",
+                "feed_titles": ["推荐 A", "推荐 B"],
+                "visible_cards": [],
+                "text": "推荐 A 推荐 B",
+              }
+            }
+          }
       return {"r": {"data": "Example"}}
     return {"r": {"error": "unsupported"}}
 

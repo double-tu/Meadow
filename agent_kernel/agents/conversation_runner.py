@@ -17,6 +17,8 @@ from agent_kernel.capabilities.runtime import CapabilityCallContext, CapabilityR
 from agent_kernel.domain.base import new_id
 from agent_kernel.domain.context import ModelContext
 from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
+from agent_kernel.domain.serialization import to_json
+from agent_kernel.domain.skill import SkillCard
 from agent_kernel.models.gateway import ModelGateway
 from agent_kernel.policy.engine import PolicyDecisionType
 
@@ -63,17 +65,22 @@ class ContinuousAgentRunner:
     capability_runtime: CapabilityRuntime,
     tool_catalog: AtomicToolCatalog,
     context_manager=None,
+    skills: list[SkillCard] | None = None,
+    system_instructions: str | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._model_gateway = model_gateway
     self._capability_runtime = capability_runtime
     self._tool_catalog = tool_catalog
     self._context_manager = context_manager
+    self._skills = skills or []
+    self._system_instructions = system_instructions or _DEFAULT_SYSTEM_INSTRUCTIONS
 
   async def run(
     self,
     *,
     user_message: str,
+    history_messages: list[dict[str, Any]] | None = None,
     run_id: str | None = None,
     task_id: str | None = None,
     agent_id: str | None = None,
@@ -83,7 +90,12 @@ class ContinuousAgentRunner:
     config = config or ContinuousRunnerConfig()
     run_id = run_id or new_id("conv_run")
     scope = scope or run_id
-    messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+    messages: list[dict[str, Any]] = [
+      {"role": "system", "content": self._system_instructions},
+      *self._skill_messages(),
+      *_normalize_history_messages(history_messages or []),
+      {"role": "user", "content": user_message},
+    ]
     all_tool_calls: list[ContinuousToolCallRecord] = []
     self._append_event(
       RuntimeEvent(
@@ -172,20 +184,35 @@ class ContinuousAgentRunner:
             "tool_name": call.display_name,
             "capability_id": call.capability_id,
             "ok": record.ok,
-            "output": record.output,
-            "error": record.error,
+            "output": _compact_for_json(record.output, max_bytes=6000),
+            "error": _compact_for_json(record.error, max_bytes=2000),
           }
         )
       all_tool_calls.extend(turn_records)
-      self._append_turn_event(run_id, agent_id, task_id, turn, {"tool_results": tool_messages}, turn_records)
+      self._append_turn_event(
+        run_id,
+        agent_id,
+        task_id,
+        turn,
+        {"tool_results": _compact_for_json(tool_messages, max_bytes=5000)},
+        turn_records,
+      )
       messages = [
+        {"role": "system", "content": self._system_instructions},
+        *self._skill_messages(),
+        *_normalize_history_messages(history_messages or []),
+        {"role": "user", "content": user_message},
         {
           "role": "user",
           "content": {
             "type": "tool_results",
+            "original_user_goal": user_message,
             "turn": turn,
             "results": tool_messages,
-            "instruction": "Use these results to continue, call another tool, or finish.",
+            "instruction": (
+              "Continue working on original_user_goal. If the goal is not completed yet, call the next required tool. "
+              "Do not finish by only summarizing intermediate inspection results unless they fully satisfy the original goal."
+            ),
           },
         }
       ]
@@ -194,9 +221,35 @@ class ContinuousAgentRunner:
       run_id=run_id,
       status="max_turns_exceeded",
       turns=config.max_turns,
-      output={},
+      output=_fallback_output_from_tool_calls(all_tool_calls),
       tool_calls=all_tool_calls,
     )
+
+  def _skill_messages(self) -> list[dict[str, Any]]:
+    if not self._skills:
+      return []
+    return [
+      {
+        "role": "system",
+        "content": {
+          "type": "selected_skills",
+          "skills": [
+            {
+              "skill_id": skill.skill_id,
+              "name": skill.name,
+              "description": skill.description,
+              "when_to_use": skill.when_to_use,
+              "instructions": skill.instructions,
+              "recommended_tools": skill.recommended_tools,
+              "recommended_workflows": skill.recommended_workflows,
+              "constraints": skill.constraints,
+              "failure_modes": skill.failure_modes,
+            }
+            for skill in self._skills
+          ],
+        },
+      }
+    ]
 
   def _build_context(
     self,
@@ -291,7 +344,7 @@ class ContinuousAgentRunner:
         payload={
           "runner": "continuous_agent",
           "turn": turn,
-          "output": output,
+          "output": _compact_for_json(output, max_bytes=5000),
           "tool_calls": [
             {
               "name": call.name,
@@ -308,3 +361,133 @@ class ContinuousAgentRunner:
   def _append_event(self, event: RuntimeEvent) -> None:
     with self._uow_factory() as uow:
       uow.events.append(event)
+
+
+_DEFAULT_SYSTEM_INSTRUCTIONS = (
+  "你是 Meadow 日常 Agent。你必须基于用户目标、上下文、记忆和 Skills 自主决定下一步。"
+  "需要实时信息、浏览器/桌面/移动控制、文件、代码执行、MCP、Workflow、子代理或任务分配时，"
+  "优先调用可用工具，不要只说明自己可以做。工具结果会回灌给你继续推理。"
+  "如果工具失败，必须基于失败结果继续尝试其他可用工具，或如实说明失败原因；不能编造工具没有返回的信息。"
+  "如果任务完成，返回最终中文回答；如果缺少关键信息，调用用户输入能力。"
+)
+
+
+def _normalize_history_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  normalized: list[dict[str, Any]] = []
+  for message in messages:
+    role = message.get("role")
+    if role not in {"user", "assistant"}:
+      continue
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+      continue
+    normalized.append({"role": role, "content": content})
+  return normalized
+
+
+def _compact_for_json(value: Any, *, max_bytes: int) -> Any:
+  if value is None:
+    return None
+  try:
+    encoded = to_json(value).encode("utf-8")
+  except TypeError:
+    value = str(value)
+    encoded = to_json(value).encode("utf-8")
+  if len(encoded) <= max_bytes:
+    return value
+  if isinstance(value, str):
+    return _truncate_text(value, max_bytes=max_bytes)
+  if isinstance(value, dict):
+    compact: dict[str, Any] = {
+      "_truncated": True,
+      "_original_bytes": len(encoded),
+    }
+    remaining = max(512, max_bytes - 256)
+    for key, item in value.items():
+      if key in {"artifact_refs", "body_summary", "error", "status", "ok", "url", "title", "targets"}:
+        compact[key] = _compact_for_json(item, max_bytes=min(remaining, 2000))
+        continue
+      if key in {"body", "content", "text", "result"}:
+        compact[key] = _compact_for_json(item, max_bytes=min(remaining, 3000))
+        continue
+      if len(to_json(compact).encode("utf-8")) >= max_bytes - 512:
+        compact["_omitted_after_key"] = str(key)
+        break
+      compact[key] = _compact_for_json(item, max_bytes=min(remaining, 3000))
+    return compact
+  if isinstance(value, list):
+    items = []
+    for item in value[:8]:
+      items.append(_compact_for_json(item, max_bytes=max(512, max_bytes // 4)))
+      if len(to_json(items).encode("utf-8")) >= max_bytes - 512:
+        break
+    return {
+      "_truncated": True,
+      "_original_bytes": len(encoded),
+      "_original_count": len(value),
+      "items": items,
+    }
+  return {
+    "_truncated": True,
+    "_original_bytes": len(encoded),
+    "preview": _truncate_text(str(value), max_bytes=max_bytes - 128),
+  }
+
+
+def _truncate_text(value: str, *, max_bytes: int) -> str:
+  encoded = value.encode("utf-8")
+  if len(encoded) <= max_bytes:
+    return value
+  budget = max(0, max_bytes - 96)
+  preview = encoded[:budget].decode("utf-8", errors="ignore")
+  return f"{preview}\n...[truncated {len(encoded) - budget} bytes]"
+
+
+def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord]) -> dict[str, Any]:
+  if not tool_calls:
+    return {
+      "content": "日常 Agent 达到最大执行轮次，但没有完成任何工具调用。请重试或把目标拆得更具体。",
+    }
+  feed_titles: list[str] = []
+  successful_urls: list[str] = []
+  failed_tools: list[str] = []
+  for call in tool_calls:
+    if call.ok:
+      url = call.output.get("url")
+      if isinstance(url, str) and url:
+        successful_urls.append(url)
+      body_summary = call.output.get("body_summary")
+      if isinstance(body_summary, dict):
+        titles = body_summary.get("feed_titles")
+        if isinstance(titles, list):
+          feed_titles.extend(str(title) for title in titles if title)
+    elif call.error:
+      error_type = call.error.get("type", "unknown_error")
+      failed_tools.append(f"{call.name}: {error_type}")
+  if feed_titles:
+    lines = ["已获取到页面数据，但执行轮次已用完。根据已返回的数据，看到的推荐内容包括："]
+    lines.extend(f"- {title}" for title in _unique_strings(feed_titles)[:12])
+    if failed_tools:
+      lines.append("")
+      lines.append("部分浏览器操作失败：" + "；".join(failed_tools[-3:]))
+    return {"content": "\n".join(lines)}
+  summary = [
+    f"日常 Agent 达到最大执行轮次，已执行 {len(tool_calls)} 次工具调用。",
+    f"成功 {sum(1 for call in tool_calls if call.ok)} 次，失败 {sum(1 for call in tool_calls if not call.ok)} 次。",
+  ]
+  if successful_urls:
+    summary.append("已成功请求：" + "、".join(_unique_strings(successful_urls)[-3:]))
+  if failed_tools:
+    summary.append("最近失败：" + "；".join(failed_tools[-3:]))
+  return {"content": "\n".join(summary)}
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+  seen: set[str] = set()
+  result: list[str] = []
+  for value in values:
+    if value in seen:
+      continue
+    seen.add(value)
+    result.append(value)
+  return result

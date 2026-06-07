@@ -14,6 +14,12 @@
 
 目标: 构造 Meadow 原生桌面工作台，参考 `external_repos/AionUi`、`external_repos/codeg`、`external_repos/GenericAgent` 的界面形态，但不硬融合其运行时结构。桌面端必须保持 API-first，只通过 HTTP/SSE/WebSocket/本地 sidecar 通信接入 Python 内核。
 
+- [x] 梳理日常对话 Agent 流转: `docs/daily-agent-flow.md` 明确 Desktop Chat -> Conversation & Task Hub -> Default Daily Agent Workflow -> Agent Runtime Loop -> Capability/Workflow/Agent/MCP/Workbench -> Event/Artifact/Memory -> UI 的边界。
+- [ ] 实现 Conversation & Task Hub MVP: 将日常对话消息映射为 Thread/Turn/Objective/Task/Run 关联, DesktopChatService 不直接承担 Agent Loop。
+- [ ] 实现 Default Daily Agent Workflow: 日常对话默认启动可恢复、可审计、可暂停/取消的 Agent Run, 而不是单次 chat completion。
+- [ ] 增强 Agent Runtime 多轮行动循环: 模型基于 Context/Memory/Skills 自主选择 final response、capability call、workflow call、agent delegation、MCP/tool、user input request, 并把真实结果回灌继续推理。
+- [ ] 实现模型可见能力目录裁剪: 内置原子能力、Workflow catalog、Agent delegation catalog、MCP catalog、Workbench/control catalog、Policy/grant context 通过 Skills/Context 注入, 由模型自主决策使用。
+- [ ] 将日常对话控制对齐真实 runtime: pause/retry/clear/resume/cancel 映射到 run/task/tool-call/session 控制, 而不是只改 UI 或 chat session 状态。
 - [x] 完成桌面端基础 API: workspace 聚合、全局审批队列、tool-call 列表、live event stream 游标、scheduled task 更新/删除/触发历史、control command 执行。
 - [x] 完成桌面端壳骨架: 本地启动/连接 Python HTTP host，提供 Workspace、Approvals、Events、MCP、Scheduled Tasks、Control 基础页面。
 - [ ] 完成多 Agent/Team 可视化: leader/worker、delegation status card、taskboard、channel timeline、workspace isolation/patch review 入口。

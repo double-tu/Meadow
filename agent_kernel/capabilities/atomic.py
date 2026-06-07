@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import re
 import sys
 import tempfile
 from typing import Any, Protocol
@@ -104,6 +105,53 @@ class AgentDelegationTool(Protocol):
     reason: str = "delegation cancelled",
   ):
     ...
+
+
+def _summarize_http_body(body: str) -> dict[str, Any]:
+  title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+  page_title = _clean_html_text(title_match.group(1)) if title_match else None
+  feed_titles = _unique_preserve_order(
+    _clean_json_text(match)
+    for match in re.findall(r'"displayTitle"\s*:\s*"([^"]+)"', body)
+  )
+  if not feed_titles:
+    feed_titles = _unique_preserve_order(
+      _clean_json_text(match)
+      for match in re.findall(r'"title"\s*:\s*"([^"]{2,120})"', body)
+    )
+  summary: dict[str, Any] = {
+    "page_title": page_title,
+    "body_bytes": len(body.encode("utf-8")),
+  }
+  if feed_titles:
+    summary["feed_titles"] = feed_titles[:20]
+    summary["feed_count"] = len(feed_titles)
+  return summary
+
+
+def _clean_html_text(value: str) -> str:
+  return re.sub(r"\s+", " ", value).strip()
+
+
+def _clean_json_text(value: str) -> str:
+  decoded = value
+  if "\\" in value:
+    try:
+      decoded = bytes(value, "utf-8").decode("unicode_escape")
+    except UnicodeDecodeError:
+      decoded = value
+  return re.sub(r"\s+", " ", decoded).strip()
+
+
+def _unique_preserve_order(values) -> list[str]:
+  seen: set[str] = set()
+  result: list[str] = []
+  for value in values:
+    if not value or value in seen:
+      continue
+    seen.add(value)
+    result.append(value)
+  return result
 
 
 class AtomicCapabilityProvider:
@@ -335,7 +383,12 @@ class AtomicCapabilityProvider:
           "timeout_seconds": {"type": "number"},
         },
       ),
-      self._schema("browser_scan", "Inspect browser targets or current page through a control workbench.", []),
+      self._schema(
+        "browser_scan",
+        "Inspect browser targets and the current/latest page summary through a control workbench. Use tabs_only=true to only list tabs.",
+        [],
+        {"tabs_only": {"type": "boolean"}},
+      ),
       self._schema("browser_execute_js", "Execute JavaScript in a browser target.", ["code"]),
       self._schema("browser_navigate", "Navigate a browser target to a URL.", ["url"]),
       self._schema("desktop_screenshot", "Capture a desktop target screenshot.", []),
@@ -751,6 +804,7 @@ class AtomicCapabilityProvider:
         "status": response.status,
         "headers": response.headers,
         "body": response.body,
+        "body_summary": _summarize_http_body(response.body),
         "url": response.url,
       }
     )

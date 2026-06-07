@@ -38,6 +38,43 @@ ControlActionKind = Literal[
 ]
 
 
+_BROWSER_PAGE_SUMMARY_JS = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const unique = (values) => {
+    const seen = new Set();
+    const out = [];
+    for (const value of values) {
+      const text = clean(value);
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      out.push(text);
+    }
+    return out;
+  };
+  const html = document.documentElement ? document.documentElement.outerHTML : '';
+  const feedTitles = unique(
+    Array.from(html.matchAll(/"displayTitle"\s*:\s*"([^"]+)"/g)).map((m) => {
+      try { return JSON.parse('"' + m[1] + '"'); } catch (_) { return m[1]; }
+    })
+  ).slice(0, 30);
+  const visibleCards = unique(
+    Array.from(document.querySelectorAll('article, [class*="note"], [class*="feed"], a, h1, h2, h3'))
+      .map((el) => clean(el.innerText || el.textContent || ''))
+      .filter((text) => text.length >= 2 && text.length <= 160)
+  ).slice(0, 30);
+  const text = clean(document.body ? document.body.innerText : '').slice(0, 12000);
+  return {
+    url: location.href,
+    title: document.title,
+    feed_titles: feedTitles,
+    visible_cards: visibleCards,
+    text,
+  };
+})()
+"""
+
+
 @dataclass(slots=True)
 class ControlTarget(DomainModel):
   target_id: str
@@ -180,15 +217,53 @@ class BrowserLinkHTTPBackend:
       return ControlResult(ok=False, error={"type": "browser_link_unavailable", "message": str(exc)})
 
   def _inspect(self, command: ControlCommand) -> ControlResult:
-    if command.target_id is None:
-      targets = [target.to_dict() for target in self.list_targets("browser")]
+    targets = [target.to_dict() for target in self.list_targets("browser")]
+    tabs_only = bool(command.payload.get("tabs_only", False))
+    if command.target_id is None and tabs_only:
       return ControlResult(ok=True, output={"targets": targets})
-    response = self._post_json({"cmd": "find_session", "url_pattern": command.target_id})
+    session_id = self._resolve_scan_session_id(command.target_id)
+    output: dict[str, Any] = {"targets": targets}
+    if session_id is None:
+      return ControlResult(ok=True, output=output)
+    page = self._inspect_page(session_id, command.timeout_seconds)
+    if page.ok:
+      output["active_target_id"] = session_id
+      output["page"] = page.output.get("page", page.output)
+    else:
+      output["page_error"] = page.error
+    return ControlResult(ok=True, output=output)
+
+  def _resolve_scan_session_id(self, target_id: str | None) -> str | None:
+    if target_id is None:
+      response = self._post_json({"cmd": "find_session", "url_pattern": ""})
+    else:
+      response = self._post_json({"cmd": "find_session", "url_pattern": target_id})
     matched = response.get("r", [])
-    if not isinstance(matched, list):
-      return ControlResult(ok=False, error={"type": "invalid_browser_link_response", "response": response})
-    targets = [self._target_from_match(item).to_dict() for item in matched if self._is_match(item)]
-    return ControlResult(ok=True, output={"targets": targets})
+    if isinstance(matched, list) and matched:
+      item = matched[0]
+      if self._is_match(item):
+        return str(item[0])
+    if target_id:
+      return target_id
+    targets = self.list_targets("browser")
+    return targets[-1].target_id if targets else None
+
+  def _inspect_page(self, session_id: str, timeout_seconds: float | None = None) -> ControlResult:
+    result = self._execute_js(
+      ControlCommand(
+        command_id="inspect_page",
+        target_kind="browser",
+        action="execute_js",
+        target_id=session_id,
+        payload={"code": _BROWSER_PAGE_SUMMARY_JS},
+        timeout_seconds=timeout_seconds,
+      )
+    )
+    if not result.ok:
+      return result
+    raw = result.output.get("result")
+    page = raw.get("data") if isinstance(raw, dict) else raw
+    return ControlResult(ok=True, output={"page": page if isinstance(page, dict) else {"value": page}})
 
   def _execute_js(self, command: ControlCommand) -> ControlResult:
     code = command.payload.get("code")
@@ -211,6 +286,12 @@ class BrowserLinkHTTPBackend:
     url = command.payload.get("url")
     if not isinstance(url, str):
       return ControlResult(ok=False, error={"type": "invalid_control_command", "message": "url is required"})
+    if command.target_id is None:
+      created = self._create_tab(url, command.timeout_seconds)
+      if created.ok:
+        output = dict(created.output)
+        output["url"] = url
+        return ControlResult(ok=True, output=output)
     code = "window.location.href = " + json.dumps(url) + ";"
     result = self._execute_js(
       ControlCommand(
@@ -227,6 +308,37 @@ class BrowserLinkHTTPBackend:
     output = dict(result.output)
     output["url"] = url
     return ControlResult(ok=True, output=output)
+
+  def _create_tab(self, url: str, timeout_seconds: float | None = None) -> ControlResult:
+    command = {"cmd": "tabs", "method": "create", "url": url, "active": True}
+    result = self._execute_js(
+      ControlCommand(
+        command_id="create_tab",
+        target_kind="browser",
+        action="execute_js",
+        target_id=None,
+        payload={"code": json.dumps(command, ensure_ascii=False)},
+        timeout_seconds=timeout_seconds,
+      )
+    )
+    if not result.ok:
+      return result
+    raw = result.output.get("result")
+    data = raw.get("data") if isinstance(raw, dict) else raw
+    if isinstance(data, dict) and data.get("id") is not None:
+      return ControlResult(
+        ok=True,
+        output={
+          "target_id": str(data["id"]),
+          "target": {
+            "target_id": str(data["id"]),
+            "kind": "browser",
+            "label": data.get("title") if isinstance(data.get("title"), str) else None,
+            "metadata": {"url": data.get("url") or url, "created": True},
+          },
+        },
+      )
+    return ControlResult(ok=True, output={"result": raw})
 
   def _post_sync_http(self, payload: dict[str, Any]) -> dict[str, Any]:
     try:
@@ -1047,8 +1159,8 @@ class ControlWorkbench:
   async def execute_command(self, command: ControlCommand) -> ControlResult:
     return await self._backend.execute(command)
 
-  async def inspect_browser(self, target_id: str | None = None) -> ControlResult:
-    return await self._backend.execute(ControlCommand.create("browser", "inspect", target_id))
+  async def inspect_browser(self, target_id: str | None = None, payload: dict[str, Any] | None = None) -> ControlResult:
+    return await self._backend.execute(ControlCommand.create("browser", "inspect", target_id, payload or {}))
 
   async def execute_js(
     self,

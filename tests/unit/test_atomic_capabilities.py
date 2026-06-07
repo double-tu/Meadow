@@ -88,6 +88,24 @@ class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(denied.result.error["type"], "policy_denied")
     self.assertEqual(len(client.requests), 1)
 
+  async def test_http_request_summarizes_html_feed_titles(self) -> None:
+    client = _RecordingHTTPClient(
+      body=(
+        '<html><head><title>小红书 - 你的生活兴趣社区</title></head>'
+        '<body><script>{"displayTitle":"云南大理避暑很舒服","displayTitle":"当了三十年的班主任"}</script></body></html>'
+      )
+    )
+    provider = AtomicCapabilityProvider(http_client=client)
+
+    result = provider.http_request({"url": "https://www.xiaohongshu.com/explore"})
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["body_summary"]["page_title"], "小红书 - 你的生活兴趣社区")
+    self.assertEqual(
+      result.output["body_summary"]["feed_titles"],
+      ["云南大理避暑很舒服", "当了三十年的班主任"],
+    )
+
   async def test_atomic_desktop_and_mobile_actions_route_to_control_workbench(self) -> None:
     registry = CapabilityRegistry()
     local_tools = LocalToolExecutor()
@@ -219,12 +237,13 @@ class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _RecordingHTTPClient:
-  def __init__(self) -> None:
+  def __init__(self, body: str = "ok") -> None:
     self.requests = []
+    self.body = body
 
   def request(self, method, url, *, headers=None, body=None, timeout_seconds=None):
     self.requests.append((method, url, headers or {}, body, timeout_seconds))
-    return HTTPResponse(status=200, headers={"content-type": "text/plain"}, body="ok", url=url)
+    return HTTPResponse(status=200, headers={"content-type": "text/plain"}, body=self.body, url=url)
 
 
 if __name__ == "__main__":

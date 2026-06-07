@@ -74,6 +74,52 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(calls[0][2]["messages"][0]["content"], '{"question": "hi"}')
     self.assertEqual(calls[0][3], 7)
 
+  async def test_openai_compatible_provider_passes_and_parses_tool_calls(self) -> None:
+    calls = []
+
+    def transport(url, headers, payload, timeout_seconds):
+      calls.append(payload)
+      return {
+        "choices": [
+          {
+            "message": {
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "call_1",
+                  "type": "function",
+                  "function": {
+                    "name": "http_request",
+                    "arguments": '{"url":"https://example.test"}',
+                  },
+                }
+              ],
+            }
+          }
+        ]
+      }
+
+    provider = OpenAICompatibleProvider(api_key="key", transport=transport)
+
+    result = await provider.complete(
+      "model-tools",
+      ModelContext(
+        messages=[{"role": "user", "content": "search"}],
+        tool_schemas=[
+          {
+            "type": "function",
+            "function": {
+              "name": "http_request",
+              "parameters": {"type": "object"},
+            },
+          }
+        ],
+      ),
+    )
+
+    self.assertEqual(calls[0]["tools"][0]["function"]["name"], "http_request")
+    self.assertEqual(result["tool_calls"][0]["function"]["name"], "http_request")
+
   def test_llm_config_reads_environment(self) -> None:
     with mock.patch.dict(
       "os.environ",

@@ -256,7 +256,20 @@ async def _dispatch(args: argparse.Namespace, conn) -> dict[str, Any]:
   if args.command == "http":
     from agent_kernel.hosts.http import serve
 
-    serve(args.db, host=args.host, port=args.port)
+    config = load_config_dict(args.config) if args.config else {}
+    control_config = config.get("control", {}) if args.config else None
+    default_llm_config = (
+      LLMConfig.from_file(args.config)
+      if args.config and isinstance(config.get("llm"), dict)
+      else None
+    )
+    serve(
+      args.db,
+      host=args.host,
+      port=args.port,
+      control_config=control_config if isinstance(control_config, dict) else {},
+      default_llm_config=default_llm_config,
+    )
     return ok_response(status="http_stopped")
   if args.command == "delegate-agent":
     broker = _build_delegation_broker(args, uow_factory)
