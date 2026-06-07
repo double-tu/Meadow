@@ -54,6 +54,15 @@ class ConsistencyCheckResult:
   jobs: list[RecoveryJob] | None = None
 
 
+@dataclass(slots=True)
+class ConsistencyRepairResult:
+  checked_runs: int = 0
+  issues: list[ConsistencyIssue] | None = None
+  jobs: list[RecoveryJob] | None = None
+  repaired_issues: int = 0
+  unrepaired_issues: int = 0
+
+
 class RecoveryScanner:
   def __init__(
     self,
@@ -94,68 +103,39 @@ class RecoveryScanner:
     )
 
   def check_consistency(self, run_id: str | None = None) -> ConsistencyCheckResult:
-    issues: list[ConsistencyIssue] = []
     jobs: list[RecoveryJob] = []
-    checked_runs: set[str] = set()
 
     with self._uow_factory() as uow:
-      events = uow.events.list_by_run(run_id) if run_id else uow.events.list_all()
-      run_ids = {event.run_id for event in events}
-      if run_id:
-        run_ids.add(run_id)
-      run_ids.update(state.run_id for state in uow.states.list_all())
-
-      for current_run_id in sorted(run_ids):
-        checked_runs.add(current_run_id)
-        state = uow.states.get(current_run_id)
-        checkpoints = uow.checkpoints.list_by_run(current_run_id)
-        run_events = [event for event in events if event.run_id == current_run_id]
-
-        if run_events and state is None:
-          issues.append(
-            ConsistencyIssue(
-              issue_type="missing_run_state",
-              run_id=current_run_id,
-              target_type="run",
-              target_id=current_run_id,
-              message="Run has events but no persisted RunState.",
-            )
-          )
-
-        for checkpoint in checkpoints:
-          if checkpoint.event_id and uow.events.get(checkpoint.event_id) is None:
-            issues.append(
-              ConsistencyIssue(
-                issue_type="checkpoint_event_missing",
-                run_id=current_run_id,
-                target_type="checkpoint",
-                target_id=checkpoint.checkpoint_id,
-                message=f"Checkpoint references missing event {checkpoint.event_id}.",
-              )
-            )
-
-        if state is not None:
-          issues.extend(self._state_checkpoint_issues(uow, state))
-          issues.extend(self._artifact_ref_issues(uow, state.artifact_refs, current_run_id, "run_state", state.run_id))
-
-        for event in run_events:
-          issues.extend(
-            self._artifact_ref_issues(
-              uow,
-              event.artifact_refs,
-              current_run_id,
-              "runtime_event",
-              event.event_id,
-            )
-          )
-
+      checked_runs, issues = self._collect_consistency_issues(uow, run_id)
       for issue in issues:
         jobs.append(self._record_consistency_issue(uow, issue))
 
     return ConsistencyCheckResult(
-      checked_runs=len(checked_runs),
+      checked_runs=checked_runs,
       issues=issues,
       jobs=jobs,
+    )
+
+  def repair_consistency(self, run_id: str | None = None) -> ConsistencyRepairResult:
+    jobs: list[RecoveryJob] = []
+    repaired = unrepaired = 0
+
+    with self._uow_factory() as uow:
+      checked_runs, issues = self._collect_consistency_issues(uow, run_id)
+      for issue in issues:
+        job = self._repair_consistency_issue(uow, issue)
+        jobs.append(job)
+        if job.status is RecoveryStatus.SUCCEEDED:
+          repaired += 1
+        else:
+          unrepaired += 1
+
+    return ConsistencyRepairResult(
+      checked_runs=checked_runs,
+      issues=issues,
+      jobs=jobs,
+      repaired_issues=repaired,
+      unrepaired_issues=unrepaired,
     )
 
   def _recover_step(self, uow: UnitOfWork, step: NodeStepRecord) -> RecoveryJob:
@@ -227,6 +207,71 @@ class RecoveryScanner:
     succeeded = replace(job, status=RecoveryStatus.SUCCEEDED, updated_at=utc_now())
     uow.recovery.save(succeeded)
     return succeeded
+
+  def _collect_consistency_issues(
+    self,
+    uow: UnitOfWork,
+    run_id: str | None = None,
+  ) -> tuple[int, list[ConsistencyIssue]]:
+    issues: list[ConsistencyIssue] = []
+    events = uow.events.list_by_run(run_id) if run_id else uow.events.list_all()
+    run_ids = {event.run_id for event in events}
+    if run_id:
+      run_ids.add(run_id)
+    run_ids.update(state.run_id for state in uow.states.list_all())
+
+    for current_run_id in sorted(run_ids):
+      state = uow.states.get(current_run_id)
+      checkpoints = uow.checkpoints.list_by_run(current_run_id)
+      run_events = [event for event in events if event.run_id == current_run_id]
+
+      if run_events and state is None:
+        issues.append(
+          ConsistencyIssue(
+            issue_type="missing_run_state",
+            run_id=current_run_id,
+            target_type="run",
+            target_id=current_run_id,
+            message="Run has events but no persisted RunState.",
+          )
+        )
+
+      for checkpoint in checkpoints:
+        if checkpoint.event_id and uow.events.get(checkpoint.event_id) is None:
+          issues.append(
+            ConsistencyIssue(
+              issue_type="checkpoint_event_missing",
+              run_id=current_run_id,
+              target_type="checkpoint",
+              target_id=checkpoint.checkpoint_id,
+              message=f"Checkpoint references missing event {checkpoint.event_id}.",
+            )
+          )
+
+      if state is not None:
+        issues.extend(self._state_checkpoint_issues(uow, state))
+        issues.extend(
+          self._artifact_ref_issues(
+            uow,
+            state.artifact_refs,
+            current_run_id,
+            "run_state",
+            state.run_id,
+          )
+        )
+
+      for event in run_events:
+        issues.extend(
+          self._artifact_ref_issues(
+            uow,
+            event.artifact_refs,
+            current_run_id,
+            "runtime_event",
+            event.event_id,
+          )
+        )
+
+    return len(run_ids), issues
 
   def _state_checkpoint_issues(self, uow: UnitOfWork, state: RunState) -> list[ConsistencyIssue]:
     if state.checkpoint_id is None:
@@ -301,6 +346,76 @@ class RecoveryScanner:
       target_type="run" if issue.target_type in {"run", "run_state", "checkpoint"} else "node_step",
       target_id=issue.target_id,
       status=RecoveryStatus.FAILED,
+      reason=issue.message,
+      replay_from_event_id=event.event_id,
+    )
+    uow.recovery.save(job)
+    return job
+
+  def _repair_consistency_issue(
+    self,
+    uow: UnitOfWork,
+    issue: ConsistencyIssue,
+  ) -> RecoveryJob:
+    if issue.issue_type == "missing_run_state":
+      checkpoint = uow.checkpoints.latest_for_run(issue.run_id)
+      if checkpoint is not None:
+        repaired_state = replace(
+          checkpoint.state,
+          checkpoint_id=checkpoint.checkpoint_id,
+          updated_at=utc_now(),
+        )
+        uow.states.save(repaired_state)
+        return self._record_repaired_issue(
+          uow,
+          issue,
+          action="restore_run_state_from_checkpoint",
+          checkpoint_id=checkpoint.checkpoint_id,
+        )
+    elif issue.issue_type == "state_checkpoint_mismatch":
+      state = uow.states.get(issue.run_id)
+      checkpoint = uow.checkpoints.latest_for_run(issue.run_id)
+      if state is not None and checkpoint is not None:
+        uow.states.save(
+          replace(
+            state,
+            checkpoint_id=checkpoint.checkpoint_id,
+            updated_at=utc_now(),
+          )
+        )
+        return self._record_repaired_issue(
+          uow,
+          issue,
+          action="align_state_checkpoint_to_latest",
+          checkpoint_id=checkpoint.checkpoint_id,
+        )
+    return self._record_consistency_issue(uow, issue)
+
+  def _record_repaired_issue(
+    self,
+    uow: UnitOfWork,
+    issue: ConsistencyIssue,
+    action: str,
+    checkpoint_id: str | None = None,
+  ) -> RecoveryJob:
+    event = RuntimeEvent(
+      event_type=RuntimeEventType.RECOVERY_SUCCEEDED,
+      run_id=issue.run_id,
+      payload={
+        "reason": issue.message,
+        "action": action,
+        "issue_type": issue.issue_type,
+        "target_type": issue.target_type,
+        "target_id": issue.target_id,
+        "checkpoint_id": checkpoint_id,
+      },
+    )
+    uow.events.append(event)
+    job = RecoveryJob(
+      recovery_id=new_id("recovery"),
+      target_type="run",
+      target_id=issue.target_id,
+      status=RecoveryStatus.SUCCEEDED,
       reason=issue.message,
       replay_from_event_id=event.event_id,
     )

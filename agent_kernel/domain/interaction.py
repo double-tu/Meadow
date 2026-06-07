@@ -153,3 +153,38 @@ class ObservationFinding(DomainModel):
   evidence_artifact_refs: list[ArtifactRef] = field(default_factory=list)
   created_at: datetime = field(default_factory=utc_now)
 
+
+@dataclass(slots=True)
+class WorkspaceLease(DomainModel):
+  lease_id: str
+  task_id: str
+  agent_session_id: str
+  workspace_uri: str
+  base_ref: str | None = None
+  isolation_mode: Literal["worktree", "copy", "container", "remote"] = "worktree"
+  status: Literal["active", "released", "abandoned"] = "active"
+  created_at: datetime = field(default_factory=utc_now)
+  updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class PatchArtifact(DomainModel):
+  patch_id: str
+  lease_id: str
+  task_id: str
+  author_session_id: str
+  artifact_ref: ArtifactRef
+  summary: str
+  status: Literal["draft", "submitted", "approved", "rejected", "merged"] = "draft"
+  created_at: datetime = field(default_factory=utc_now)
+  updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ReviewRecord(DomainModel):
+  review_id: str
+  patch_id: str
+  reviewer_id: str
+  decision: Literal["approved", "changes_requested", "rejected"]
+  comments: list[str] = field(default_factory=list)
+  created_at: datetime = field(default_factory=utc_now)

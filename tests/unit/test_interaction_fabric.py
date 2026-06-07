@@ -7,7 +7,7 @@ from agent_kernel.agents import (
   ObserverService,
   TaskBoardService,
 )
-from agent_kernel.domain import AgentPool, InteractionParticipant, ParticipantKind
+from agent_kernel.domain import AgentPool, ArtifactRef, InteractionParticipant, ParticipantKind, PatchArtifact, ReviewRecord, WorkspaceLease
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.runtime import unit_of_work_factory
 
@@ -83,7 +83,32 @@ class InteractionFabricTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_workspace_records_are_serializable(self) -> None:
+    lease = WorkspaceLease(
+      lease_id="lease_1",
+      task_id="task_1",
+      agent_session_id="session_1",
+      workspace_uri="workspace://lease_1",
+    )
+    patch = PatchArtifact(
+      patch_id="patch_1",
+      lease_id="lease_1",
+      task_id="task_1",
+      author_session_id="session_1",
+      artifact_ref=ArtifactRef(artifact_id="artifact_1", uri="artifact://patch"),
+      summary="summary",
+    )
+    review = ReviewRecord(
+      review_id="review_1",
+      patch_id="patch_1",
+      reviewer_id="reviewer_1",
+      decision="approved",
+    )
+
+    self.assertEqual(lease.to_dict()["status"], "active")
+    self.assertEqual(patch.to_dict()["artifact_ref"]["artifact_id"], "artifact_1")
+    self.assertEqual(review.to_dict()["decision"], "approved")
+
 
 if __name__ == "__main__":
   unittest.main()
-

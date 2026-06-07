@@ -29,9 +29,12 @@ from agent_kernel.domain.interaction import (
   InteractionParticipant,
   ObservationFinding,
   ParticipantKind,
+  PatchArtifact,
+  ReviewRecord,
   SpeakerPolicy,
   SpeakerPolicyType,
   TaskBoardItem,
+  WorkspaceLease,
 )
 from agent_kernel.domain.memory import MemoryItem
 from agent_kernel.domain.policy import ApprovalRequest, HumanIntervention, RuntimeControlRequest
@@ -125,10 +128,12 @@ __all__ = [
   "Objective",
   "ObservationFinding",
   "ParticipantKind",
+  "PatchArtifact",
   "SpeakerPolicy",
   "SpeakerPolicyType",
   "PlanPatch",
   "PlanPatchStatus",
+  "ReviewRecord",
   "RecoveryJob",
   "RecoveryStatus",
   "RetrievalPack",
@@ -154,6 +159,7 @@ __all__ = [
   "WorkflowSpec",
   "WorkflowTemplate",
   "WorkflowTemplateStatus",
+  "WorkspaceLease",
   "assert_transition",
   "can_transition",
 ]

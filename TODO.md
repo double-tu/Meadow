@@ -160,7 +160,7 @@
 - [ ] 实现 handoff。
 - [x] 实现 ObservationFinding 和 observer request_pause 基础。
 - [ ] 实现 cross-channel summary 和 decision artifact。
-- [ ] 实现 workspace isolation、merge/review workflow 草案。
+- [x] 实现 workspace isolation、merge/review workflow 草案。
 - [x] 编写测试: 回合制群聊、observer request_pause。
 - [x] 编写测试: human intervention、fake connector routing。
 - [ ] 编写测试: 自由发言、多真实 CLI session routing。
@@ -389,12 +389,12 @@
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
 - [ ] MCP/Workbench/CLI AgentConnector 已有协议和 fake；真实 MCP server、Workbench runtime、Codex/Claude/Gemini 持续 CLI session connector 尚未实现。
 - [ ] 多 Agent 协作目前只有基础 channel/round-robin/taskboard；缺少自由发言、主持人策略、handoff、跨 channel summary、decision artifact、多 CLI session routing。
-- [ ] Workspace isolation、worktree 分配、patch review、merge/review workflow 缺失；多 coding agent 并行改同一仓库时仍有互相覆盖风险。
+- [ ] Workspace isolation 已有接口协议、fake backend、patch artifact review/merge workflow 草案；真实 git worktree 分配、merge 执行和冲突处理仍缺失。
 - [ ] Observer 只能记录 request_pause finding，尚未真正驱动 Runtime pause、上下文纠偏或当前 step 中止。
 - [ ] Autonomous exploration 仍是确定性单策略 planner + 注入式 executor；已补 PlanPatchValidator/SkillService，但缺少多策略探索、失败反思 reflector、动态工具/工作流组合。
 - [ ] Skill 与 Workflow 的互调规则已有基础服务；仍缺 Agent 自动选择 skill、workflow 动态 patch 应用、子工作流注册与校验闭环。
 - [ ] Memory 缺少 episodic memory、长期 consolidation、vector/semantic retrieval、事实冲突检测。
-- [ ] Recovery 已有 stale step scanner 和 event/checkpoint/artifact consistency check；仍缺自动 repair workflow、不可恢复对象 repair workflow 和真实 worker 接管闭环。
+- [ ] Recovery 已有 stale step scanner、event/checkpoint/artifact consistency check 和保守 metadata repair；仍缺复杂 artifact/event repair、不可恢复对象 repair workflow 和真实 worker 接管闭环。
 - [ ] HTTP/event stream/workspace DTO 已实现；HTTP server、SSE/WebSocket event stream 和 Web/Desktop 工作台仍未实现。
 - [ ] Extension SDK 目前只注册 metadata，不动态 import/执行 extension entrypoint；还不是完整插件运行时。
 
@@ -404,9 +404,11 @@
 - [x] P0: 实现 CLI/API tool-call cancel/kill 控制请求，并补齐 ToolCall event 写入与测试。
 - [x] P0: 实现持久化 recovery scanner，处理 stale lease/crash 后未完成 step 的重调度或 dead-letter。
 - [x] P0: 补 event/checkpoint/artifact 一致性检查。
-- [ ] P0: 补 event/checkpoint/artifact 自动 repair workflow。
+- [x] P0: 补 event/checkpoint/artifact 保守自动 repair workflow: restore missing RunState from checkpoint, align RunState checkpoint pointer。
+- [ ] P0: 补复杂 artifact/event repair workflow 与不可恢复对象 repair workflow。
 - [x] P1: 定义 persistent CLI AgentConnector 协议，用 fake connector 先跑通 connector routing 测试。
-- [ ] P1: 实现 workspace isolation 草案: worktree allocation、artifactized patch、review/merge workflow。
+- [x] P1: 实现 workspace isolation 草案: allocator/review backend 协议、artifactized patch、review/merge workflow。
+- [ ] P1: 实现真实 git worktree allocation、merge 执行和冲突处理。
 - [x] P1: 补 MCP adapter fake、Workbench protocol interface、stream DTO。
 - [ ] P1: 补 Exploration reflector 和动态组合能力；PlanPatchValidator/SkillService 已完成基础版。
 - [x] P2: 实现 HTTP route DTO 和 event stream DTO，为 Web/Desktop task workspace 做数据面准备。

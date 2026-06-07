@@ -14,7 +14,10 @@ from agent_kernel.domain.interaction import (
   InteractionMessage,
   InteractionParticipant,
   ObservationFinding,
+  PatchArtifact,
+  ReviewRecord,
   TaskBoardItem,
+  WorkspaceLease,
 )
 from agent_kernel.domain.serialization import to_primitive
 
@@ -64,6 +67,32 @@ class InteractionStore:
   def list_findings(self, target_run_id: str) -> list[ObservationFinding]:
     return [ObservationFinding.from_dict(data) for data in self._list("observation_finding", target_run_id)]
 
+  def save_workspace_lease(self, item: WorkspaceLease) -> None:
+    self._save(item.lease_id, "workspace_lease", item.task_id, item)
+
+  def get_workspace_lease(self, lease_id: str) -> WorkspaceLease | None:
+    data = self._get(lease_id)
+    return WorkspaceLease.from_dict(data) if data is not None else None
+
+  def list_workspace_leases(self, task_id: str) -> list[WorkspaceLease]:
+    return [WorkspaceLease.from_dict(data) for data in self._list("workspace_lease", task_id)]
+
+  def save_patch_artifact(self, item: PatchArtifact) -> None:
+    self._save(item.patch_id, "patch_artifact", item.lease_id, item)
+
+  def get_patch_artifact(self, patch_id: str) -> PatchArtifact | None:
+    data = self._get(patch_id)
+    return PatchArtifact.from_dict(data) if data is not None else None
+
+  def list_patch_artifacts(self, lease_id: str) -> list[PatchArtifact]:
+    return [PatchArtifact.from_dict(data) for data in self._list("patch_artifact", lease_id)]
+
+  def save_review_record(self, item: ReviewRecord) -> None:
+    self._save(item.review_id, "review_record", item.patch_id, item)
+
+  def list_review_records(self, patch_id: str) -> list[ReviewRecord]:
+    return [ReviewRecord.from_dict(data) for data in self._list("review_record", patch_id)]
+
   def _save(self, record_id: str, record_type: str, parent_id: str | None, value: Any) -> None:
     self._conn.execute(
       """
@@ -102,4 +131,3 @@ class InteractionStore:
       (record_type, parent_id),
     ).fetchall()
     return [json.loads(row["record_json"]) for row in rows]
-

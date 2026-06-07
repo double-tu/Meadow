@@ -15,6 +15,13 @@ from agent_kernel.agents.session import AgentSessionService, oneshot_agent_spec
 from agent_kernel.agents.supervisor import SupervisorService
 from agent_kernel.agents.taskboard import TaskBoardService
 from agent_kernel.agents.team import AgentPoolScheduler
+from agent_kernel.agents.workspace import (
+  ArtifactMergeBackend,
+  FakeWorkspaceBackend,
+  PatchReviewBackend,
+  WorkspaceBackend,
+  WorkspaceIsolationService,
+)
 
 __all__ = [
   "AgentConnector",
@@ -25,11 +32,16 @@ __all__ = [
   "ConnectorMessage",
   "ConnectorTurn",
   "FakeAgentConnector",
+  "FakeWorkspaceBackend",
   "GroupChatService",
   "InteractionFabric",
   "ObserverService",
+  "ArtifactMergeBackend",
+  "PatchReviewBackend",
   "SupervisorService",
   "TaskBoardService",
+  "WorkspaceBackend",
+  "WorkspaceIsolationService",
   "build_mailbox_message",
   "oneshot_agent_spec",
 ]

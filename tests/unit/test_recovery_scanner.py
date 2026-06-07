@@ -126,6 +126,93 @@ class RecoveryScannerTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_repair_consistency_restores_state_and_aligns_checkpoint(self) -> None:
+    conn = connect_sqlite()
+    try:
+      created_event = RuntimeEvent(
+        event_type=RuntimeEventType.RUN_CREATED,
+        run_id="run_repair_missing_state",
+      )
+      checkpoint_state = RunState(
+        run_id="run_repair_missing_state",
+        status=RunStatus.RUNNING,
+        checkpoint_id="checkpoint_restore",
+      )
+      old_state = RunState(
+        run_id="run_repair_mismatch",
+        status=RunStatus.RUNNING,
+        checkpoint_id="checkpoint_old",
+      )
+      latest_state = RunState(
+        run_id="run_repair_mismatch",
+        status=RunStatus.RUNNING,
+        checkpoint_id="checkpoint_latest",
+      )
+      with UnitOfWork(conn) as uow:
+        uow.events.append(created_event)
+        uow.checkpoints.save(
+          "run_repair_missing_state",
+          checkpoint_state,
+          event_id=created_event.event_id,
+          checkpoint_id="checkpoint_restore",
+        )
+        uow.states.save(old_state)
+        uow.checkpoints.save(
+          "run_repair_mismatch",
+          old_state,
+          checkpoint_id="checkpoint_old",
+        )
+        uow.checkpoints.save(
+          "run_repair_mismatch",
+          latest_state,
+          checkpoint_id="checkpoint_latest",
+        )
+
+      result = RecoveryScanner(unit_of_work_factory(conn)).repair_consistency()
+
+      with UnitOfWork(conn) as uow:
+        restored = uow.states.get("run_repair_missing_state")
+        aligned = uow.states.get("run_repair_mismatch")
+        events = uow.events.list_all()
+
+      self.assertEqual(result.repaired_issues, 2)
+      self.assertEqual(result.unrepaired_issues, 0)
+      self.assertIsNotNone(restored)
+      self.assertEqual(restored.checkpoint_id, "checkpoint_restore")
+      self.assertEqual(aligned.checkpoint_id, "checkpoint_latest")
+      self.assertEqual(
+        len([event for event in events if event.event_type is RuntimeEventType.RECOVERY_SUCCEEDED]),
+        2,
+      )
+      self.assertEqual(
+        RecoveryScanner(unit_of_work_factory(conn)).check_consistency().issues,
+        [],
+      )
+    finally:
+      conn.close()
+
+  def test_repair_consistency_leaves_unrepairable_artifact_issue_failed(self) -> None:
+    conn = connect_sqlite()
+    try:
+      event = RuntimeEvent(
+        event_type=RuntimeEventType.STEP_COMPLETED,
+        run_id="run_unrepairable",
+        artifact_refs=[ArtifactRef(artifact_id="artifact_missing", uri="artifact://missing")],
+      )
+      state = RunState(run_id="run_unrepairable", status=RunStatus.RUNNING)
+      with UnitOfWork(conn) as uow:
+        uow.events.append(event)
+        uow.states.save(state)
+
+      result = RecoveryScanner(unit_of_work_factory(conn)).repair_consistency()
+
+      self.assertEqual(result.repaired_issues, 0)
+      self.assertEqual(result.unrepaired_issues, 1)
+      self.assertEqual(result.jobs[0].status, RecoveryStatus.FAILED)
+      self.assertEqual(result.issues[0].issue_type, "artifact_ref_missing")
+    finally:
+      conn.close()
+
 
 if __name__ == "__main__":
   unittest.main()
