@@ -41,6 +41,9 @@ class InteractionStore:
     data = self._get(channel_id)
     return InteractionChannel.from_dict(data) if data is not None else None
 
+  def list_channels(self) -> list[InteractionChannel]:
+    return [InteractionChannel.from_dict(data) for data in self._list_all("channel")]
+
   def save_message(self, item: InteractionMessage) -> None:
     self._save(item.message_id, "message", item.channel_id, item)
 
@@ -69,6 +72,9 @@ class InteractionStore:
 
   def save_taskboard_item(self, item: TaskBoardItem) -> None:
     self._save(item.item_id, "taskboard_item", item.assignee_pool_id, item)
+
+  def list_taskboard_items(self) -> list[TaskBoardItem]:
+    return [TaskBoardItem.from_dict(data) for data in self._list_all("taskboard_item")]
 
   def save_finding(self, item: ObservationFinding) -> None:
     self._save(item.finding_id, "observation_finding", item.target_run_id, item)
@@ -168,6 +174,47 @@ class InteractionStore:
 
   def list_scheduled_task_triggers(self, scheduled_task_id: str) -> list[ScheduledTaskTrigger]:
     return [ScheduledTaskTrigger.from_dict(data) for data in self._list("scheduled_task_trigger", scheduled_task_id)]
+
+  def delete_scheduled_task(self, task_id: str) -> bool:
+    cursor = self._conn.execute(
+      "DELETE FROM interaction_records WHERE record_type = ? AND record_id = ?",
+      ("scheduled_task", task_id),
+    )
+    return cursor.rowcount > 0
+
+  def save_record(self, record_type: str, record_id: str, value: Any, parent_id: str | None = None) -> None:
+    self._save(record_id, record_type, parent_id, value)
+
+  def get_record(self, record_type: str, record_id: str) -> dict[str, Any] | None:
+    row = self._conn.execute(
+      """
+      SELECT record_json
+      FROM interaction_records
+      WHERE record_type = ?
+        AND record_id = ?
+      """,
+      (record_type, record_id),
+    ).fetchone()
+    if row is None:
+      return None
+    return json.loads(row["record_json"])
+
+  def list_records(self, record_type: str, parent_id: str | None = None) -> list[dict[str, Any]]:
+    return self._list_all(record_type) if parent_id is None else self._list(record_type, parent_id)
+
+  def delete_record(self, record_type: str, record_id: str) -> bool:
+    cursor = self._conn.execute(
+      "DELETE FROM interaction_records WHERE record_type = ? AND record_id = ?",
+      (record_type, record_id),
+    )
+    return cursor.rowcount > 0
+
+  def delete_records(self, record_type: str, parent_id: str) -> int:
+    cursor = self._conn.execute(
+      "DELETE FROM interaction_records WHERE record_type = ? AND parent_id = ?",
+      (record_type, parent_id),
+    )
+    return cursor.rowcount
 
   def _save(self, record_id: str, record_type: str, parent_id: str | None, value: Any) -> None:
     self._conn.execute(

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meadow 桌面工作台</title>
+    <link rel="stylesheet" href="./styles.css?v=20260607-chat-agent" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">M</div>
+          <div class="brand-copy">
+            <strong>Meadow</strong>
+            <span>本地 Agent 工作台</span>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="chat">日常对话</button>
+          <button class="nav-item" data-view="workspaces">工作区</button>
+          <button class="nav-item" data-view="skills">Skill 管理</button>
+          <button class="nav-item" data-view="config">配置中心</button>
+          <button class="nav-item" data-view="approvals">审批</button>
+          <button class="nav-item" data-view="mcp">MCP</button>
+          <button class="nav-item" data-view="schedules">计划任务</button>
+          <button class="nav-item" data-view="control">控制台</button>
+          <button class="nav-item" data-view="events">事件流</button>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="title-block">
+            <h1 id="view-title">日常对话</h1>
+            <p id="view-subtitle">持续沟通、组合任务、沉淀 Skill。</p>
+          </div>
+          <form id="host-form" class="host-form">
+            <label for="host-url">Meadow API</label>
+            <input id="host-url" name="host-url" spellcheck="false" />
+            <button type="submit">连接</button>
+          </form>
+        </header>
+
+        <section id="status-strip" class="status-strip"></section>
+        <section id="view" class="view" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js?v=20260607-chat-agent"></script>
+  </body>
+</html>

@@ -1044,6 +1044,9 @@ class ControlWorkbench:
   def list_targets(self, kind: ControlTargetKind | None = None) -> list[ControlTarget]:
     return self._backend.list_targets(kind)
 
+  async def execute_command(self, command: ControlCommand) -> ControlResult:
+    return await self._backend.execute(command)
+
   async def inspect_browser(self, target_id: str | None = None) -> ControlResult:
     return await self._backend.execute(ControlCommand.create("browser", "inspect", target_id))
 

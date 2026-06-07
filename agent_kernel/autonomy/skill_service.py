@@ -73,6 +73,30 @@ class SkillService:
       raise KeyError(f"Skill not found: {skill_id}")
     return self.save(replace(skill, status=SkillStatus.ACTIVE))
 
+  def deprecate(self, skill_id: str) -> SkillCard:
+    skill = self.get(skill_id)
+    if skill is None:
+      raise KeyError(f"Skill not found: {skill_id}")
+    return self.save(replace(skill, status=SkillStatus.DEPRECATED))
+
+  def update(self, skill_id: str, data: dict[str, object]) -> SkillCard:
+    skill = self.get(skill_id)
+    if skill is None:
+      raise KeyError(f"Skill not found: {skill_id}")
+    updated = replace(
+      skill,
+      name=str(data.get("name") or skill.name),
+      description=str(data.get("description") or skill.description),
+      when_to_use=str(data.get("when_to_use") or skill.when_to_use),
+      instructions=str(data.get("instructions") or skill.instructions),
+      status=SkillStatus(str(data["status"])) if data.get("status") is not None else skill.status,
+      recommended_tools=_string_list(data.get("recommended_tools"), fallback=skill.recommended_tools),
+      recommended_workflows=_string_list(data.get("recommended_workflows"), fallback=skill.recommended_workflows),
+      constraints=_string_list(data.get("constraints"), fallback=skill.constraints),
+      failure_modes=_string_list(data.get("failure_modes"), fallback=skill.failure_modes),
+    )
+    return self.save(updated)
+
   def get(self, skill_id: str) -> SkillCard | None:
     with self._uow_factory() as uow:
       record = uow.autonomy.get_record("skill_card", skill_id)
@@ -123,3 +147,11 @@ class SkillService:
   @staticmethod
   def _tokens(text: str) -> set[str]:
     return {token for token in re.findall(r"[a-zA-Z0-9_]+", text.lower()) if len(token) > 2}
+
+
+def _string_list(value: object, *, fallback: list[str]) -> list[str]:
+  if value is None:
+    return fallback
+  if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+    raise ValueError("Expected a list of strings.")
+  return value

@@ -59,6 +59,18 @@ class ApprovalStore:
     ).fetchall()
     return [ApprovalRequest.from_dict(json.loads(row["request_json"])) for row in rows]
 
+  def list_pending_all(self) -> list[ApprovalRequest]:
+    rows = self._conn.execute(
+      """
+      SELECT request_json
+      FROM approval_requests
+      WHERE status = ?
+      ORDER BY created_at ASC, approval_id ASC
+      """,
+      (ApprovalStatus.REQUESTED.value,),
+    ).fetchall()
+    return [ApprovalRequest.from_dict(json.loads(row["request_json"])) for row in rows]
+
   def get(self, approval_id: str) -> ApprovalRequest | None:
     row = self._conn.execute(
       "SELECT request_json FROM approval_requests WHERE approval_id = ?",

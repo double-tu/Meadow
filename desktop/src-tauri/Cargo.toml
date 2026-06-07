@@ -1,0 +1,17 @@
+[package]
+name = "meadow-desktop"
+version = "0.1.0"
+description = "Meadow API-first desktop shell"
+authors = ["Meadow"]
+license = "MIT"
+edition = "2021"
+
+[lib]
+name = "meadow_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

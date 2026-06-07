@@ -10,6 +10,17 @@
 
 重要边界: 当前实现是可运行 MVP 基座，不等价于 `python-code-architecture-design.md` 的完整目标。后续开发必须优先补齐实时干预、长期进程恢复、多 CLI AgentConnector、HTTP/event stream、MCP/Workbench、工作区隔离和自主探索深化等缺口，避免把“接口/草案/基础服务”误判为完整能力。
 
+## 桌面端可视化路线
+
+目标: 构造 Meadow 原生桌面工作台，参考 `external_repos/AionUi`、`external_repos/codeg`、`external_repos/GenericAgent` 的界面形态，但不硬融合其运行时结构。桌面端必须保持 API-first，只通过 HTTP/SSE/WebSocket/本地 sidecar 通信接入 Python 内核。
+
+- [x] 完成桌面端基础 API: workspace 聚合、全局审批队列、tool-call 列表、live event stream 游标、scheduled task 更新/删除/触发历史、control command 执行。
+- [x] 完成桌面端壳骨架: 本地启动/连接 Python HTTP host，提供 Workspace、Approvals、Events、MCP、Scheduled Tasks、Control 基础页面。
+- [ ] 完成多 Agent/Team 可视化: leader/worker、delegation status card、taskboard、channel timeline、workspace isolation/patch review 入口。
+- [ ] 完成权限与安全中心: 命令、文件 diff、网络、控制动作、MCP 工具调用的结构化审批预览和 approve/reject/cancel/kill 操作。
+- [ ] 完成控制 Workbench 可视化: browser/desktop/mobile target 列表、截图/DOM/UI tree、动作执行、artifact handoff。
+- [ ] 完成端到端验收: 桌面壳启动内核、创建任务、查看事件流、审批工具调用、配置 MCP、创建/运行 scheduled task、执行 fake control command。
+
 ## 开发原则
 
 - 先实现可测试、可恢复、可审计的最小内核，再扩展高级智能能力。

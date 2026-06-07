@@ -26,6 +26,8 @@ Implemented MVP areas:
 - MCP configuration management service with import/export, enable/agent-type filtering, stdio command assembly, HTTP/CLI management routes, and config-file import support.
 - Scheduled task service with persisted one-shot/interval/simple-cron task definitions, due-task triggering, trigger history, and HTTP/CLI management routes.
 - Control plane assembly and health/target inspection routes for configured browser-link, ADB mobile, Win32 desktop, or fake control backends.
+- Desktop workspace API with workspace aggregation, global pending approvals, tool-call lists, event cursor streams, scheduled task mutation/history, control command execution, CORS support, and a thin static/Tauri shell scaffold.
+- Desktop chat, skill management, and hot-updatable config center APIs with a Chinese conversation-first desktop shell.
 - Host DTOs plus HTTP host for task create, run inspect, run event NDJSON/SSE stream, artifact inspect, run cancel, human intervention, approval resolution, tool-call cancel/kill, and agent delegation requests.
 - CLI host for sample run, inspect, replay, approve, reject, cancel, cancel/kill tool call, intervene, llm-smoke, and configured external-agent delegation.
 - OpenAI-compatible LLM smoke command configured by environment variables or TOML/JSON config.
@@ -143,6 +145,22 @@ python3 -m agent_kernel.hosts.cli --config agent-kernel.toml control-health
 python3 -m agent_kernel.hosts.cli --config agent-kernel.toml control-health --targets --kind browser
 ```
 
+Start the HTTP API host used by the desktop shell:
+
+```bash
+python3 -m agent_kernel.hosts.cli --db /tmp/meadow-desktop.sqlite http --host 127.0.0.1 --port 8080
+```
+
+Open the API-first desktop shell:
+
+```bash
+python3 -m http.server 4173 --directory desktop/static
+```
+
+Then visit `http://127.0.0.1:4173` and connect it to `http://127.0.0.1:8080`.
+
+The shell opens to the Chinese daily chat workspace by default. It also includes Skill 管理, 配置中心, 工作区, 审批, MCP, 计划任务, 控制台, and 事件流 views.
+
 If installed as a package, the console script is:
 
 ```bash
@@ -157,6 +175,7 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - `ReplayService` does not re-execute model/tool calls.
 - Current CLI is a minimal host, not the final Web/Desktop workspace.
 - Browser control can use a `/link`-style HTTP backend, desktop control can use the optional Win32 desktop backend plus UIA-style/UIAutomation/vision detectors, and mobile control can use the ADB backend plus optional vision detector.
+- The desktop shell under `desktop/` is intentionally thin: it consumes workspace, approval, event, MCP, schedule, and control APIs and does not embed runtime or agent logic.
 
 ## Known MVP Gaps
 

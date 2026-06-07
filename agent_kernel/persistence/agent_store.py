@@ -75,6 +75,16 @@ class AgentSessionStore:
     ).fetchall()
     return [AgentSession.from_dict(json.loads(row["state_json"])) for row in rows]
 
+  def list_all(self) -> list[AgentSession]:
+    rows = self._conn.execute(
+      """
+      SELECT state_json
+      FROM agent_sessions
+      ORDER BY created_at ASC, session_id ASC
+      """
+    ).fetchall()
+    return [AgentSession.from_dict(json.loads(row["state_json"])) for row in rows]
+
 
 class MailboxStore:
   def __init__(self, conn: sqlite3.Connection) -> None:

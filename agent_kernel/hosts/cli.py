@@ -81,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
   llm_smoke.add_argument("--model", default=None)
   llm_smoke.add_argument("--provider", default=None)
 
+  http = subcommands.add_parser("http")
+  http.add_argument("--host", default="127.0.0.1")
+  http.add_argument("--port", type=int, default=8080)
+
   delegate_agent = subcommands.add_parser("delegate-agent")
   delegate_agent.add_argument("--parent-run-id", required=True)
   delegate_agent.add_argument("--connector-id", required=True)
@@ -249,6 +253,11 @@ async def _dispatch(args: argparse.Namespace, conn) -> dict[str, Any]:
       context=ModelContext(messages=[{"role": "user", "content": args.prompt}]),
     )
     return ok_response(provider=provider_name, model=model_ref, result=result)
+  if args.command == "http":
+    from agent_kernel.hosts.http import serve
+
+    serve(args.db, host=args.host, port=args.port)
+    return ok_response(status="http_stopped")
   if args.command == "delegate-agent":
     broker = _build_delegation_broker(args, uow_factory)
     metadata = _metadata_json(args.metadata_json)

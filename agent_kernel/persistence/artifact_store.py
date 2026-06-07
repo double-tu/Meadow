@@ -82,3 +82,22 @@ class ArtifactStore:
       for artifact_id in artifact_ids
       if (ref := self.get(artifact_id)) is not None
     ]
+
+  def list_all(self) -> list[ArtifactRef]:
+    rows = self._conn.execute(
+      """
+      SELECT artifact_id, uri, media_type, version, checksum
+      FROM artifacts
+      ORDER BY created_at ASC, artifact_id ASC
+      """
+    ).fetchall()
+    return [
+      ArtifactRef(
+        artifact_id=row["artifact_id"],
+        uri=row["uri"],
+        media_type=row["media_type"],
+        version=row["version"],
+        checksum=row["checksum"],
+      )
+      for row in rows
+    ]

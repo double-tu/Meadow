@@ -5,6 +5,8 @@ from datetime import timedelta
 
 from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
 from agent_kernel.app.control_plane import ControlPlaneService
+from agent_kernel.app.desktop_chat import DesktopChatService
+from agent_kernel.capabilities.adapters.control import ControlResult, ControlTarget, ControlWorkbench, FakeControlBackend
 from agent_kernel.domain import (
   ArtifactRef,
   NodeStepRecord,
@@ -17,7 +19,8 @@ from agent_kernel.domain import (
   ToolCallStatus,
 )
 from agent_kernel.domain.base import utc_now
-from agent_kernel.hosts.http import HTTPHost, make_handler
+from agent_kernel.hosts.http import HTTPHost, SampleWorkflowTaskLauncher, make_handler
+from agent_kernel.models import MockModelProvider, ModelGateway
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.policy import ApprovalService
 from agent_kernel.runtime import RuntimeEngine, unit_of_work_factory
@@ -390,6 +393,206 @@ class HTTPHostTests(unittest.TestCase):
       self.assertTrue(control_health["ok"])
       self.assertEqual(control_targets["targets"], [])
       self.assertTrue(deleted["deleted"])
+    finally:
+      conn.close()
+
+  def test_http_host_exposes_desktop_workspace_api_surface(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      approval_service = ApprovalService(uow_factory)
+      approval = approval_service.request_tool_approval("run_desktop", "tool.write", "approval", {"path": "x"})
+      artifact = ArtifactRef("artifact_desktop", "artifact://desktop", media_type="text/plain")
+      with UnitOfWork(conn) as uow:
+        uow.states.save(
+          RunState(
+            run_id="run_desktop",
+            status=RunStatus.RUNNING,
+            task_id="task_desktop",
+            artifact_refs=[artifact],
+          )
+        )
+        uow.artifacts.save(artifact, metadata={"kind": "desktop"})
+        uow.tool_calls.save(
+          ToolCallRecord(
+            tool_call_id="tool_call_desktop",
+            run_id="run_desktop",
+            capability_id="tool.write",
+            status=ToolCallStatus.RUNNING,
+          )
+        )
+      handler = make_handler(HTTPHost(uow_factory))
+
+      workspaces = self._request_json(handler, "GET", "/workspaces")
+      workspace_id = workspaces["workspaces"][0]["workspace_id"]
+      workspace = self._request_json(handler, "GET", f"/workspaces/{workspace_id}")
+      approvals = self._request_json(handler, "GET", "/approvals")
+      tool_calls = self._request_json(handler, "GET", "/tool-calls?run_id=run_desktop")
+
+      self.assertEqual(workspace_id, "workspace_task_task_desktop")
+      self.assertEqual(workspace["workspace"]["run_ids"], ["run_desktop"])
+      self.assertEqual(workspace["workspace"]["artifact_ids"], ["artifact_desktop"])
+      self.assertEqual(workspace["workspace"]["pending_approval_ids"], [approval.approval_id])
+      self.assertEqual(workspace["workspace"]["active_tool_call_ids"], ["tool_call_desktop"])
+      self.assertEqual(approvals["approvals"][0]["approval_id"], approval.approval_id)
+      self.assertEqual(tool_calls["tool_calls"][0]["tool_call_id"], "tool_call_desktop")
+    finally:
+      conn.close()
+
+  def test_http_host_supports_event_cursor_scheduled_mutation_and_control_command(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      backend = FakeControlBackend()
+      backend.register_target(ControlTarget(target_id="browser_1", kind="browser", label="Browser"))
+      backend.register_response("browser", "inspect", ControlResult(ok=True, output={"title": "Browser"}))
+      control_plane = ControlPlaneService(ControlWorkbench(backend))
+      handler = make_handler(HTTPHost(uow_factory, control_plane=control_plane))
+      due_at = (utc_now() - timedelta(minutes=1)).isoformat()
+      with UnitOfWork(conn) as uow:
+        uow.events.append(RuntimeEvent(event_type=RuntimeEventType.RUN_CREATED, run_id="run_cursor", payload={}))
+        second = RuntimeEvent(event_type=RuntimeEventType.RUN_COMPLETED, run_id="run_cursor", payload={})
+        uow.events.append(second)
+
+      events = self._request_ndjson(handler, f"/events?run_id=run_cursor&after_event_id={second.event_id}")
+      scheduled = self._request_json(
+        handler,
+        "POST",
+        "/scheduled-tasks",
+        {
+          "task_id": "scheduled_mutation",
+          "name": "mutable",
+          "schedule_kind": "at",
+          "schedule_value": due_at,
+          "payload": {"title": "mutable", "run_id": "run_mutable"},
+        },
+      )
+      updated = self._request_json(
+        handler,
+        "PATCH",
+        "/scheduled-tasks/scheduled_mutation",
+        {"enabled": False, "name": "disabled mutable"},
+      )
+      triggered = self._request_json(handler, "POST", "/scheduled-tasks/run-due", {})
+      triggers = self._request_json(handler, "GET", "/scheduled-tasks/scheduled_mutation/triggers")
+      command = self._request_json(
+        handler,
+        "POST",
+        "/control/commands",
+        {"target_kind": "browser", "action": "inspect", "target_id": "browser_1"},
+      )
+      deleted = self._request_json(handler, "DELETE", "/scheduled-tasks/scheduled_mutation")
+
+      self.assertEqual(events, [])
+      self.assertEqual(scheduled["scheduled_task"]["task_id"], "scheduled_mutation")
+      self.assertFalse(updated["scheduled_task"]["enabled"])
+      self.assertEqual(updated["scheduled_task"]["name"], "disabled mutable")
+      self.assertEqual(triggered["triggers"], [])
+      self.assertEqual(triggers["triggers"], [])
+      self.assertTrue(command["result"]["ok"])
+      self.assertEqual(command["command"]["target_id"], "browser_1")
+      self.assertTrue(deleted["deleted"])
+    finally:
+      conn.close()
+
+  def test_http_host_exposes_chat_skill_and_config_center(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      gateway = ModelGateway()
+      gateway.register_provider(
+        "mock",
+        MockModelProvider(
+          responses=[
+            {"content": "这是模型回复"},
+            {"content": "这是重试后的模型回复"},
+          ]
+        ),
+      )
+      chat_service = DesktopChatService(
+        uow_factory,
+        SampleWorkflowTaskLauncher(uow_factory),
+        model_gateway=gateway,
+        model_provider_name="mock",
+        model_ref="mock-model",
+      )
+      handler = make_handler(HTTPHost(uow_factory, desktop_chat_service=chat_service))
+
+      created_session = self._request_json(
+        handler,
+        "POST",
+        "/chat/sessions",
+        {"title": "默认对话"},
+      )
+      session_id = created_session["chat_session"]["session_id"]
+      sent = self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "你好，帮我看一下今天的任务"},
+      )
+      messages = self._request_json(handler, "GET", f"/chat/sessions/{session_id}/messages")
+      sessions = self._request_json(handler, "GET", "/chat/sessions")
+      retried = self._request_json(handler, "POST", f"/chat/sessions/{session_id}/retry")
+      paused = self._request_json(handler, "POST", f"/chat/sessions/{session_id}/pause", {"reason": "test pause"})
+      cleared = self._request_json(handler, "DELETE", f"/chat/sessions/{session_id}/messages")
+      empty_messages = self._request_json(handler, "GET", f"/chat/sessions/{session_id}/messages")
+
+      created_skill = self._request_json(
+        handler,
+        "POST",
+        "/skills",
+        {
+          "name": "代码评审",
+          "description": "评审代码风险",
+          "when_to_use": "需要 review 时",
+          "instructions": "列出风险和测试缺口",
+          "status": "active",
+        },
+      )
+      skill_id = created_skill["skill"]["skill_id"]
+      updated_skill = self._request_json(
+        handler,
+        "PATCH",
+        f"/skills/{skill_id}",
+        {"description": "评审代码风险和回归风险"},
+      )
+      skills = self._request_json(handler, "GET", "/skills?active_only=true")
+      deprecated = self._request_json(handler, "POST", f"/skills/{skill_id}/deprecate")
+
+      config_sections = self._request_json(handler, "GET", "/config")
+      updated_config = self._request_json(
+        handler,
+        "PATCH",
+        "/config/llm",
+        {
+          "data": {
+            "model": "gpt-test",
+            "api_key": "secret-value",
+          }
+        },
+      )
+      llm_config = self._request_json(handler, "GET", "/config/llm")
+
+      self.assertEqual(created_session["chat_session"]["title"], "默认对话")
+      self.assertEqual(sent["messages"][0]["role"], "user")
+      self.assertEqual(sent["messages"][1]["role"], "assistant")
+      self.assertEqual(sent["messages"][1]["content"], "这是模型回复")
+      self.assertEqual(len(messages["messages"]), 2)
+      self.assertEqual(sessions["chat_sessions"][0]["message_count"], 2)
+      self.assertEqual(retried["messages"][0]["role"], "user")
+      self.assertEqual(retried["messages"][1]["content"], "这是重试后的模型回复")
+      self.assertEqual(paused["session"]["status"], "paused")
+      self.assertEqual(cleared["session"]["message_count"], 0)
+      self.assertEqual(empty_messages["messages"], [])
+      self.assertEqual(created_skill["skill"]["status"], "active")
+      self.assertEqual(updated_skill["skill"]["description"], "评审代码风险和回归风险")
+      self.assertEqual(skills["skills"][0]["skill_id"], skill_id)
+      self.assertEqual(deprecated["skill"]["status"], "deprecated")
+      self.assertGreaterEqual(len(config_sections["config_sections"]), 1)
+      self.assertEqual(updated_config["config_section"]["data"]["model"], "gpt-test")
+      self.assertEqual(updated_config["config_section"]["data"]["api_key"], "***")
+      self.assertEqual(llm_config["config_section"]["data"]["api_key"], "***")
     finally:
       conn.close()
 

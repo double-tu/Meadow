@@ -8,7 +8,9 @@ from typing import Any
 from agent_kernel.capabilities.adapters.control import (
   ADBMobileBackend,
   BrowserLinkHTTPBackend,
+  ControlActionKind,
   ControlBackend,
+  ControlCommand,
   ControlTargetKind,
   ControlWorkbench,
   FakeControlBackend,
@@ -88,6 +90,19 @@ class ControlPlaneService:
   def list_targets(self, kind: ControlTargetKind | None = None) -> dict[str, Any]:
     return {"targets": [target.to_dict() for target in self._workbench.list_targets(kind)]}
 
+  async def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
+    target_kind = _required_control_kind(payload.get("target_kind"))
+    action = _required_control_action(payload.get("action"))
+    command = ControlCommand.create(
+      target_kind=target_kind,
+      action=action,
+      target_id=str(payload["target_id"]) if payload.get("target_id") is not None else None,
+      payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+      timeout_seconds=float(payload["timeout_seconds"]) if payload.get("timeout_seconds") is not None else None,
+    )
+    result = await self._workbench.execute_command(command)
+    return {"command": command.to_dict(), "result": result.to_dict()}
+
   async def health(self) -> dict[str, Any]:
     checks: dict[str, Any] = {}
     for kind in ("browser", "desktop", "mobile"):
@@ -101,3 +116,25 @@ class ControlPlaneService:
   @property
   def workbench(self) -> ControlWorkbench:
     return self._workbench
+
+
+def _required_control_kind(value: Any) -> ControlTargetKind:
+  if value not in {"browser", "desktop", "mobile"}:
+    raise ValueError("target_kind must be browser, desktop, or mobile.")
+  return value
+
+
+def _required_control_action(value: Any) -> ControlActionKind:
+  if value not in {
+    "inspect",
+    "execute_js",
+    "navigate",
+    "screenshot",
+    "click",
+    "key",
+    "type_text",
+    "dump_ui",
+    "tap",
+  }:
+    raise ValueError("action must be a supported control action.")
+  return value

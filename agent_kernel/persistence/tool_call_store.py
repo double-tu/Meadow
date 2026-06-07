@@ -67,3 +67,12 @@ class ToolCallStore:
     ).fetchall()
     return [ToolCallRecord.from_dict(json.loads(row["record_json"])) for row in rows]
 
+  def list_all(self) -> list[ToolCallRecord]:
+    rows = self._conn.execute(
+      """
+      SELECT record_json
+      FROM tool_calls
+      ORDER BY created_at ASC, tool_call_id ASC
+      """
+    ).fetchall()
+    return [ToolCallRecord.from_dict(json.loads(row["record_json"])) for row in rows]

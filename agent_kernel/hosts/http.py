@@ -11,9 +11,13 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlparse
 
 from agent_kernel.app.tool_call_control import ToolCallControlOutcome, ToolCallControlService
+from agent_kernel.app.config_center import ConfigCenterService
 from agent_kernel.app.control_plane import ControlPlaneService
+from agent_kernel.app.desktop_chat import DesktopChatService
+from agent_kernel.app.desktop_workspace import DesktopWorkspaceService
 from agent_kernel.app.mcp_config import MCPConfigService
 from agent_kernel.app.scheduled_tasks import ScheduledTaskService
+from agent_kernel.autonomy import SkillService
 from agent_kernel.domain.delegation import DelegationTaskReport
 from agent_kernel.domain.errors import DomainError
 from agent_kernel.domain.policy import ApprovalRequest
@@ -115,6 +119,10 @@ class HTTPHost:
     mcp_config_service: MCPConfigService | None = None,
     scheduled_task_service: ScheduledTaskService | None = None,
     control_plane: ControlPlaneService | None = None,
+    desktop_workspace_service: DesktopWorkspaceService | None = None,
+    desktop_chat_service: DesktopChatService | None = None,
+    config_center_service: ConfigCenterService | None = None,
+    skill_service: SkillService | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._run_control = run_control or RuntimeEngine(uow_factory, NodeExecutorRegistry())
@@ -129,6 +137,14 @@ class HTTPHost:
       self._task_launcher,
     )
     self._control_plane = control_plane or ControlPlaneService.from_config({"browser": {"enabled": False}})
+    self._desktop_workspace_service = desktop_workspace_service or DesktopWorkspaceService(uow_factory)
+    self._desktop_chat_service = desktop_chat_service or DesktopChatService(
+      uow_factory,
+      self._task_launcher,
+      run_control=self._run_control,
+    )
+    self._config_center_service = config_center_service or ConfigCenterService(uow_factory)
+    self._skill_service = skill_service or SkillService(uow_factory)
 
   def inspect_run(self, run_id: str) -> dict[str, Any]:
     with self._uow_factory() as uow:
@@ -137,25 +153,23 @@ class HTTPHost:
       raise KeyError(f"Run not found: {run_id}")
     return ok_response(run=state.to_dict())
 
-  def list_run_events(self, run_id: str) -> list[EventStreamEnvelope]:
+  def list_run_events(self, run_id: str, *, after_event_id: str | None = None) -> list[EventStreamEnvelope]:
     with self._uow_factory() as uow:
       events = uow.events.list_by_run(run_id)
+    if after_event_id:
+      events = _events_after(events, after_event_id)
+    return [_event_envelope(event) for event in events]
+
+  def list_events(self, query: dict[str, list[str]] | None = None) -> list[EventStreamEnvelope]:
+    parsed = query or {}
+    run_id = _query_optional_str(parsed, "run_id")
+    after_event_id = _query_optional_str(parsed, "after_event_id")
+    with self._uow_factory() as uow:
+      events = uow.events.list_by_run(run_id) if run_id else uow.events.list_all()
+    if after_event_id:
+      events = _events_after(events, after_event_id)
     return [
-      EventStreamEnvelope(
-        event_id=event.event_id,
-        event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
-        run_id=event.run_id,
-        payload={
-          "node_id": event.node_id,
-          "step_id": event.step_id,
-          "agent_id": event.agent_id,
-          "task_id": event.task_id,
-          "causal_id": event.causal_id,
-          "payload": event.payload,
-          "artifact_refs": [ref.to_dict() for ref in event.artifact_refs],
-        },
-        emitted_at=event.timestamp.isoformat(),
-      )
+      _event_envelope(event)
       for event in events
     ]
 
@@ -272,9 +286,22 @@ class HTTPHost:
     tasks = self._scheduled_task_service.list(enabled_only=enabled_only)
     return ok_response(scheduled_tasks=[task.to_dict() for task in tasks])
 
+  def get_scheduled_task_triggers(self, task_id: str) -> dict[str, Any]:
+    if self._scheduled_task_service.get(task_id) is None:
+      raise KeyError(f"Scheduled task not found: {task_id}")
+    triggers = self._scheduled_task_service.list_triggers(task_id)
+    return ok_response(triggers=[trigger.to_dict() for trigger in triggers])
+
   def create_scheduled_task(self, payload: dict[str, Any]) -> dict[str, Any]:
     task = self._scheduled_task_service.create(payload)
     return ok_response(scheduled_task=task.to_dict())
+
+  def update_scheduled_task(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    task = self._scheduled_task_service.update(task_id, payload)
+    return ok_response(scheduled_task=task.to_dict())
+
+  def delete_scheduled_task(self, task_id: str) -> dict[str, Any]:
+    return ok_response(deleted=self._scheduled_task_service.delete(task_id), task_id=task_id)
 
   async def run_due_scheduled_tasks(self, payload: dict[str, Any]) -> dict[str, Any]:
     limit = _optional_int(payload.get("limit"), field="limit")
@@ -290,6 +317,85 @@ class HTTPHost:
       raise ValueError("kind must be browser, desktop, or mobile.")
     return ok_response(**self._control_plane.list_targets(raw_kind))
 
+  async def execute_control_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(**await self._control_plane.execute(payload))
+
+  def list_chat_sessions(self) -> dict[str, Any]:
+    return ok_response(chat_sessions=[session.to_dict() for session in self._desktop_chat_service.list_sessions()])
+
+  def create_chat_session(self, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(chat_session=self._desktop_chat_service.create_session(payload).to_dict())
+
+  def list_chat_messages(self, session_id: str) -> dict[str, Any]:
+    return ok_response(messages=[message.to_dict() for message in self._desktop_chat_service.list_messages(session_id)])
+
+  async def send_chat_message(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(**await self._desktop_chat_service.send_message(session_id, payload))
+
+  async def retry_chat_message(self, session_id: str) -> dict[str, Any]:
+    return ok_response(**await self._desktop_chat_service.retry_last(session_id))
+
+  def clear_chat_messages(self, session_id: str) -> dict[str, Any]:
+    return ok_response(**self._desktop_chat_service.clear_messages(session_id))
+
+  def pause_chat_session(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(**self._desktop_chat_service.pause(session_id, reason=str(payload.get("reason") or "user paused chat task")))
+
+  def list_skills(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    active_only = _query_bool(query or {}, "active_only", default=False)
+    skills = self._skill_service.list_active() if active_only else self._skill_service.list_all()
+    return ok_response(skills=[skill.to_dict() for skill in skills])
+
+  def create_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+    skill = self._skill_service.create_interpreted_skill(
+      name=_required_str(payload.get("name"), "name"),
+      description=str(payload.get("description") or ""),
+      when_to_use=str(payload.get("when_to_use") or ""),
+      instructions=str(payload.get("instructions") or ""),
+      recommended_tools=_optional_string_list(payload.get("recommended_tools"), field="recommended_tools") or [],
+      recommended_workflows=_optional_string_list(payload.get("recommended_workflows"), field="recommended_workflows") or [],
+    )
+    if payload.get("status") == "active":
+      skill = self._skill_service.activate(skill.skill_id)
+    return ok_response(skill=skill.to_dict())
+
+  def update_skill(self, skill_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(skill=self._skill_service.update(skill_id, payload).to_dict())
+
+  def activate_skill(self, skill_id: str) -> dict[str, Any]:
+    return ok_response(skill=self._skill_service.activate(skill_id).to_dict())
+
+  def deprecate_skill(self, skill_id: str) -> dict[str, Any]:
+    return ok_response(skill=self._skill_service.deprecate(skill_id).to_dict())
+
+  def list_config_sections(self) -> dict[str, Any]:
+    return ok_response(config_sections=[section.to_dict() for section in self._config_center_service.list_sections()])
+
+  def get_config_section(self, section: str) -> dict[str, Any]:
+    return ok_response(config_section=self._config_center_service.get_section(section).to_dict())
+
+  def update_config_section(self, section: str, payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    merge = bool(payload.get("merge", True))
+    return ok_response(config_section=self._config_center_service.update_section(section, data, merge=merge).to_dict())
+
+  def list_workspaces(self) -> dict[str, Any]:
+    return ok_response(workspaces=[snapshot.to_dict() for snapshot in self._desktop_workspace_service.list_workspaces()])
+
+  def inspect_workspace(self, workspace_id: str) -> dict[str, Any]:
+    snapshot = self._desktop_workspace_service.get_workspace(workspace_id)
+    if snapshot is None:
+      raise KeyError(f"Workspace not found: {workspace_id}")
+    return ok_response(workspace=snapshot.to_dict())
+
+  def list_pending_approvals(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    run_id = _query_optional_str(query or {}, "run_id")
+    return ok_response(approvals=self._desktop_workspace_service.list_pending_approvals(run_id))
+
+  def list_tool_calls(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    run_id = _query_optional_str(query or {}, "run_id")
+    return ok_response(tool_calls=self._desktop_workspace_service.list_tool_calls(run_id))
+
   def _require_delegation_control(self) -> AgentDelegationControl:
     if self._delegation_control is None:
       raise ValueError("Agent delegation broker is not configured.")
@@ -299,6 +405,12 @@ class HTTPHost:
 def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
   class AgentKernelHTTPRequestHandler(BaseHTTPRequestHandler):
     server_version = "AgentKernelHTTP/0.1"
+
+    def do_OPTIONS(self) -> None:
+      self.send_response(HTTPStatus.NO_CONTENT.value)
+      self._write_common_headers()
+      self.send_header("Content-Length", "0")
+      self.end_headers()
 
     def do_GET(self) -> None:
       parsed = urlparse(self.path)
@@ -310,7 +422,14 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           self._write_json(HTTPStatus.OK, host.inspect_run(segments[1]))
           return
         if len(segments) == 3 and segments[0] == "runs" and segments[2] == "events":
-          envelopes = host.list_run_events(segments[1])
+          envelopes = host.list_run_events(segments[1], after_event_id=_query_optional_str(query, "after_event_id"))
+          if self._wants_sse(query):
+            self._write_sse(HTTPStatus.OK, envelopes)
+            return
+          self._write_ndjson(HTTPStatus.OK, [envelope.to_dict() for envelope in envelopes])
+          return
+        if len(segments) == 1 and segments[0] == "events":
+          envelopes = host.list_events(query)
           if self._wants_sse(query):
             self._write_sse(HTTPStatus.OK, envelopes)
             return
@@ -318,6 +437,33 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           return
         if len(segments) == 2 and segments[0] == "artifacts":
           self._write_json(HTTPStatus.OK, host.inspect_artifact(segments[1]))
+          return
+        if len(segments) == 1 and segments[0] == "workspaces":
+          self._write_json(HTTPStatus.OK, host.list_workspaces())
+          return
+        if len(segments) == 2 and segments[0] == "workspaces":
+          self._write_json(HTTPStatus.OK, host.inspect_workspace(segments[1]))
+          return
+        if len(segments) == 2 and segments[0] == "chat" and segments[1] == "sessions":
+          self._write_json(HTTPStatus.OK, host.list_chat_sessions())
+          return
+        if len(segments) == 4 and segments[0] == "chat" and segments[1] == "sessions" and segments[3] == "messages":
+          self._write_json(HTTPStatus.OK, host.list_chat_messages(segments[2]))
+          return
+        if len(segments) == 1 and segments[0] == "approvals":
+          self._write_json(HTTPStatus.OK, host.list_pending_approvals(query))
+          return
+        if len(segments) == 1 and segments[0] == "tool-calls":
+          self._write_json(HTTPStatus.OK, host.list_tool_calls(query))
+          return
+        if len(segments) == 1 and segments[0] == "skills":
+          self._write_json(HTTPStatus.OK, host.list_skills(query))
+          return
+        if len(segments) == 1 and segments[0] == "config":
+          self._write_json(HTTPStatus.OK, host.list_config_sections())
+          return
+        if len(segments) == 2 and segments[0] == "config":
+          self._write_json(HTTPStatus.OK, host.get_config_section(segments[1]))
           return
         if len(segments) == 2 and segments[0] == "delegations":
           parent_run_id = _query_required_str(query, "parent_run_id")
@@ -330,6 +476,9 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           return
         if len(segments) == 1 and segments[0] == "scheduled-tasks":
           self._write_json(HTTPStatus.OK, host.list_scheduled_tasks(query))
+          return
+        if len(segments) == 3 and segments[0] == "scheduled-tasks" and segments[2] == "triggers":
+          self._write_json(HTTPStatus.OK, host.get_scheduled_task_triggers(segments[1]))
           return
         if len(segments) == 2 and segments[0] == "control" and segments[1] == "health":
           self._write_json(HTTPStatus.OK, asyncio.run(host.control_health()))
@@ -392,14 +541,41 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           response = asyncio.run(host.create_task(payload))
           self._write_json(HTTPStatus.CREATED, response)
           return
+        if len(segments) == 2 and segments[0] == "chat" and segments[1] == "sessions":
+          self._write_json(HTTPStatus.CREATED, host.create_chat_session(payload))
+          return
+        if len(segments) == 4 and segments[0] == "chat" and segments[1] == "sessions" and segments[3] == "messages":
+          response = asyncio.run(host.send_chat_message(segments[2], payload))
+          self._write_json(HTTPStatus.CREATED, response)
+          return
+        if len(segments) == 4 and segments[0] == "chat" and segments[1] == "sessions" and segments[3] == "retry":
+          response = asyncio.run(host.retry_chat_message(segments[2]))
+          self._write_json(HTTPStatus.CREATED, response)
+          return
+        if len(segments) == 4 and segments[0] == "chat" and segments[1] == "sessions" and segments[3] == "pause":
+          self._write_json(HTTPStatus.OK, host.pause_chat_session(segments[2], payload))
+          return
         if len(segments) == 1 and segments[0] == "mcp-servers":
           self._write_json(HTTPStatus.OK, host.upsert_mcp_server(payload))
+          return
+        if len(segments) == 1 and segments[0] == "skills":
+          self._write_json(HTTPStatus.CREATED, host.create_skill(payload))
+          return
+        if len(segments) == 3 and segments[0] == "skills" and segments[2] == "activate":
+          self._write_json(HTTPStatus.OK, host.activate_skill(segments[1]))
+          return
+        if len(segments) == 3 and segments[0] == "skills" and segments[2] == "deprecate":
+          self._write_json(HTTPStatus.OK, host.deprecate_skill(segments[1]))
           return
         if len(segments) == 1 and segments[0] == "scheduled-tasks":
           self._write_json(HTTPStatus.CREATED, host.create_scheduled_task(payload))
           return
         if len(segments) == 2 and segments[0] == "scheduled-tasks" and segments[1] == "run-due":
           response = asyncio.run(host.run_due_scheduled_tasks(payload))
+          self._write_json(HTTPStatus.OK, response)
+          return
+        if len(segments) == 2 and segments[0] == "control" and segments[1] == "commands":
+          response = asyncio.run(host.execute_control_command(payload))
           self._write_json(HTTPStatus.OK, response)
           return
         self._write_json(HTTPStatus.NOT_FOUND, error_response("route not found", path=path))
@@ -417,8 +593,34 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
         if len(segments) == 2 and segments[0] == "mcp-servers":
           self._write_json(HTTPStatus.OK, host.delete_mcp_server(segments[1]))
           return
+        if len(segments) == 2 and segments[0] == "scheduled-tasks":
+          self._write_json(HTTPStatus.OK, host.delete_scheduled_task(segments[1]))
+          return
+        if len(segments) == 4 and segments[0] == "chat" and segments[1] == "sessions" and segments[3] == "messages":
+          self._write_json(HTTPStatus.OK, host.clear_chat_messages(segments[2]))
+          return
         self._write_json(HTTPStatus.NOT_FOUND, error_response("route not found", path=path))
       except (ValueError, DomainError) as exc:
+        self._write_json(HTTPStatus.BAD_REQUEST, error_response(str(exc)))
+
+    def do_PATCH(self) -> None:
+      path = urlparse(self.path).path
+      segments = [unquote(segment) for segment in path.split("/") if segment]
+      try:
+        payload = self._read_json_body()
+        if len(segments) == 2 and segments[0] == "scheduled-tasks":
+          self._write_json(HTTPStatus.OK, host.update_scheduled_task(segments[1], payload))
+          return
+        if len(segments) == 2 and segments[0] == "skills":
+          self._write_json(HTTPStatus.OK, host.update_skill(segments[1], payload))
+          return
+        if len(segments) == 2 and segments[0] == "config":
+          self._write_json(HTTPStatus.OK, host.update_config_section(segments[1], payload))
+          return
+        self._write_json(HTTPStatus.NOT_FOUND, error_response("route not found", path=path))
+      except KeyError as exc:
+        self._write_json(HTTPStatus.NOT_FOUND, error_response(str(exc)))
+      except (ValueError, DomainError, json.JSONDecodeError) as exc:
         self._write_json(HTTPStatus.BAD_REQUEST, error_response(str(exc)))
 
     def log_message(self, format: str, *args: object) -> None:
@@ -437,6 +639,7 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
     def _write_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
       body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
       self.send_response(status.value)
+      self._write_common_headers()
       self.send_header("Content-Type", "application/json; charset=utf-8")
       self.send_header("Content-Length", str(len(body)))
       self.end_headers()
@@ -448,6 +651,7 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
         for payload in payloads
       )
       self.send_response(status.value)
+      self._write_common_headers()
       self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
       self.send_header("Cache-Control", "no-cache")
       self.send_header("Content-Length", str(len(body)))
@@ -457,12 +661,18 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
     def _write_sse(self, status: HTTPStatus, envelopes: list[EventStreamEnvelope]) -> None:
       body = b"".join(_sse_frame(envelope) for envelope in envelopes)
       self.send_response(status.value)
+      self._write_common_headers()
       self.send_header("Content-Type", "text/event-stream; charset=utf-8")
       self.send_header("Cache-Control", "no-cache")
       self.send_header("Connection", "keep-alive")
       self.send_header("Content-Length", str(len(body)))
       self.end_headers()
       self.wfile.write(body)
+
+    def _write_common_headers(self) -> None:
+      self.send_header("Access-Control-Allow-Origin", "*")
+      self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+      self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
 
     def _wants_sse(self, query: dict[str, list[str]]) -> bool:
       formats = {value.lower() for value in query.get("format", [])}
@@ -523,7 +733,7 @@ def build_server(conn: sqlite3.Connection, host: str = "127.0.0.1", port: int = 
 
 
 def serve(db_path: str, host: str = "127.0.0.1", port: int = 8080) -> None:
-  conn = connect_sqlite(db_path)
+  conn = connect_sqlite(db_path, check_same_thread=False)
   try:
     server = build_server(conn, host=host, port=port)
     server.serve_forever()
@@ -633,6 +843,31 @@ def _positive_float(value: object, *, default: float, field: str) -> float:
   if parsed <= 0:
     raise ValueError(f"{field} must be a positive number.")
   return parsed
+
+
+def _event_envelope(event: Any) -> EventStreamEnvelope:
+  return EventStreamEnvelope(
+    event_id=event.event_id,
+    event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
+    run_id=event.run_id,
+    payload={
+      "node_id": event.node_id,
+      "step_id": event.step_id,
+      "agent_id": event.agent_id,
+      "task_id": event.task_id,
+      "causal_id": event.causal_id,
+      "payload": event.payload,
+      "artifact_refs": [ref.to_dict() for ref in event.artifact_refs],
+    },
+    emitted_at=event.timestamp.isoformat(),
+  )
+
+
+def _events_after(events: list[Any], event_id: str) -> list[Any]:
+  for index, event in enumerate(events):
+    if event.event_id == event_id:
+      return events[index + 1 :]
+  return events
 
 
 def _sse_frame(envelope: EventStreamEnvelope) -> bytes:

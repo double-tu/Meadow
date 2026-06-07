@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from agent_kernel.domain.base import new_id, utc_now
-from agent_kernel.domain.scheduled_task import ScheduledTask, ScheduledTaskTrigger
+from agent_kernel.domain.scheduled_task import ScheduledTask, ScheduledTaskTrigger, compute_next_run_at
 
 
 class ScheduledTaskLauncher(Protocol):
@@ -49,9 +49,41 @@ class ScheduledTaskService:
       task = uow.interactions.get_scheduled_task(task_id)
       if task is None:
         raise KeyError(f"Scheduled task not found: {task_id}")
-      updated = replace(task, enabled=enabled, updated_at=utc_now())
+      updated = replace(
+        task,
+        enabled=enabled,
+        next_run_at=compute_next_run_at(task.schedule_kind, task.schedule_value, utc_now()) if enabled else None,
+        updated_at=utc_now(),
+      )
       uow.interactions.save_scheduled_task(updated)
       return updated
+
+  def update(self, task_id: str, data: dict[str, Any]) -> ScheduledTask:
+    with self._uow_factory() as uow:
+      task = uow.interactions.get_scheduled_task(task_id)
+      if task is None:
+        raise KeyError(f"Scheduled task not found: {task_id}")
+      enabled = bool(data["enabled"]) if "enabled" in data else task.enabled
+      schedule_kind = str(data.get("schedule_kind") or task.schedule_kind)
+      schedule_value = str(data.get("schedule_value") or task.schedule_value)
+      updated = replace(
+        task,
+        name=str(data.get("name") or task.name),
+        schedule_kind=schedule_kind,
+        schedule_value=schedule_value,
+        payload=data.get("payload") if isinstance(data.get("payload"), dict) else task.payload,
+        enabled=enabled,
+        max_triggers=int(data["max_triggers"]) if data.get("max_triggers") is not None else task.max_triggers,
+        metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else task.metadata,
+        next_run_at=compute_next_run_at(schedule_kind, schedule_value, utc_now()) if enabled else None,
+        updated_at=utc_now(),
+      )
+      uow.interactions.save_scheduled_task(updated)
+      return updated
+
+  def delete(self, task_id: str) -> bool:
+    with self._uow_factory() as uow:
+      return uow.interactions.delete_scheduled_task(task_id)
 
   async def run_due(self, now: datetime | None = None, limit: int | None = None) -> list[ScheduledTaskTrigger]:
     current = now or utc_now()
