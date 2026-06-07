@@ -9,18 +9,19 @@ Implemented MVP areas:
 - Durable runtime with SQLite event log, state, checkpoint, retry, dead letter, budget, circuit breaker, idempotency basics, stale-step recovery scanner, recovery consistency checks, and conservative repair.
 - Workflow graph execution with function, tool, and agent node executors.
 - Agent orchestration with sessions, mailbox, child agent spawn/await/cancel, and agent-as-workflow-node.
-- Capability runtime with policy checks, approval flow, audit records, local/process tools, timeout, and tool-call cancel/kill control.
+- Capability runtime with policy checks, approval flow, audit records, local/process tools, process stdout/stderr streaming, timeout, and tool-call cancel/kill control.
+- Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, TMWebDriver HTTP browser backend, Win32 desktop backend, UIA-style desktop tree detector, and ADB mobile backend routed through capability policy/audit.
 - Memory/context with working/artifact memory, context budget, sensitivity filtering, tool visibility pruning, large-memory artifact refs, and context ledger.
 - Episodic memory with deterministic summarizer/retriever interfaces and conservative semantic consolidation.
 - Observability/replay with timeline, artifact inspect, cost ledger, exact/partial/recovery replay, and eval assertions.
 - Extension manifest loader, contribution registry, and permission-to-grant mapping.
 - Autonomous exploration MVP with strategy planning, attempts, verification, trace distillation, draft workflow templates, and skill evolution records.
-- Multi-agent interaction fabric MVP with channels, messages, round-robin group chat, agent pools, taskboard basics, and observer findings.
+- Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings, connector routing, and channel/cross-channel decision artifacts.
 - Workspace isolation interfaces with patch artifact review/merge workflow and fake backend for tests.
 - Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
 - Human intervention with event append, working-memory steering, and CLI `intervene`.
 - Skill service and plan patch validation for controlled skill/workflow evolution.
-- MCP, Workbench, and persistent agent connector protocol boundaries with fake implementations.
+- MCP stdio client/tool executor, generic Workbench protocol/fake, control Workbench, persistent agent connector protocol, structured stdio connector, product CLI connector factory, and multi-session connector router boundaries.
 - Host DTOs for event stream, task workspace, and HTTP route planning.
 - CLI host for sample run, inspect, replay, approve, reject, cancel, cancel/kill tool call, intervene, and llm-smoke.
 - OpenAI-compatible LLM smoke command configured by environment variables or TOML/JSON config.
@@ -93,15 +94,15 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - All side-effecting capabilities go through `CapabilityRuntime` and `PolicyEngine`.
 - `ReplayService` does not re-execute model/tool calls.
 - Current CLI is a minimal host, not the final Web/Desktop workspace.
-- This repository does not yet implement computer control, browser automation, GUI operation, or mobile-device control; it provides adapter boundaries for future integration.
+- Browser control can use the TMWebDriver-compatible HTTP backend, desktop control can use the optional Win32 desktop backend plus UIA-style tree detector, and mobile control can use the ADB backend.
 
 ## Known MVP Gaps
 
 - HTTP server is not implemented; only route/stream/workspace DTOs exist.
-- Tool-call cancel/kill only performs live process control inside the current runtime process; after restart, host commands persist control requests but cannot signal the original child process.
-- Real persistent CLI agent connector is not implemented; only protocol and fake connector exist.
-- Handoff has a persistent service and channel routing, but real multi-CLI session routing is not implemented.
-- Real Workbench/MCP adapters are not implemented; only contracts and fake clients exist.
+- Tool-call cancel/kill and process stream control only operate inside the current runtime process; after restart, host commands persist control requests but cannot signal the original child process.
+- Product-specific Codex/Claude/Gemini CLI connector shims are not implemented; protocol, fake connector, structured JSONL stdio connector, product CLI connector factory, and multi-session router exist.
+- Handoff has a persistent service and channel routing, but product-specific CLI session adapters are not implemented.
+- Generic Workbench real adapters are not implemented. MCP has a stdio JSON-RPC client/tool executor; control has TMWebDriver HTTP browser, Win32 desktop/UIA-style, and ADB mobile backends.
 - Recovery scanner can reschedule or dead-letter stale steps and conservatively repair missing/misaligned RunState checkpoint metadata, but complex artifact/event repair workflows are not implemented.
 - Workspace isolation has protocol and fake-backed patch review workflow; real git worktree allocation and merge execution are not implemented.
 - Advanced vector search, fact conflict detection, and background long-term consolidation are not implemented.

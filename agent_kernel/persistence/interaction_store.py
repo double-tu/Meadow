@@ -46,6 +46,10 @@ class InteractionStore:
   def save_group_chat(self, item: GroupChatSession) -> None:
     self._save(item.group_chat_id, "group_chat", item.thread_id, item)
 
+  def get_group_chat(self, group_chat_id: str) -> GroupChatSession | None:
+    data = self._get(group_chat_id)
+    return GroupChatSession.from_dict(data) if data is not None else None
+
   def save_turn(self, item: DiscussionTurn) -> None:
     self._save(item.turn_id, "discussion_turn", item.group_chat_id, item)
 

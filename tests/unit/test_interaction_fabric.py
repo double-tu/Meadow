@@ -2,12 +2,24 @@ import unittest
 
 from agent_kernel.agents import (
   AgentPoolScheduler,
+  DecisionArtifactService,
   GroupChatService,
   InteractionFabric,
   ObserverService,
   TaskBoardService,
 )
-from agent_kernel.domain import AgentPool, ArtifactRef, HandoffRecord, InteractionParticipant, ParticipantKind, PatchArtifact, ReviewRecord, WorkspaceLease
+from agent_kernel.domain import (
+  AgentPool,
+  ArtifactRef,
+  HandoffRecord,
+  InteractionParticipant,
+  ParticipantKind,
+  PatchArtifact,
+  ReviewRecord,
+  SpeakerPolicy,
+  SpeakerPolicyType,
+  WorkspaceLease,
+)
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.runtime import unit_of_work_factory
 
@@ -47,6 +59,128 @@ class InteractionFabricTests(unittest.TestCase):
 
       self.assertEqual(turn_1.speaker_participant_id, "p1")
       self.assertEqual(turn_2.speaker_participant_id, "p2")
+    finally:
+      conn.close()
+
+  def test_group_chat_free_for_all_accepts_requested_speaker(self) -> None:
+    conn = connect_sqlite()
+    try:
+      fabric = InteractionFabric(unit_of_work_factory(conn))
+      channel = fabric.create_channel("free discussion", ["p1", "p2"])
+      service = GroupChatService(unit_of_work_factory(conn), fabric)
+      chat = service.create(
+        "thread_1",
+        "topic",
+        ["p1", "p2"],
+        speaker_policy=SpeakerPolicy(type=SpeakerPolicyType.FREE_FOR_ALL),
+      )
+
+      turn = service.add_turn(
+        chat,
+        channel.channel_id,
+        {"speaker_participant_id": "p2", "text": "I can take this."},
+      )
+
+      self.assertEqual(turn.speaker_participant_id, "p2")
+      self.assertEqual(turn.selected_by, "free_for_all")
+      self.assertEqual(turn.rationale, "Speaker provided by caller.")
+    finally:
+      conn.close()
+
+  def test_group_chat_moderator_select_records_selection_rationale(self) -> None:
+    conn = connect_sqlite()
+    try:
+      fabric = InteractionFabric(unit_of_work_factory(conn))
+      channel = fabric.create_channel("moderated discussion", ["moderator", "p1", "p2"])
+      service = GroupChatService(unit_of_work_factory(conn), fabric)
+      chat = service.create(
+        "thread_1",
+        "topic",
+        ["moderator", "p1", "p2"],
+        speaker_policy=SpeakerPolicy(type=SpeakerPolicyType.MODERATOR_SELECT),
+        moderator_participant_id="moderator",
+      )
+
+      turn = service.add_turn(
+        chat,
+        channel.channel_id,
+        {
+          "selected_speaker_participant_id": "p2",
+          "selection_rationale": "reviewer has the context",
+          "text": "please review",
+        },
+      )
+
+      self.assertEqual(turn.speaker_participant_id, "p2")
+      self.assertEqual(turn.selected_by, "moderator")
+      self.assertEqual(turn.rationale, "reviewer has the context")
+    finally:
+      conn.close()
+
+  def test_group_chat_decision_artifact_summarizes_channel_and_completes_session(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      fabric = InteractionFabric(uow_factory)
+      channel = fabric.create_channel("architecture decision", ["moderator", "builder", "reviewer"])
+      service = GroupChatService(uow_factory, fabric)
+      chat = service.create("thread_1", "replace GenericAgent", ["builder", "reviewer"])
+      service.add_turn(chat, channel.channel_id, {"text": "implement control workbench"})
+      service.add_turn(chat, channel.channel_id, {"type": "decision", "summary": "ship adapter boundary"})
+
+      artifact = DecisionArtifactService(uow_factory, fabric).create_for_group_chat(
+        chat,
+        channel.channel_id,
+        decided_by_participant_id="moderator",
+      )
+
+      with UnitOfWork(conn) as uow:
+        metadata = uow.artifacts.get_metadata(artifact.artifact_id)
+        saved_chat = uow.interactions.get_group_chat(chat.group_chat_id)
+      messages = fabric.list_messages(channel.channel_id)
+
+      self.assertEqual(artifact.media_type, "application/vnd.meadow.decision+json")
+      self.assertEqual(metadata["kind"], "decision_artifact")
+      self.assertEqual(metadata["payload"]["topic"], "replace GenericAgent")
+      self.assertEqual(metadata["payload"]["message_count"], 2)
+      self.assertEqual(metadata["payload"]["decision"]["summary"], "ship adapter boundary")
+      self.assertEqual(saved_chat.status, "completed")
+      self.assertEqual(saved_chat.decision_artifact_ref.artifact_id, artifact.artifact_id)
+      self.assertEqual(messages[-1].content["type"], "decision_artifact")
+      self.assertEqual(messages[-1].content["artifact_id"], artifact.artifact_id)
+    finally:
+      conn.close()
+
+  def test_cross_channel_decision_artifact_aggregates_multiple_channels(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      fabric = InteractionFabric(uow_factory)
+      implementation = fabric.create_channel("implementation", ["builder", "reviewer"])
+      operations = fabric.create_channel("operations", ["operator"])
+      fabric.send_message(implementation.channel_id, "builder", {"text": "control adapter ready"})
+      fabric.send_message(implementation.channel_id, "reviewer", {"type": "decision", "summary": "approve adapter"})
+      fabric.send_message(operations.channel_id, "operator", {"text": "deployment needs env flags"})
+
+      artifact = DecisionArtifactService(uow_factory, fabric).create_cross_channel(
+        "GenericAgent replacement milestone",
+        [implementation.channel_id, operations.channel_id],
+        decided_by_participant_id="moderator",
+      )
+
+      with UnitOfWork(conn) as uow:
+        metadata = uow.artifacts.get_metadata(artifact.artifact_id)
+      messages = fabric.list_messages(implementation.channel_id)
+
+      self.assertEqual(artifact.media_type, "application/vnd.meadow.cross-channel-decision+json")
+      self.assertEqual(metadata["kind"], "cross_channel_decision_artifact")
+      self.assertEqual(metadata["payload"]["channel_count"], 2)
+      self.assertEqual(metadata["payload"]["message_count"], 3)
+      self.assertEqual(metadata["payload"]["participants"], ["builder", "operator", "reviewer"])
+      self.assertEqual(metadata["payload"]["channels"][0]["channel_id"], implementation.channel_id)
+      self.assertEqual(metadata["payload"]["channels"][1]["payload"]["message_count"], 1)
+      self.assertEqual(messages[-1].content["type"], "cross_channel_decision_artifact")
+      self.assertEqual(messages[-1].content["artifact_id"], artifact.artifact_id)
     finally:
       conn.close()
 

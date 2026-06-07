@@ -63,10 +63,22 @@ class ArtifactStore:
       checksum=row["checksum"],
     )
 
+  def get_metadata(self, artifact_id: str) -> dict[str, Any] | None:
+    row = self._conn.execute(
+      """
+      SELECT metadata_json
+      FROM artifacts
+      WHERE artifact_id = ?
+      """,
+      (artifact_id,),
+    ).fetchone()
+    if row is None:
+      return None
+    return json.loads(row["metadata_json"])
+
   def list_by_ids(self, artifact_ids: list[str]) -> list[ArtifactRef]:
     return [
       ref
       for artifact_id in artifact_ids
       if (ref := self.get(artifact_id)) is not None
     ]
-

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
+from agent_kernel.capabilities.adapters.control import ControlResult, ControlTargetKind, ControlWorkbench
 from agent_kernel.capabilities.adapters.local import LocalToolExecutor
+from agent_kernel.capabilities.adapters.mcp import MCPToolExecutor
 from agent_kernel.capabilities.adapters.process import ProcessToolExecutor
 from agent_kernel.capabilities.registry import CapabilityRegistry
 from agent_kernel.domain.base import new_id, utc_now
@@ -42,12 +44,16 @@ class CapabilityRuntime:
     policy: PolicyEngine,
     local_tools: LocalToolExecutor,
     process_tools: ProcessToolExecutor | None = None,
+    mcp_tools: MCPToolExecutor | None = None,
+    control_workbench: ControlWorkbench | None = None,
     uow_factory=None,
   ) -> None:
     self._registry = registry
     self._policy = policy
     self._local_tools = local_tools
     self._process_tools = process_tools
+    self._mcp_tools = mcp_tools
+    self._control_workbench = control_workbench
     self._uow_factory = uow_factory
 
   async def call(
@@ -83,7 +89,7 @@ class CapabilityRuntime:
     if decision.type is PolicyDecisionType.REQUIRE_APPROVAL:
       self._update_tool_call(tool_call, status=ToolCallStatus.AWAITING_APPROVAL)
       return CapabilityCallOutcome(result=None, decision=decision)
-    if spec.kind != "tool":
+    if spec.kind not in {"tool", "workbench"}:
       self._update_tool_call(
         tool_call,
         status=ToolCallStatus.FAILED,
@@ -94,7 +100,10 @@ class CapabilityRuntime:
         decision=decision,
       )
     self._update_tool_call(tool_call, status=ToolCallStatus.RUNNING)
-    result = await self._call_tool_adapter(capability_id, input, tool_call.tool_call_id)
+    if spec.kind == "workbench":
+      result = await self._call_workbench_adapter(input)
+    else:
+      result = await self._call_tool_adapter(capability_id, input, tool_call.tool_call_id)
     terminal_status = self._terminal_status_from_result(result)
     self._update_tool_call(
       tool_call,
@@ -132,7 +141,99 @@ class CapabilityRuntime:
         return await self._process_tools.call(capability_id, input, tool_call_id=tool_call_id)
       except KeyError:
         pass
+    if self._mcp_tools is not None:
+      try:
+        return await self._mcp_tools.call(capability_id, input)
+      except KeyError:
+        pass
     return await self._local_tools.call(capability_id, input)
+
+  async def _call_workbench_adapter(self, input: dict[str, Any]) -> ToolResult:
+    if self._control_workbench is None:
+      return ToolResult(
+        ok=False,
+        error={"type": "control_workbench_not_configured"},
+      )
+    action = input.get("action")
+    target_kind = input.get("target_kind")
+    target_id = input.get("target_id")
+    timeout_seconds = input.get("timeout_seconds")
+    try:
+      if action == "list_targets":
+        kind = target_kind if target_kind in {"browser", "desktop", "mobile"} else None
+        targets = [target.to_dict() for target in self._control_workbench.list_targets(kind)]
+        return ToolResult(ok=True, output={"targets": targets})
+      result = await self._dispatch_control_action(
+        action=action,
+        target_kind=target_kind,
+        target_id=target_id if isinstance(target_id, str) else None,
+        payload=input.get("payload", {}),
+        timeout_seconds=timeout_seconds if isinstance(timeout_seconds, (int, float)) else None,
+      )
+    except (TypeError, ValueError) as exc:
+      return ToolResult(ok=False, error={"type": "invalid_control_command", "message": str(exc)})
+    return ToolResult(ok=result.ok, output=result.output, error=result.error)
+
+  async def _dispatch_control_action(
+    self,
+    action: Any,
+    target_kind: Any,
+    target_id: str | None,
+    payload: Any,
+    timeout_seconds: float | None,
+  ) -> ControlResult:
+    workbench = self._control_workbench
+    if workbench is None:
+      raise RuntimeError("Control workbench is not configured.")
+    if not isinstance(payload, dict):
+      raise TypeError("payload must be a dictionary.")
+    if action == "inspect_browser":
+      return await workbench.inspect_browser(target_id)
+    if action == "execute_js":
+      code = payload.get("code")
+      if not isinstance(code, str):
+        raise ValueError("payload.code is required for execute_js.")
+      return await workbench.execute_js(code, target_id, timeout_seconds)
+    if action == "navigate":
+      url = payload.get("url")
+      if not isinstance(url, str):
+        raise ValueError("payload.url is required for navigate.")
+      return await workbench.navigate(url, target_id, timeout_seconds)
+    if action == "screenshot":
+      return await workbench.screenshot(self._require_target_kind(target_kind), target_id)
+    if action == "click":
+      x, y = self._require_xy(payload)
+      return await workbench.click(self._require_target_kind(target_kind), x, y, target_id)
+    if action == "key":
+      key = payload.get("key")
+      if not isinstance(key, str):
+        raise ValueError("payload.key is required for key.")
+      return await workbench.key(self._require_target_kind(target_kind), key, target_id)
+    if action == "type_text":
+      text = payload.get("text")
+      if not isinstance(text, str):
+        raise ValueError("payload.text is required for type_text.")
+      return await workbench.type_text(self._require_target_kind(target_kind), text, target_id)
+    if action == "dump_ui":
+      return await workbench.dump_ui(self._require_target_kind(target_kind), target_id)
+    if action == "tap":
+      x, y = self._require_xy(payload)
+      return await workbench.tap(x, y, target_id)
+    raise ValueError(f"Unsupported control action: {action}")
+
+  @staticmethod
+  def _require_target_kind(value: Any) -> ControlTargetKind:
+    if value not in {"browser", "desktop", "mobile"}:
+      raise ValueError("target_kind must be one of browser, desktop, mobile.")
+    return cast(ControlTargetKind, value)
+
+  @staticmethod
+  def _require_xy(payload: dict[str, Any]) -> tuple[int, int]:
+    x = payload.get("x")
+    y = payload.get("y")
+    if not isinstance(x, int) or not isinstance(y, int):
+      raise ValueError("payload.x and payload.y are required integer coordinates.")
+    return x, y
 
   @staticmethod
   def _terminal_status_from_result(result: ToolResult) -> ToolCallStatus:
