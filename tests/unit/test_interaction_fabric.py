@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from agent_kernel.agents import (
@@ -13,15 +14,21 @@ from agent_kernel.domain import (
   ArtifactRef,
   HandoffRecord,
   InteractionParticipant,
+  NodeResult,
+  NodeSpec,
   ParticipantKind,
   PatchArtifact,
   ReviewRecord,
+  RunStatus,
+  RuntimeEventType,
   SpeakerPolicy,
   SpeakerPolicyType,
   WorkspaceLease,
+  WorkflowSpec,
 )
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
-from agent_kernel.runtime import unit_of_work_factory
+from agent_kernel.runtime import RuntimeEngine, unit_of_work_factory
+from agent_kernel.workflow import FunctionNodeExecutor, NodeExecutorRegistry
 
 
 class InteractionFabricTests(unittest.TestCase):
@@ -214,6 +221,49 @@ class InteractionFabricTests(unittest.TestCase):
       self.assertEqual(assigned.status, "doing")
       self.assertEqual(finding.action, "request_pause")
       self.assertEqual(findings[0].severity, "critical")
+    finally:
+      conn.close()
+
+  def test_observer_request_pause_can_pause_runtime_run(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      workflow = WorkflowSpec(
+        workflow_id="wf_observed",
+        version="0.1.0",
+        name="observed",
+        input_schema={},
+        output_schema={},
+        nodes=[NodeSpec(node_id="start", kind="test")],
+        edges=[],
+        start_node_id="start",
+      )
+      registry = NodeExecutorRegistry()
+      registry.register("test", lambda: FunctionNodeExecutor(lambda ctx: NodeResult()))
+      engine = RuntimeEngine(uow_factory, registry)
+      run = engine.create_run(workflow, run_id="run_observed")
+      running = asyncio.run(engine.run_until_waiting(workflow, run.run_id, max_steps=1))
+      self.assertEqual(running.status, RunStatus.RUNNING)
+
+      finding = ObserverService(uow_factory, pause_controller=engine).request_pause(
+        observer_id="observer_1",
+        target_run_id=run.run_id,
+        message="unsafe operation detected",
+      )
+
+      with UnitOfWork(conn) as uow:
+        paused = uow.states.get(run.run_id)
+        events = uow.events.list_by_run(run.run_id)
+        checkpoint = uow.checkpoints.latest_for_run(run.run_id)
+        findings = uow.interactions.list_findings(run.run_id)
+
+      pause_events = [event for event in events if event.event_type is RuntimeEventType.RUN_PAUSED]
+      self.assertEqual(paused.status, RunStatus.PAUSED)
+      self.assertIsNotNone(checkpoint)
+      self.assertEqual(checkpoint.state.status, RunStatus.PAUSED)
+      self.assertEqual(pause_events[-1].payload["source"], "observer")
+      self.assertEqual(pause_events[-1].payload["finding_id"], finding.finding_id)
+      self.assertEqual(findings[0].finding_id, finding.finding_id)
     finally:
       conn.close()
 

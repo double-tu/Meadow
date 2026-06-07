@@ -127,6 +127,35 @@ class RuntimeEngineIntegrationTests(unittest.IsolatedAsyncioTestCase):
     finally:
       conn.close()
 
+  async def test_pause_running_workflow_persists_pause_event_and_checkpoint(self) -> None:
+    conn = connect_sqlite()
+    try:
+      workflow = build_three_node_workflow()
+      engine = build_engine(conn)
+
+      created = engine.create_run(workflow, input={}, run_id="run_pause")
+      running = await engine.run_until_waiting(workflow, created.run_id, max_steps=1)
+      paused = engine.pause_run(
+        running.run_id,
+        "observer requested pause",
+        source="observer",
+        causal_id="finding_1",
+        payload={"observer_id": "observer_1"},
+      )
+
+      with UnitOfWork(conn) as uow:
+        events = uow.events.list_by_run("run_pause")
+        latest_checkpoint = uow.checkpoints.latest_for_run("run_pause")
+
+      self.assertEqual(paused.status, RunStatus.PAUSED)
+      self.assertEqual(events[-1].event_type, RuntimeEventType.RUN_PAUSED)
+      self.assertEqual(events[-1].causal_id, "finding_1")
+      self.assertEqual(events[-1].payload["source"], "observer")
+      self.assertIsNotNone(latest_checkpoint)
+      self.assertEqual(latest_checkpoint.state.status, RunStatus.PAUSED)
+    finally:
+      conn.close()
+
   async def test_deterministic_step_failure_goes_to_dead_letter(self) -> None:
     conn = connect_sqlite()
     try:

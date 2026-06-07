@@ -35,6 +35,12 @@ class WorkflowTemplateStatus(StrEnum):
   DEPRECATED = "deprecated"
 
 
+class ReflectionStatus(StrEnum):
+  PROPOSED = "proposed"
+  APPLIED = "applied"
+  SUPERSEDED = "superseded"
+
+
 @dataclass(slots=True)
 class AcceptanceCriteria(DomainModel):
   criteria_id: str
@@ -133,3 +139,19 @@ class SkillEvolutionRecord(DomainModel):
   workflow_template_id: str | None = None
   created_at: datetime = field(default_factory=utc_now)
 
+
+@dataclass(slots=True)
+class ReflectionRecord(DomainModel):
+  reflection_id: str
+  exploration_id: str
+  attempt_id: str
+  status: ReflectionStatus | str
+  failure_summary: str
+  root_causes: list[str] = field(default_factory=list)
+  avoid_patterns: list[str] = field(default_factory=list)
+  next_strategy_hints: list[str] = field(default_factory=list)
+  created_at: datetime = field(default_factory=utc_now)
+
+  def __post_init__(self) -> None:
+    if isinstance(self.status, str):
+      self.status = ReflectionStatus(self.status)

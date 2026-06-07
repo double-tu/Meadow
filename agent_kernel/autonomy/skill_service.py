@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 
+from agent_kernel.domain.agent import AgentSession
 from agent_kernel.domain.base import new_id
 from agent_kernel.domain.skill import SkillCard, SkillExecutionMode, SkillStatus
 from agent_kernel.domain.workflow import WorkflowSpec
+from agent_kernel.autonomy.workflow_library import WorkflowLibrary
 
 
 class SkillService:
@@ -42,7 +45,10 @@ class SkillService:
     description: str,
     when_to_use: str,
     instructions: str,
+    workflow_library: WorkflowLibrary | None = None,
   ) -> SkillCard:
+    if workflow_library is not None:
+      workflow_library.register_workflow(workflow)
     skill = SkillCard(
       skill_id=new_id("skill"),
       name=name,
@@ -50,7 +56,7 @@ class SkillService:
       when_to_use=when_to_use,
       instructions=instructions,
       execution_mode=SkillExecutionMode.COMPILED_WORKFLOW,
-      compiled_workflow_ref=f"workflow://{workflow.workflow_id}/{workflow.version}",
+      compiled_workflow_ref=WorkflowLibrary.workflow_ref(workflow),
       recommended_workflows=[workflow.workflow_id],
     )
     self.save(skill)
@@ -81,12 +87,39 @@ class SkillService:
     return [skill for skill in self.list_all() if skill.status is SkillStatus.ACTIVE]
 
   def select_for_prompt(self, objective: str, limit: int = 5) -> list[SkillCard]:
-    objective_lower = objective.lower()
-    candidates = [
-      skill
+    scored = [
+      (self._score_skill(skill, objective), skill)
       for skill in self.list_active()
-      if objective_lower in skill.when_to_use.lower()
-      or objective_lower in skill.description.lower()
-      or skill.name.lower() in objective_lower
     ]
-    return candidates[:limit]
+    return [skill for score, skill in sorted(scored, key=lambda item: item[0], reverse=True) if score > 0][:limit]
+
+  def select(self, session: AgentSession, objective: str, limit: int = 5) -> list[SkillCard]:
+    allowed: list[SkillCard] = []
+    for skill in self.select_for_prompt(objective, limit=limit * 2):
+      policy = skill.use_policy
+      if policy is not None:
+        if policy.allowed_agent_ids and session.agent_id not in policy.allowed_agent_ids:
+          continue
+      allowed.append(skill)
+      if len(allowed) >= limit:
+        break
+    return allowed
+
+  @classmethod
+  def _score_skill(cls, skill: SkillCard, objective: str) -> int:
+    objective_tokens = cls._tokens(objective)
+    if not objective_tokens:
+      return 0
+    searchable = " ".join([skill.name, skill.description, skill.when_to_use, *skill.recommended_tools])
+    skill_tokens = cls._tokens(searchable)
+    score = len(objective_tokens & skill_tokens)
+    objective_lower = objective.lower()
+    if skill.name.lower() in objective_lower:
+      score += 3
+    if skill.when_to_use.lower() and skill.when_to_use.lower() in objective_lower:
+      score += 2
+    return score
+
+  @staticmethod
+  def _tokens(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-zA-Z0-9_]+", text.lower()) if len(token) > 2}

@@ -1,6 +1,14 @@
 import unittest
 
-from agent_kernel.agents import AgentLoop, AgentSessionService, SupervisorService, oneshot_agent_spec
+from agent_kernel.agents import (
+  AgentLoop,
+  AgentSessionService,
+  SkillContextProvider,
+  SupervisorService,
+  build_mailbox_message,
+  oneshot_agent_spec,
+)
+from agent_kernel.autonomy import SkillService
 from agent_kernel.domain import AgentStatus, RuntimeEventType
 from agent_kernel.models import MockModelProvider, ModelGateway
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
@@ -142,6 +150,50 @@ class AgentOrchestrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
       self.assertIsNotNone(turn.result)
       assert turn.result is not None
       self.assertEqual(turn.result.output["summary"], "json ok")
+    finally:
+      conn.close()
+
+  async def test_agent_loop_injects_selected_skills_into_model_context(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      sessions = AgentSessionService(uow_factory)
+      session = sessions.create_session(oneshot_agent_spec("agent-skill", "mock-small"))
+      skill_service = SkillService(uow_factory)
+      skill = skill_service.create_interpreted_skill(
+        name="browser-check",
+        description="Inspect browser automation failures",
+        when_to_use="browser workflow automation",
+        instructions="Inspect browser sessions before changing state.",
+        recommended_tools=["control.browser.inspect"],
+      )
+      skill_service.activate(skill.skill_id)
+      with UnitOfWork(conn) as uow:
+        uow.mailbox.send(
+          build_mailbox_message(
+            recipient_session_id=session.session_id,
+            content={"task": "fix browser workflow automation"},
+            sender_session_id="user",
+          )
+        )
+      gateway = ModelGateway()
+      provider = MockModelProvider(responses=[{"finish": True, "output": {"summary": "used skill"}}])
+      gateway.register_provider("mock", provider)
+      loop = AgentLoop(
+        uow_factory,
+        gateway,
+        skill_context_provider=SkillContextProvider(skill_service),
+      )
+
+      turn = await loop.run_once(session.session_id, model_ref="mock-small")
+
+      with UnitOfWork(conn) as uow:
+        events = uow.events.list_by_run(f"agent:{session.session_id}")
+
+      self.assertEqual(turn.session.status, AgentStatus.COMPLETED)
+      self.assertEqual(provider.calls[0][1].messages[0]["content"]["type"], "selected_skills")
+      self.assertEqual(provider.calls[0][1].messages[0]["content"]["skills"][0]["skill_id"], skill.skill_id)
+      self.assertEqual(events[-1].payload["selected_skill_ids"], [skill.skill_id])
     finally:
       conn.close()
 

@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from agent_kernel.autonomy.explorer import ExplorationExecutor
 from agent_kernel.autonomy.planner import ExplorationPlanner
+from agent_kernel.autonomy.reflector import DeterministicExplorationReflector, ExplorationReflector
 from agent_kernel.autonomy.trace_distiller import TraceDistiller
 from agent_kernel.autonomy.workflow_library import WorkflowLibrary
 from agent_kernel.domain.autonomy import (
@@ -24,12 +25,14 @@ class ExplorationService:
     executor: ExplorationExecutor,
     distiller: TraceDistiller,
     workflow_library: WorkflowLibrary,
+    reflector: ExplorationReflector | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._planner = planner
     self._executor = executor
     self._distiller = distiller
     self._workflow_library = workflow_library
+    self._reflector = reflector or DeterministicExplorationReflector()
 
   def create_task(
     self,
@@ -75,9 +78,11 @@ class ExplorationService:
           workflow_spec_ref=f"workflow://draft/{trace.trace_id}",
           applicability=task.problem_statement,
         )
+      reflection = self._reflector.reflect(task, strategy, attempt)
+      with self._uow_factory() as uow:
+        uow.autonomy.save_reflection(reflection)
     with self._uow_factory() as uow:
       uow.autonomy.save_exploration(
         replace(task, status=ExplorationStatus.FAILED, updated_at=utc_now())
       )
     return None
-

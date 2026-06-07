@@ -11,6 +11,7 @@ from agent_kernel.domain.states import AgentStatus, assert_transition
 from agent_kernel.domain.workflow import ExecutionCommand
 from agent_kernel.models.gateway import ModelGateway
 from agent_kernel.persistence.unit_of_work import UnitOfWork
+from agent_kernel.agents.skills import SkillContextProvider
 
 
 class AgentTurnResult:
@@ -32,11 +33,13 @@ class AgentLoop:
     model_gateway: ModelGateway,
     provider_name: str = "mock",
     context_manager=None,
+    skill_context_provider: SkillContextProvider | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._model_gateway = model_gateway
     self._provider_name = provider_name
     self._context_manager = context_manager
+    self._skill_context_provider = skill_context_provider
 
   async def run_once(self, session_id: str, model_ref: str) -> AgentTurnResult:
     with self._uow_factory() as uow:
@@ -50,6 +53,9 @@ class AgentLoop:
       session = replace(session, status=AgentStatus.RUNNING, updated_at=utc_now())
 
     raw_messages = [{"role": "user", "content": message.content} for message in messages]
+    selected_skills = []
+    if self._skill_context_provider is not None:
+      raw_messages, selected_skills = self._skill_context_provider.build_skill_context(session, raw_messages)
     if self._context_manager is None:
       context = ModelContext(messages=raw_messages)
     else:
@@ -89,7 +95,12 @@ class AgentLoop:
           event_type=RuntimeEventType.AGENT_TURN_COMPLETED,
           run_id=f"agent:{session.session_id}",
           agent_id=session.agent_id,
-          payload={"session_id": session.session_id, "finish": finish, "output": output},
+          payload={
+            "session_id": session.session_id,
+            "finish": finish,
+            "output": output,
+            "selected_skill_ids": [skill.skill_id for skill in selected_skills],
+          },
         )
       )
     return AgentTurnResult(session=session, result=task_result, command=command)

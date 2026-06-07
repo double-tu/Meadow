@@ -141,6 +141,40 @@ class RuntimeEngine:
       uow.states.save(state)
       return state
 
+  def pause_run(
+    self,
+    run_id: str,
+    reason: str,
+    *,
+    source: str = "runtime",
+    causal_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+  ) -> RunState:
+    with self._uow_factory() as uow:
+      state = uow.states.get(run_id)
+      if state is None:
+        raise KeyError(f"Run state not found: {run_id}")
+      if state.status is RunStatus.PAUSED:
+        paused = state
+      else:
+        assert_transition(state.status, RunStatus.PAUSED)
+        paused = replace(state, status=RunStatus.PAUSED, updated_at=utc_now())
+      event = RuntimeEvent(
+        event_type=RuntimeEventType.RUN_PAUSED,
+        run_id=run_id,
+        causal_id=causal_id,
+        payload={
+          "reason": reason,
+          "source": source,
+          **(payload or {}),
+        },
+      )
+      uow.events.append(event)
+      checkpoint = uow.checkpoints.save(run_id, paused, event.event_id)
+      paused = replace(paused, checkpoint_id=checkpoint.checkpoint_id)
+      uow.states.save(paused)
+      return paused
+
   async def _execute_one_step(
     self,
     graph: WorkflowGraph,

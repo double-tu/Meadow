@@ -11,10 +11,12 @@ from agent_kernel.domain.autonomy import (
   ExplorationAttempt,
   ExplorationTask,
   GoldenTrace,
+  ReflectionRecord,
   SkillEvolutionRecord,
   WorkflowTemplate,
 )
 from agent_kernel.domain.serialization import to_primitive
+from agent_kernel.domain.workflow import WorkflowSpec
 
 
 class AutonomyStore:
@@ -41,10 +43,11 @@ class AutonomyStore:
     self._save(attempt.attempt_id, "attempt", attempt.exploration_id, attempt)
 
   def list_attempts(self, exploration_id: str) -> list[ExplorationAttempt]:
-    return [
+    attempts = [
       ExplorationAttempt.from_dict(data)
       for data in self._list("attempt", exploration_id)
     ]
+    return sorted(attempts, key=lambda item: (item.started_at is None, item.started_at, item.attempt_id))
 
   def save_golden_trace(self, trace: GoldenTrace) -> None:
     self._save(trace.trace_id, "golden_trace", trace.source_attempt_id, trace)
@@ -55,8 +58,32 @@ class AutonomyStore:
   def list_workflow_templates(self) -> list[WorkflowTemplate]:
     return [WorkflowTemplate.from_dict(data) for data in self._list("workflow_template", None)]
 
+  def save_workflow_spec(self, workflow: WorkflowSpec) -> None:
+    self._save(
+      f"{workflow.workflow_id}:{workflow.version}",
+      "workflow_spec",
+      workflow.workflow_id,
+      workflow,
+    )
+
+  def get_workflow_spec(self, workflow_id: str, version: str) -> WorkflowSpec | None:
+    data = self._get(f"{workflow_id}:{version}")
+    return WorkflowSpec.from_dict(data) if data is not None else None
+
+  def list_workflow_specs(self, workflow_id: str | None = None) -> list[WorkflowSpec]:
+    return [WorkflowSpec.from_dict(data) for data in self._list("workflow_spec", workflow_id)]
+
   def save_skill_evolution(self, record: SkillEvolutionRecord) -> None:
     self._save(record.record_id, "skill_evolution", record.source_trace_id, record)
+
+  def save_reflection(self, record: ReflectionRecord) -> None:
+    self._save(record.reflection_id, "reflection", record.exploration_id, record)
+
+  def list_reflections(self, exploration_id: str) -> list[ReflectionRecord]:
+    return [
+      ReflectionRecord.from_dict(data)
+      for data in self._list("reflection", exploration_id)
+    ]
 
   def save_record(self, record_type: str, record_id: str, value: Any, parent_id: str | None = None) -> None:
     self._save(record_id, record_type, parent_id, value)

@@ -23,7 +23,14 @@ from agent_kernel.capabilities.adapters.mcp import (
   MCPToolExecutor,
   StdioMCPClient,
 )
-from agent_kernel.capabilities.adapters.process import ProcessCommand, ProcessStreamEvent, ProcessToolExecutor
+from agent_kernel.capabilities.adapters.process import (
+  PosixProcessGroupIsolationStrategy,
+  ProcessCommand,
+  ProcessIsolationStrategy,
+  ProcessStreamEvent,
+  ProcessToolExecutor,
+  SingleProcessIsolationStrategy,
+)
 from agent_kernel.capabilities.adapters.workbench import (
   FakeWorkbenchClient,
   WorkbenchClient,
@@ -48,9 +55,12 @@ __all__ = [
   "MCPServerCommand",
   "MCPToolBinding",
   "MCPToolExecutor",
+  "PosixProcessGroupIsolationStrategy",
   "ProcessCommand",
+  "ProcessIsolationStrategy",
   "ProcessStreamEvent",
   "ProcessToolExecutor",
+  "SingleProcessIsolationStrategy",
   "StdioMCPClient",
   "TMWebDriverHTTPBackend",
   "UIAStyleDesktopDetector",

@@ -79,6 +79,7 @@
 - [x] 实现 Process adapter timeout 与 tool_call 状态。
 - [x] 实现 Process adapter 外部 cancel/kill 控制。
 - [x] 实现 CLI/Process adapter stdout/stderr stream 基础 async iterator。
+- [x] 实现 Process adapter 可插拔隔离策略和 POSIX process group cancel/kill 基础接口。
 - [x] 实现 MCP adapter 接口、fake、stdio JSON-RPC client 和 MCP tool executor。
 - [x] 实现 Workbench 协议。
 - [x] 实现浏览器/桌面/移动控制 ControlWorkbench 协议与 fake backend，并接入 CapabilityRuntime policy/audit/tool_call 路径。
@@ -143,14 +144,18 @@
 
 - [x] 实现 ExplorationTask、CandidateStrategy、ExplorationAttempt。
 - [x] 实现 planner/explorer/verifier 基础接口。
-- [ ] 实现 reflector。
+- [x] 实现 StrategyGenerator 协议和 CompositeExplorationPlanner 多策略生成。
+- [x] 实现 reflector 协议与 deterministic failure reflection。
 - [x] 实现 trace distiller。
 - [x] 实现 WorkflowTemplate 和 WorkflowLibrary。
+- [x] 实现子工作流 WorkflowSpec 注册、ref 解析和条件校验闭环。
 - [x] 实现 SkillCard、SkillService、PlanPatchValidator。
+- [x] 实现 WorkflowPatchApplier，支持 add_node/add_edge/set_start 的保守 workflow patch 应用。
 - [x] 实现 SkillEvolutionRecord 基础记录。
 - [x] 实现 GoldenTrace 到 draft WorkflowTemplate 的归纳流程。
 - [x] 编写测试: 成功 trace 归纳、失败探索、skill evolution 记录。
-- [ ] 编写测试: 多策略探索、失败反思、PlanPatch 校验。
+- [x] 编写测试: 失败反思、PlanPatch 校验、WorkflowPatchApplier。
+- [x] 编写测试: 多策略探索。
 - [x] 验收: 开放任务可在预算内探索；成功路径可发布为 draft subworkflow。
 
 ### Phase 8 - Multi-Agent Interaction Fabric
@@ -167,10 +172,12 @@
 - [x] 实现 TaskBoard 基础。
 - [x] 实现 handoff。
 - [x] 实现 ObservationFinding 和 observer request_pause 基础。
+- [x] 实现 Observer request_pause 可选驱动 Runtime pause，并持久化 run.paused event/checkpoint。
 - [x] 实现 channel summary 和 decision artifact 基础服务。
 - [x] 实现 cross-channel summary 和 decision artifact 聚合基础服务。
 - [x] 实现自由发言和主持人选人 speaker selector。
 - [x] 实现 workspace isolation、merge/review workflow 草案。
+- [x] 实现真实 Git worktree allocation、release、approved patch merge 和 merge conflict rollback。
 - [x] 编写测试: 回合制群聊、observer request_pause。
 - [x] 编写测试: 自由发言、主持人选人策略。
 - [x] 编写测试: human intervention、fake connector routing。
@@ -188,6 +195,8 @@
 - [x] 实现 CLI: intervene。
 - [x] 实现 HTTP API 草案: task、run、artifact、approval、event stream route DTO。
 - [x] 实现 event stream DTO。
+- [x] 实现只读 HTTP host: run inspect、run event NDJSON stream、artifact inspect。
+- [x] 实现 HTTP 写控制 host: run cancel、human intervention、approval approve/reject、tool-call cancel/kill。
 - [x] 实现 task workspace 数据结构 DTO: conversation、taskboard、agent sessions、channels、artifacts、runtime controls。
 - [x] 编写测试: CLI smoke。
 - [x] 编写测试: HTTP DTO serialization、event stream。
@@ -246,6 +255,7 @@
 下一轮实现范围: Phase 2 Agent Orchestration 深化。
 
 - [x] AgentLoop 解析结构化 `ExecutionCommand`。
+- [x] AgentLoop 支持可选 SkillContextProvider，自动选择 active skill 注入模型上下文。
 - [x] Agent 作为 workflow node 执行。
 - [x] child agent 输出以结构化 result 回传 supervisor。
 - [x] 实现 session parent-child lineage。
@@ -268,18 +278,18 @@
 - [x] 实现 approval approve/reject resolution。
 - [x] RuntimeEngine 支持 approval approved 后 resume 当前 tool node。
 - [x] 实现 audit log sink。
-- [ ] 实现 CLI/Process adapter 的 timeout/cancel/kill 基础。
+- [x] 实现 CLI/Process adapter 的 timeout/cancel/kill 基础。
 - [x] 增加审批通过恢复、审批拒绝、expired grant、audit 记录测试。
 
 下一轮实现范围: Phase 3 CLI/Process Adapter 与 ToolCall 控制。
 
 - [x] 实现 `ProcessToolExecutor`。
 - [x] 支持 timeout。
-- [ ] 支持 process group cancel/kill 基础接口。
+- [x] 支持 process group cancel/kill 基础接口。
 - [x] 实现 `ToolCallRecord` 和 tool call 状态持久化。
 - [x] 将危险命令通过 approval gate 拦截，审批前不执行。
 - [x] 增加 timeout、危险命令审批前不执行测试。
-- [ ] 增加 cancel、kill 测试。
+- [x] 增加 cancel、kill 测试。
 
 下一轮可选范围 A: Phase 3 外部 ToolCall 控制收尾。
 
@@ -393,22 +403,23 @@
 - [x] Interaction channel、message、round-robin group chat、agent pool、taskboard、observer finding 已有基础服务。
 - [x] HumanInterventionService、MCP stdio/fake、Workbench fake、AgentConnector fake、host DTO 已有接口级闭环。
 - [x] CLI host 已支持 sample-run、inspect、replay、approve、reject、cancel run、cancel/kill tool call、intervene、llm-smoke。
+- [x] HTTP host 已支持 run inspect、run events NDJSON、artifact inspect、cancel run、intervene、approve/reject、cancel/kill tool call。
 
 ### 与完整设计不一致或深度不足
 
-- [ ] HumanIntervention 已支持 CLI、事件、working memory 和 `pause_and_resume` interrupt；仍缺 `cancel_current_step_and_resume`、API endpoint 和更细的 context priority partition。
+- [ ] HumanIntervention 已支持 CLI/HTTP、事件、working memory 和 `pause_and_resume` interrupt；仍缺 `cancel_current_step_and_resume` 和更细的 context priority partition。
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
-- [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator；仍缺 process group/session isolation、结构化终端协议和 `tool.call.cancelled/killed/failed` 完整事件语义。
+- [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator、可插拔隔离策略和 POSIX process group cancel/kill；仍缺结构化终端协议、跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
 - [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、多 session router、structured JSONL stdio connector 和 product CLI connector factory；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector 和 ADB mobile backend；通用 Workbench 真实 adapter、具体 UIA provider、视觉检测 adapter、Codex/Claude/Gemini 产品 CLI shim 尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；仍缺具体 Codex/Claude/Gemini 产品 shim。
-- [ ] Workspace isolation 已有接口协议、fake backend、patch artifact review/merge workflow 草案；真实 git worktree 分配、merge 执行和冲突处理仍缺失。
-- [ ] Observer 只能记录 request_pause finding，尚未真正驱动 Runtime pause、上下文纠偏或当前 step 中止。
-- [ ] Autonomous exploration 仍是确定性单策略 planner + 注入式 executor；已补 PlanPatchValidator/SkillService，但缺少多策略探索、失败反思 reflector、动态工具/工作流组合。
-- [ ] Skill 与 Workflow 的互调规则已有基础服务；仍缺 Agent 自动选择 skill、workflow 动态 patch 应用、子工作流注册与校验闭环。
+- [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行和冲突 rollback；仍缺多 agent merge queue、冲突自动修复 workflow 和更完整 review policy。
+- [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint；仍缺上下文纠偏和当前 step 中止。
+- [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService 和 deterministic failure reflector；仍缺动态工具/工作流组合。
+- [x] Skill 与 Workflow 的互调规则已有基础服务、Agent 自动选择 skill、compiled workflow 注册/解析和 workflow patch 应用闭环。
 - [ ] Memory 已有 episodic memory、deterministic retrieval 和高重要度 episode 到 semantic 的基础 consolidation；仍缺 vector/semantic retrieval、后台长期 consolidation、事实冲突检测。
 - [ ] Recovery 已有 stale step scanner、event/checkpoint/artifact consistency check 和保守 metadata repair；仍缺复杂 artifact/event repair、不可恢复对象 repair workflow 和真实 worker 接管闭环。
-- [ ] HTTP/event stream/workspace DTO 已实现；HTTP server、SSE/WebSocket event stream 和 Web/Desktop 工作台仍未实现。
+- [ ] HTTP/event stream/workspace DTO 已实现；HTTP host 已支持 run inspect、event NDJSON stream、artifact inspect、run/tool-call 控制、审批和人工干预；SSE/WebSocket event stream、task create 和 Web/Desktop 工作台仍未实现。
 - [ ] Extension SDK 目前只注册 metadata，不动态 import/执行 extension entrypoint；还不是完整插件运行时。
 
 ### 下一阶段建议优先级
@@ -421,9 +432,9 @@
 - [ ] P0: 补复杂 artifact/event repair workflow 与不可恢复对象 repair workflow。
 - [x] P1: 定义 persistent CLI AgentConnector 协议，用 fake connector 先跑通 connector routing 测试。
 - [x] P1: 实现 workspace isolation 草案: allocator/review backend 协议、artifactized patch、review/merge workflow。
-- [ ] P1: 实现真实 git worktree allocation、merge 执行和冲突处理。
+- [x] P1: 实现真实 git worktree allocation、release、merge 执行和冲突 rollback。
 - [x] P1: 补 MCP adapter fake/stdio client/tool executor、Workbench protocol interface、stream DTO。
-- [ ] P1: 补 Exploration reflector 和动态组合能力；PlanPatchValidator/SkillService 已完成基础版。
+- [ ] P1: 补 Exploration 动态组合能力；多策略探索、PlanPatchValidator、SkillService、deterministic reflector 已完成基础版。
 - [x] P2: 实现 HTTP route DTO 和 event stream DTO，为 Web/Desktop task workspace 做数据面准备。
 - [x] P2: 补 episodic memory 和 deterministic retrieval/consolidation 接口。
 - [ ] P2: 补 vector/semantic retrieval、background long-term consolidation、事实冲突检测。
@@ -551,6 +562,13 @@
 - 验证命令: `python3 -m unittest discover -s tests`，结果 60 passed。
 - 下一步: 进入 Phase 4 Memory 与 Context。
 
+### 2026-06-07 01:12:00 CST
+
+- `ProcessToolExecutor` 新增 `ProcessIsolationStrategy` 协议，默认 `SingleProcessIsolationStrategy` 保持单进程行为。
+- 新增 `PosixProcessGroupIsolationStrategy`，通过 new session + process group signal 支持父子进程树 cancel/kill。
+- `ProcessToolExecutor.register` 支持 per-command isolation strategy override，executor 不暴露平台细节给 Runtime/CapabilityRuntime。
+- 新增 POSIX 子进程树 cancel 测试，验证 cancel 会通知父进程创建的子进程。
+
 ### 2026-06-06 22:07:47 CST
 
 - 新增 `MemoryStore`，支持按 scope/type 持久化和检索 memory。
@@ -609,7 +627,7 @@
 - 新增 `AutonomyStore`，统一持久化 exploration/strategy/attempt/golden_trace/workflow_template/skill_evolution。
 - 新增 `ExplorationPlanner`, `ExplorationExecutor`, `ExplorationVerifier`。
 - 新增 `TraceDistiller`，从成功 attempt 生成 `GoldenTrace`。
-- 新增 `WorkflowLibrary`，可发布 draft `WorkflowTemplate`。
+- 新增 `WorkflowLibrary`，可发布 draft `WorkflowTemplate`，并支持注册/解析已校验的 `WorkflowSpec`。
 - 新增 `ExplorationService`，打通 create task -> plan -> attempt -> verify -> distill -> publish draft workflow。
 - 新增 `SkillEvolutionService`，记录 `compile_workflow` 演化决策。
 - 修复 ProcessToolExecutor kill/cancel 竞态: external status 先写入再等待进程退出。
@@ -688,7 +706,7 @@
 - 本地验收命令通过: `python3 scripts/verify_realized_todo.py --no-real-llm`。
 - 真实 LLM 验收命令通过: `python3 scripts/verify_realized_todo.py --config agent-kernel.toml`。
 - 验收覆盖: domain serialization/state、durable runtime/checkpoint/retry/dead-letter/budget/circuit、agent/supervisor/real AgentLoop、capability/policy/approval/process/audit、memory/context ledger、trace/cost/replay/eval/artifact、extension permission、autonomy workflow template/skill evolution、interaction fabric/taskboard/observer、CLI sample/inspect/replay/llm-smoke。
-- 验收排除未勾选能力: MCP/Workbench、HTTP/event stream、intervene、persistent CLI AgentConnector、handoff、workspace isolation、advanced reflection/PlanPatch。
+- 验收排除未勾选能力: 通用 Workbench 真实 adapter、HTTP 写操作 endpoint、SSE/WebSocket event stream、产品级 Codex/Claude/Gemini CLI shim、动态工具/工作流组合。
 - 验证命令: `python3 -m compileall -q agent_kernel tests scripts`，通过。
 - 验证命令: `python3 -m unittest discover -s tests`，结果 89 passed。
 
@@ -696,7 +714,7 @@
 
 - 补 HumanInterventionService，支持追加 `human.intervention` 事件、写入 working memory，并在 `pause_and_resume` 模式下中断 run。
 - CLI 新增 `intervene` 命令。
-- 补 SkillService，支持创建 interpreted skill、compiled workflow skill、activate、list/select。
+- 补 SkillService，支持创建 interpreted skill、compiled workflow skill、activate、list/select，并可将 compiled workflow 注册到 `WorkflowLibrary`。
 - 补 PlanPatchValidator，校验 patch commands、goto target 和 required capabilities。
 - 补 MCP adapter protocol + FakeMCPClient + stdio JSON-RPC client + MCP tool executor。
 - 补 Workbench protocol + FakeWorkbenchClient。
@@ -720,6 +738,7 @@
 - `DecisionArtifactService` 支持跨 channel 聚合，将多个 channel summary 归纳为 cross-channel decision artifact。
 - 新增 `SpeakerSelector` 协议和 round-robin/free-for-all/moderator-select selector，`GroupChatService` 通过 selector 记录 `selected_by` 和 rationale。
 - 补 host DTO: EventStreamEnvelope、TaskWorkspaceDTO、HTTPRouteSpec/default routes。
+- 补 HTTP host 写控制接口: `POST /runs/{run_id}/cancel`、`POST /runs/{run_id}/interventions`、`POST /approvals/{approval_id}/approve|reject`、`POST /tool-calls/{tool_call_id}/cancel|kill`。
 - 补测试覆盖 intervene、skill service、plan patch、MCP stdio/fake、Workbench fake、connector、host DTO。
 - 当前浏览器控制已有 TMWebDriver HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter 和 UIA-style tree detector；具体 UIA provider 与视觉检测仍待补。
 
@@ -729,4 +748,4 @@
 - [ ] 数据校验库优先使用 Pydantic v2；如要求零依赖，需要改成 dataclasses + 手写校验。
 - [ ] SQLite 为 MVP 默认存储；后续如要多进程高并发，需要评估 Postgres。
 - [x] CLI AgentConnector 的终端完成判定不能依赖纯文本 marker，需要结构化事件或 adapter 层协议。
-- [ ] 多 coding agent 修改同一仓库必须实现 worktree isolation 或 patch review，否则容易互相覆盖。
+- [x] 多 coding agent 修改同一仓库必须实现 worktree isolation 或 patch review，否则容易互相覆盖。
