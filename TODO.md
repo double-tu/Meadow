@@ -184,6 +184,7 @@
 - [x] 实现 ObservationFinding 和 observer request_pause 基础。
 - [x] 实现 Observer request_pause 可选驱动 Runtime pause，并持久化 run.paused event/checkpoint。
 - [x] 实现 Observer context correction，将 observer finding 写入 working memory 作为后续上下文纠偏信号。
+- [x] 实现 Observer current-step interrupt，复用 CurrentStepInterrupter 将当前 RUNNING step 标记为 interrupted。
 - [x] 实现 channel summary 和 decision artifact 基础服务。
 - [x] 实现 cross-channel summary 和 decision artifact 聚合基础服务。
 - [x] 实现自由发言和主持人选人 speaker selector。
@@ -427,7 +428,7 @@
 - [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style/UIAutomation desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
 - [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行、冲突 rollback 和 priority merge queue；仍缺冲突自动修复 workflow 和更完整 review policy。
-- [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint，context correction 已可写入 working memory；仍缺 observer 直接中止当前 step。
+- [x] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint，context correction 已可写入 working memory，current-step interrupt 已可中止当前 RUNNING step。
 - [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService、deterministic failure reflector 和 deterministic tool/workflow composition；仍缺条件分支组合、组合质量优化和 learned composition policy。
 - [x] Skill 与 Workflow 的互调规则已有基础服务、Agent 自动选择 skill、compiled workflow 注册/解析和 workflow patch 应用闭环。
 - [ ] Memory 已有 episodic memory、deterministic retrieval、高重要度 episode 到 semantic 的基础 consolidation、sparse/vector-store semantic retrieval 接口、通用 HTTP vector store connector 和结构化 fact conflict detection；仍缺厂商原生 vector DB connector、后台长期 consolidation 和复杂事实归并策略。
@@ -667,8 +668,8 @@
 - 新增 `GroupChatService`，支持 round-robin speaker 和 discussion turns。
 - 新增 `AgentPoolScheduler`，支持基础 pool selection。
 - 新增 `TaskBoardService`，支持创建和分配任务项。
-- 新增 `ObserverService`，支持 observer request_pause finding 和 context correction working memory。
-- 新增测试覆盖 channel message、round-robin group chat、agent pool selection、taskboard assign、observer request_pause/context correction。
+- 新增 `ObserverService`，支持 observer request_pause finding、context correction working memory 和 current-step interrupt。
+- 新增测试覆盖 channel message、round-robin group chat、agent pool selection、taskboard assign、observer request_pause/context correction/current-step interrupt。
 - 验证命令: `python3 -m unittest discover -s tests`，结果 79 passed。
 - 下一步: 进入 Phase 9 Hosts 与日常使用形态。
 

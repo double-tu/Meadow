@@ -17,6 +17,8 @@ from agent_kernel.domain import (
   HandoffRecord,
   InteractionParticipant,
   NodeResult,
+  NodeStepRecord,
+  NodeStepStatus,
   NodeSpec,
   ParticipantKind,
   PatchArtifact,
@@ -297,6 +299,40 @@ class InteractionFabricTests(unittest.TestCase):
       self.assertEqual(memory.content["kind"], "observer_context_correction")
       self.assertEqual(memories[0].content["finding_id"], finding.finding_id)
       self.assertIn(memory.memory_id, [ref.memory_id for ref in context.memory_refs])
+    finally:
+      conn.close()
+
+  def test_observer_can_interrupt_current_running_step(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      with UnitOfWork(conn) as uow:
+        uow.steps.save(
+          NodeStepRecord(
+            step_id="step_observed",
+            run_id="run_observed_step",
+            node_id="node_1",
+            status=NodeStepStatus.RUNNING,
+          )
+        )
+
+      finding, interrupted_step_id = ObserverService(uow_factory).request_step_interrupt(
+        observer_id="observer_1",
+        target_run_id="run_observed_step",
+        message="stop current unsafe step",
+      )
+
+      with UnitOfWork(conn) as uow:
+        step = uow.steps.get("step_observed")
+        events = uow.events.list_by_run("run_observed_step")
+        findings = uow.interactions.list_findings("run_observed_step")
+
+      self.assertEqual(interrupted_step_id, "step_observed")
+      self.assertEqual(step.status, NodeStepStatus.INTERRUPTED)
+      self.assertEqual(step.error, "stop current unsafe step")
+      self.assertEqual(findings[0].finding_id, finding.finding_id)
+      self.assertEqual(events[-1].event_type, RuntimeEventType.STEP_FAILED)
+      self.assertEqual(events[-1].payload["interrupted_by"], "observer")
     finally:
       conn.close()
 

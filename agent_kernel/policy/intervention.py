@@ -26,6 +26,7 @@ class CurrentStepInterrupter(Protocol):
     run_id: str,
     reason: str,
     causal_id: str | None = None,
+    source: str = "human_intervention",
   ) -> str | None:
     """Interrupt the currently running step and return its id if one exists."""
 
@@ -39,6 +40,7 @@ class PersistenceCurrentStepInterrupter:
     run_id: str,
     reason: str,
     causal_id: str | None = None,
+    source: str = "human_intervention",
   ) -> str | None:
     with self._uow_factory() as uow:
       active_steps = [
@@ -62,7 +64,7 @@ class PersistenceCurrentStepInterrupter:
           causal_id=causal_id,
           payload={
             "reason": reason,
-            "interrupted_by": "human_intervention",
+            "interrupted_by": source,
             "resume": True,
           },
         )

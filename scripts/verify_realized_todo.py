@@ -67,6 +67,8 @@ from agent_kernel.domain import (
   InteractionParticipant,
   NodeContext,
   NodeResult,
+  NodeStepRecord,
+  NodeStepStatus,
   NodeSpec,
   ParticipantKind,
   PlanPatch,
@@ -760,10 +762,26 @@ async def verify_phase8_interaction() -> None:
       "run_observed",
       "prefer read-only verification",
     )
+    with UnitOfWork(conn) as uow:
+      uow.steps.save(
+        NodeStepRecord(
+          step_id="step_observed",
+          run_id="run_observed",
+          node_id="node_observed",
+          status=NodeStepStatus.RUNNING,
+        )
+      )
+    interrupt_finding, interrupted_step_id = ObserverService(uow_factory).request_step_interrupt(
+      "observer",
+      "run_observed",
+      "stop current step",
+    )
     _assert(assigned.status == "doing", "taskboard assign failed")
     _assert(finding.action == "request_pause", "observer finding failed")
     _assert(correction.action == "intervene", "observer correction finding failed")
     _assert(steering_memory.content["kind"] == "observer_context_correction", "observer correction memory failed")
+    _assert(interrupt_finding.action == "intervene", "observer interrupt finding failed")
+    _assert(interrupted_step_id == "step_observed", "observer did not interrupt current step")
 
     connector = FakeAgentConnector()
     connector.queue_response(

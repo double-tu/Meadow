@@ -7,6 +7,7 @@ from agent_kernel.domain.interaction import ObservationFinding
 from agent_kernel.domain.memory import MemoryItem
 from agent_kernel.domain.run import RunState
 from agent_kernel.memory import MemoryFacade
+from agent_kernel.policy.intervention import CurrentStepInterrupter, PersistenceCurrentStepInterrupter
 
 
 class RunPauseController(Protocol):
@@ -28,10 +29,12 @@ class ObserverService:
     uow_factory,
     pause_controller: RunPauseController | None = None,
     memory: MemoryFacade | None = None,
+    step_interrupter: CurrentStepInterrupter | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._pause_controller = pause_controller
     self._memory = memory or MemoryFacade(uow_factory)
+    self._step_interrupter = step_interrupter or PersistenceCurrentStepInterrupter(uow_factory)
 
   def request_pause(self, observer_id: str, target_run_id: str, message: str) -> ObservationFinding:
     finding = ObservationFinding(
@@ -90,3 +93,30 @@ class ObserverService:
     with self._uow_factory() as uow:
       uow.interactions.save_finding(finding)
     return finding, memory
+
+  def request_step_interrupt(
+    self,
+    observer_id: str,
+    target_run_id: str,
+    message: str,
+    *,
+    evidence_event_refs: list[str] | None = None,
+  ) -> tuple[ObservationFinding, str | None]:
+    finding = ObservationFinding(
+      finding_id=new_id("finding"),
+      observer_id=observer_id,
+      target_run_id=target_run_id,
+      severity="critical",
+      action="intervene",
+      message=message,
+      evidence_event_refs=evidence_event_refs or [],
+    )
+    with self._uow_factory() as uow:
+      uow.interactions.save_finding(finding)
+    interrupted_step_id = self._step_interrupter.interrupt_current_step(
+      target_run_id,
+      message,
+      causal_id=finding.finding_id,
+      source="observer",
+    )
+    return finding, interrupted_step_id

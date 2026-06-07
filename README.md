@@ -16,7 +16,7 @@ Implemented MVP areas:
 - Observability/replay with timeline, artifact inspect, cost ledger, audit sinks, exact/partial/recovery replay, and eval assertions.
 - Extension manifest loader, contribution registry, permission-to-grant mapping, and dynamic importlib entrypoint runtime for registering tool providers.
 - Autonomous exploration MVP with composable multi-strategy planning, dynamic tool/workflow composition, attempts, verification, failure reflection, trace distillation, draft workflow templates, and skill evolution records.
-- Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings with runtime pause/context correction, connector routing, and channel/cross-channel decision artifacts.
+- Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings with runtime pause/context correction/current-step interrupt, connector routing, and channel/cross-channel decision artifacts.
 - Workspace isolation interfaces with fake backend, Git worktree backend, and priority merge queue for isolated patch review/merge workflows.
 - Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
 - Human intervention with event append, working-memory steering, CLI/HTTP `intervene`, pause-and-resume, and current-step interruption metadata.
