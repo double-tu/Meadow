@@ -76,11 +76,40 @@ class CapabilityRuntimeTests(unittest.IsolatedAsyncioTestCase):
         calls = uow.tool_calls.list_by_run("run_1")
 
       self.assertTrue(outcome.result.ok)
+      self.assertEqual(outcome.result.capability_id, "tool.echo")
+      self.assertEqual(outcome.result.tool_call_id, calls[0].tool_call_id)
+      self.assertEqual(outcome.result.provider, "tool")
       self.assertEqual(calls[0].status, "succeeded")
       self.assertEqual(calls[0].idempotency_key, "idem_1")
-      self.assertEqual(calls[0].output, {"echo": "hi"})
+      self.assertEqual(calls[0].output["echo"], "hi")
+      self.assertEqual(calls[0].output["_tool_result"]["result_id"], outcome.result.result_id)
+      self.assertEqual(calls[0].output["_tool_result"]["status"], "succeeded")
     finally:
       conn.close()
+
+  async def test_local_tool_plain_value_is_normalized_to_standard_envelope(self) -> None:
+    registry = CapabilityRegistry()
+    registry.register(
+      CapabilitySpec(
+        capability_id="tool.raw",
+        name="raw",
+        kind="tool",
+        input_schema={},
+        output_schema={},
+        side_effect_level=SideEffectLevel.NONE,
+      )
+    )
+    tools = LocalToolExecutor()
+    tools.register("tool.raw", lambda input: {"value": input["value"]})
+    runtime = CapabilityRuntime(registry, PolicyEngine(), tools)
+
+    outcome = await runtime.call("tool.raw", {"value": 3}, CapabilityCallContext(run_id="run_raw"))
+
+    self.assertTrue(outcome.result.ok)
+    self.assertEqual(outcome.result.output, {"value": 3})
+    self.assertIsNotNone(outcome.result.result_id)
+    self.assertEqual(outcome.result.status, "succeeded")
+    self.assertEqual(outcome.result.capability_id, "tool.raw")
 
   async def test_denies_missing_required_grant(self) -> None:
     registry = CapabilityRegistry()

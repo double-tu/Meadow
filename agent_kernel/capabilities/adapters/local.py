@@ -8,7 +8,7 @@ from typing import Any
 from agent_kernel.domain.capability import ToolResult
 
 
-LocalToolFunc = Callable[[dict[str, Any]], ToolResult | Awaitable[ToolResult]]
+LocalToolFunc = Callable[[dict[str, Any]], Any | Awaitable[Any]]
 
 
 class LocalToolExecutor:
@@ -25,6 +25,5 @@ class LocalToolExecutor:
       raise KeyError(f"No local tool registered: {name}") from exc
     result = tool(input)
     if hasattr(result, "__await__"):
-      return await result  # type: ignore[no-any-return]
-    return result
-
+      result = await result
+    return ToolResult.from_value(result)

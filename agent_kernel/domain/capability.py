@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from agent_kernel.domain.base import DomainModel
+from agent_kernel.domain.base import DomainModel, new_id, utc_now
 from agent_kernel.domain.events import RuntimeEvent
 from agent_kernel.domain.identifiers import ArtifactRef
 
@@ -60,4 +60,123 @@ class ToolResult(DomainModel):
   error: dict[str, Any] | None = None
   artifact_refs: list[ArtifactRef] = field(default_factory=list)
   events: list[RuntimeEvent] = field(default_factory=list)
+  result_id: str = field(default_factory=lambda: new_id("tool_result"))
+  capability_id: str | None = None
+  tool_call_id: str | None = None
+  provider: str | None = None
+  status: Literal["succeeded", "failed", "cancelled", "killed"] | str | None = None
+  started_at: datetime | None = None
+  finished_at: datetime = field(default_factory=utc_now)
+  metadata: dict[str, Any] = field(default_factory=dict)
 
+  def __post_init__(self) -> None:
+    if self.status is None:
+      if self.ok:
+        self.status = "succeeded"
+      else:
+        error_type = self.error.get("type") if self.error else None
+        self.status = error_type if error_type in {"cancelled", "killed"} else "failed"
+
+  @classmethod
+  def success(
+    cls,
+    output: dict[str, Any] | None = None,
+    *,
+    artifact_refs: list[ArtifactRef] | None = None,
+    events: list[RuntimeEvent] | None = None,
+    metadata: dict[str, Any] | None = None,
+  ) -> "ToolResult":
+    return cls(
+      ok=True,
+      output=output or {},
+      artifact_refs=artifact_refs or [],
+      events=events or [],
+      metadata=metadata or {},
+      status="succeeded",
+    )
+
+  @classmethod
+  def failure(
+    cls,
+    error_type: str,
+    message: str | None = None,
+    *,
+    output: dict[str, Any] | None = None,
+    error: dict[str, Any] | None = None,
+    status: Literal["failed", "cancelled", "killed"] | str = "failed",
+    metadata: dict[str, Any] | None = None,
+  ) -> "ToolResult":
+    envelope_error = dict(error or {})
+    envelope_error.setdefault("type", error_type)
+    if message is not None:
+      envelope_error.setdefault("message", message)
+    return cls(
+      ok=False,
+      output=output or {},
+      error=envelope_error,
+      status=status,
+      metadata=metadata or {},
+    )
+
+  @classmethod
+  def from_value(cls, value: Any) -> "ToolResult":
+    if isinstance(value, ToolResult):
+      return value
+    if isinstance(value, dict):
+      if "ok" in value:
+        output = value.get("output", {})
+        error = value.get("error")
+        return cls(
+          ok=bool(value["ok"]),
+          output=output if isinstance(output, dict) else {"value": output},
+          error=error if isinstance(error, dict) or error is None else {"type": "tool_error", "message": str(error)},
+          metadata=value.get("metadata", {}) if isinstance(value.get("metadata"), dict) else {},
+        )
+      return cls.success(output=value)
+    return cls.success(output={"value": value})
+
+  def with_context(
+    self,
+    *,
+    capability_id: str | None = None,
+    tool_call_id: str | None = None,
+    provider: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+  ) -> "ToolResult":
+    merged_metadata = dict(self.metadata)
+    if metadata:
+      merged_metadata.update(metadata)
+    return ToolResult(
+      ok=self.ok,
+      output=dict(self.output),
+      error=dict(self.error) if self.error is not None else None,
+      artifact_refs=list(self.artifact_refs),
+      events=list(self.events),
+      result_id=self.result_id,
+      capability_id=capability_id or self.capability_id,
+      tool_call_id=tool_call_id or self.tool_call_id,
+      provider=provider or self.provider,
+      status=self.status,
+      started_at=started_at if started_at is not None else self.started_at,
+      finished_at=finished_at if finished_at is not None else self.finished_at,
+      metadata=merged_metadata,
+    )
+
+  def envelope(self) -> dict[str, Any]:
+    return {
+      "result_id": self.result_id,
+      "ok": self.ok,
+      "status": self.status,
+      "capability_id": self.capability_id,
+      "tool_call_id": self.tool_call_id,
+      "provider": self.provider,
+      "output": self.output,
+      "error": self.error,
+      "artifact_refs": [ref.to_dict() for ref in self.artifact_refs],
+      "events": [event.to_dict() for event in self.events],
+      "started_at": self.started_at.isoformat() if self.started_at is not None else None,
+      "finished_at": self.finished_at.isoformat(),
+      "metadata": self.metadata,
+    }

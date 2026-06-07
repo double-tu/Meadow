@@ -9,8 +9,8 @@ Implemented MVP areas:
 - Durable runtime with SQLite event log, state, checkpoint, retry, dead letter, budget, circuit breaker, idempotency basics, stale-step recovery scanner, recovery consistency checks, and conservative repair.
 - Workflow graph execution with function, tool, and agent node executors.
 - Agent orchestration with sessions, mailbox, child agent spawn/await/cancel, skill-aware turns, and agent-as-workflow-node.
-- Capability runtime with policy checks, approval flow, audit records, local/process tools, process stdout/stderr streaming, timeout, injectable process isolation strategy, POSIX process group control, and tool-call cancel/kill control.
-- Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, TMWebDriver HTTP browser backend, Win32 desktop backend, UIA-style desktop tree detector, vision detector adapter, and ADB mobile backend routed through capability policy/audit.
+- Capability runtime with policy checks, approval flow, audit records, standard `ToolResult` envelopes, local/process tools, process stdout/stderr streaming, timeout, injectable process isolation strategy, POSIX process group control, and tool-call cancel/kill control.
+- Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, browser-link HTTP backend, Win32 desktop backend, UIA-style desktop tree detector, driver/HTTP vision detector adapters, and ADB mobile backend routed through capability policy/audit.
 - Memory/context with working/artifact memory, context budget, sensitivity filtering, tool visibility pruning, large-memory artifact refs, and context ledger.
 - Episodic memory with deterministic summarizer/retriever interfaces, conservative semantic consolidation, sparse semantic retrieval, and structured fact conflict detection.
 - Observability/replay with timeline, artifact inspect, cost ledger, exact/partial/recovery replay, and eval assertions.
@@ -94,7 +94,7 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - All side-effecting capabilities go through `CapabilityRuntime` and `PolicyEngine`.
 - `ReplayService` does not re-execute model/tool calls.
 - Current CLI is a minimal host, not the final Web/Desktop workspace.
-- Browser control can use the TMWebDriver-compatible HTTP backend, desktop control can use the optional Win32 desktop backend plus UIA-style/vision detectors, and mobile control can use the ADB backend plus optional vision detector.
+- Browser control can use a `/link`-style HTTP backend, desktop control can use the optional Win32 desktop backend plus UIA-style/vision detectors, and mobile control can use the ADB backend plus optional vision detector.
 
 ## Known MVP Gaps
 
@@ -102,7 +102,7 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - Tool-call cancel/kill and process stream control only operate inside the current runtime process; after restart, host commands persist control requests but cannot signal or reattach to the original process group.
 - Product CLI shim profiles for Codex/Claude/Gemini exist and run through a generic JSONL subprocess adapter; deeper product-native protocol adapters remain future work.
 - Handoff has a persistent service and channel routing; product CLI sessions can be connected through the generic JSONL shim profile path.
-- Generic Workbench has a JSON HTTP client adapter. MCP has a stdio JSON-RPC client/tool executor; control has TMWebDriver HTTP browser, Win32 desktop/UIA-style/vision, and ADB mobile backends. Product-specific Workbench adapters and concrete CV model integrations remain future work.
+- Generic Workbench has a JSON HTTP client adapter. MCP has a stdio JSON-RPC client/tool executor; control has browser-link HTTP, Win32 desktop/UIA-style/driver vision/HTTP vision, and ADB mobile backends. Product-specific Workbench adapters and production-grade CV model packaging remain future work.
 - Recovery scanner can reschedule or dead-letter stale steps and conservatively repair missing/misaligned RunState checkpoint metadata, but complex artifact/event repair workflows are not implemented.
 - Workspace isolation has protocol, fake-backed patch review workflow, Git worktree allocation/merge execution, and a priority merge queue; automatic conflict-resolution workflows and richer review policy are not implemented.
 - External vector-store backed retrieval and background long-term consolidation are not implemented; local sparse semantic retrieval and structured fact conflict detection are available.

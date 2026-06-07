@@ -2,6 +2,7 @@
 
 from agent_kernel.capabilities.adapters.control import (
   ADBMobileBackend,
+  BrowserLinkHTTPBackend,
   CommandResult,
   ControlBackend,
   ControlCommand,
@@ -11,6 +12,8 @@ from agent_kernel.capabilities.adapters.control import (
   DesktopUIDetector,
   DriverVisionDetector,
   FakeControlBackend,
+  HTTPVisionDetector,
+  HTTPVisionEndpoint,
   TMWebDriverHTTPBackend,
   UIAStyleDesktopDetector,
   Win32DesktopBackend,
@@ -44,6 +47,7 @@ from agent_kernel.capabilities.adapters.workbench import (
 
 __all__ = [
   "ADBMobileBackend",
+  "BrowserLinkHTTPBackend",
   "CommandResult",
   "ControlBackend",
   "ControlCommand",
@@ -57,6 +61,8 @@ __all__ = [
   "FakeWorkbenchClient",
   "HTTPWorkbenchClient",
   "HTTPWorkbenchEndpoint",
+  "HTTPVisionDetector",
+  "HTTPVisionEndpoint",
   "LocalToolExecutor",
   "MCPClient",
   "MCPServerCommand",

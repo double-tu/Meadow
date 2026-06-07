@@ -34,6 +34,16 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
     self.assertTrue(result.ok)
     self.assertEqual(result.output["echo"], "hello")
 
+  async def test_local_tool_executor_normalizes_plain_return_values(self) -> None:
+    executor = LocalToolExecutor()
+    executor.register("raw", lambda input: {"echo": input["text"]})
+
+    result = await executor.call("raw", {"text": "hello"})
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output, {"echo": "hello"})
+    self.assertEqual(result.status, "succeeded")
+
   async def test_openai_compatible_provider_uses_chat_completion_payload(self) -> None:
     calls = []
 

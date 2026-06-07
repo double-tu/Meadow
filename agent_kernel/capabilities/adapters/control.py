@@ -1,7 +1,7 @@
 """Generic control workbench adapters.
 
 The kernel models browser, desktop, and mobile control as workbench commands.
-Concrete integrations such as TMWebDriver, Win32 desktop drivers, ADB, or platform UIA live
+Concrete integrations such as browser-link HTTP bridges, Win32 desktop drivers, ADB, or platform UIA live
 behind this protocol so policy/runtime code does not depend on one tool stack.
 """
 
@@ -134,8 +134,8 @@ class FakeControlBackend:
     )
 
 
-class TMWebDriverHTTPBackend:
-  """Browser control backend compatible with GenericAgent's TMWebDriver `/link` API."""
+class BrowserLinkHTTPBackend:
+  """Browser control backend for `/link`-style HTTP browser bridges."""
 
   def __init__(
     self,
@@ -177,7 +177,7 @@ class TMWebDriverHTTPBackend:
         error={"type": "unsupported_control_action", "action": command.action},
       )
     except RuntimeError as exc:
-      return ControlResult(ok=False, error={"type": "tmwebdriver_unavailable", "message": str(exc)})
+      return ControlResult(ok=False, error={"type": "browser_link_unavailable", "message": str(exc)})
 
   def _inspect(self, command: ControlCommand) -> ControlResult:
     if command.target_id is None:
@@ -186,7 +186,7 @@ class TMWebDriverHTTPBackend:
     response = self._post_json({"cmd": "find_session", "url_pattern": command.target_id})
     matched = response.get("r", [])
     if not isinstance(matched, list):
-      return ControlResult(ok=False, error={"type": "invalid_tmwebdriver_response", "response": response})
+      return ControlResult(ok=False, error={"type": "invalid_browser_link_response", "response": response})
     targets = [self._target_from_match(item).to_dict() for item in matched if self._is_match(item)]
     return ControlResult(ok=True, output={"targets": targets})
 
@@ -204,7 +204,7 @@ class TMWebDriverHTTPBackend:
     )
     result = response.get("r", {})
     if isinstance(result, dict) and result.get("error"):
-      return ControlResult(ok=False, error={"type": "tmwebdriver_error", "message": str(result["error"])})
+      return ControlResult(ok=False, error={"type": "browser_link_error", "message": str(result["error"])})
     return ControlResult(ok=True, output={"result": result})
 
   def _navigate(self, command: ControlCommand) -> ControlResult:
@@ -239,17 +239,17 @@ class TMWebDriverHTTPBackend:
       with urlopen(request, timeout=self._request_timeout_seconds) as response:
         body = response.read().decode("utf-8")
     except HTTPError as exc:
-      raise RuntimeError(f"TMWebDriver HTTP error {exc.code}: {exc.reason}") from exc
+      raise RuntimeError(f"Browser link HTTP error {exc.code}: {exc.reason}") from exc
     except URLError as exc:
-      raise RuntimeError(f"TMWebDriver connection failed: {exc.reason}") from exc
+      raise RuntimeError(f"Browser link connection failed: {exc.reason}") from exc
     except TimeoutError as exc:
-      raise RuntimeError("TMWebDriver request timed out.") from exc
+      raise RuntimeError("Browser link request timed out.") from exc
     try:
       value = json.loads(body)
     except json.JSONDecodeError as exc:
-      raise RuntimeError("TMWebDriver returned invalid JSON.") from exc
+      raise RuntimeError("Browser link returned invalid JSON.") from exc
     if not isinstance(value, dict):
-      raise RuntimeError("TMWebDriver response must be a JSON object.")
+      raise RuntimeError("Browser link response must be a JSON object.")
     return value
 
   @staticmethod
@@ -283,6 +283,9 @@ class TMWebDriverHTTPBackend:
     )
 
 
+TMWebDriverHTTPBackend = BrowserLinkHTTPBackend
+
+
 @dataclass(slots=True)
 class CommandResult:
   returncode: int
@@ -307,6 +310,13 @@ class VisionDetector(Protocol):
     target_id: str | None = None,
   ) -> list[dict[str, Any]]:
     ...
+
+
+@dataclass(slots=True)
+class HTTPVisionEndpoint:
+  url: str
+  timeout_seconds: float = 30.0
+  headers: dict[str, str] = field(default_factory=dict)
 
 
 class DriverVisionDetector:
@@ -353,6 +363,75 @@ class DriverVisionDetector:
       "cy": cy,
       "bounds": bounds,
     }
+
+
+class HTTPVisionDetector:
+  """Adapts an HTTP computer-vision service into normalized control nodes."""
+
+  def __init__(
+    self,
+    endpoint: HTTPVisionEndpoint | str,
+    post_json: Callable[[dict[str, Any]], dict[str, Any] | list[Any]] | None = None,
+  ) -> None:
+    self._endpoint = endpoint if isinstance(endpoint, HTTPVisionEndpoint) else HTTPVisionEndpoint(endpoint)
+    self._post_json = post_json or self._post_sync_http
+
+  def detect(
+    self,
+    image_bytes: bytes,
+    target_kind: ControlTargetKind,
+    target_id: str | None = None,
+  ) -> list[dict[str, Any]]:
+    response = self._post_json(
+      {
+        "image": {
+          "media_type": "image/png",
+          "base64": base64.b64encode(image_bytes).decode("ascii"),
+        },
+        "target_kind": target_kind,
+        "target_id": target_id,
+      }
+    )
+    detections = self._extract_detections(response)
+    return [DriverVisionDetector._normalize_detection(detection) for detection in detections]
+
+  def _post_sync_http(self, payload: dict[str, Any]) -> dict[str, Any] | list[Any]:
+    try:
+      request = Request(
+        self._endpoint.url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          **self._endpoint.headers,
+        },
+        method="POST",
+      )
+      with urlopen(request, timeout=self._endpoint.timeout_seconds) as response:
+        body = response.read().decode("utf-8")
+    except HTTPError as exc:
+      raise RuntimeError(f"Vision service HTTP error {exc.code}: {exc.reason}") from exc
+    except URLError as exc:
+      raise RuntimeError(f"Vision service connection failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+      raise RuntimeError("Vision service request timed out.") from exc
+    try:
+      value = json.loads(body)
+    except json.JSONDecodeError as exc:
+      raise RuntimeError("Vision service returned invalid JSON.") from exc
+    if not isinstance(value, (dict, list)):
+      raise RuntimeError("Vision service response must be a JSON object or array.")
+    return value
+
+  @staticmethod
+  def _extract_detections(response: dict[str, Any] | list[Any]) -> list[Any]:
+    if isinstance(response, list):
+      return response
+    for key in ("detections", "nodes", "results", "items"):
+      value = response.get(key)
+      if isinstance(value, list):
+        return value
+    raise RuntimeError("Vision service response must contain a detections, nodes, results, or items array.")
 
 
 class UIAStyleDesktopDetector:

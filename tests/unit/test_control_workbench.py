@@ -4,14 +4,16 @@ import unittest
 from agent_kernel.capabilities import CapabilityCallContext, CapabilityRegistry, CapabilityRuntime
 from agent_kernel.capabilities.adapters import (
   ADBMobileBackend,
+  BrowserLinkHTTPBackend,
   CommandResult,
   ControlResult,
   ControlTarget,
   ControlWorkbench,
   DriverVisionDetector,
   FakeControlBackend,
+  HTTPVisionDetector,
+  HTTPVisionEndpoint,
   LocalToolExecutor,
-  TMWebDriverHTTPBackend,
   UIAStyleDesktopDetector,
   Win32DesktopBackend,
 )
@@ -29,7 +31,7 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
       ControlTarget(
         target_id="tab_1",
         kind="browser",
-        label="GenericAgent reference tab",
+        label="reference browser tab",
         metadata={"url": "https://example.test"},
       )
     )
@@ -175,9 +177,9 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertFalse(outcome.result.ok)
     self.assertEqual(outcome.result.error["type"], "control_workbench_not_configured")
 
-  async def test_tmwebdriver_http_backend_lists_targets_and_executes_js(self) -> None:
-    transport = _TMWebDriverTransport()
-    backend = TMWebDriverHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
+  async def test_browser_link_http_backend_lists_targets_and_executes_js(self) -> None:
+    transport = _BrowserLinkTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
 
     targets = backend.list_targets("browser")
     result = await backend.execute(
@@ -191,9 +193,9 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(transport.requests[-1]["cmd"], "execute_js")
     self.assertEqual(transport.requests[-1]["sessionId"], "tab_1")
 
-  async def test_tmwebdriver_http_backend_navigate_uses_execute_js_bridge_command(self) -> None:
-    transport = _TMWebDriverTransport()
-    backend = TMWebDriverHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
+  async def test_browser_link_http_backend_navigate_uses_execute_js_bridge_command(self) -> None:
+    transport = _BrowserLinkTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
 
     result = await backend.execute(
       ControlTargetCommandFactory.navigate("tab_1", "https://meadow.example")
@@ -307,6 +309,49 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.output["nodes"][0]["source"], "vision")
     self.assertEqual(result.output["nodes"][0]["cx"], 20)
     self.assertEqual(result.output["nodes"][0]["cy"], 30)
+
+  async def test_http_vision_detector_normalizes_service_detections(self) -> None:
+    transport = _VisionHTTPTransport()
+    detector = HTTPVisionDetector(
+      HTTPVisionEndpoint(
+        url="https://vision.example/detect",
+        headers={"Authorization": "Bearer test"},
+      ),
+      post_json=transport.post_json,
+    )
+
+    nodes = detector.detect(b"\x89PNG\r\n", "desktop", "101")
+
+    self.assertEqual(nodes[0]["source"], "vision")
+    self.assertEqual(nodes[0]["label"], "Submit")
+    self.assertEqual(nodes[0]["text"], "Submit")
+    self.assertEqual(nodes[0]["confidence"], 0.91)
+    self.assertEqual(nodes[0]["bounds"], [10, 20, 30, 40])
+    self.assertEqual(nodes[0]["cx"], 20)
+    self.assertEqual(nodes[0]["cy"], 30)
+    self.assertEqual(transport.requests[0]["target_kind"], "desktop")
+    self.assertEqual(transport.requests[0]["target_id"], "101")
+    self.assertEqual(transport.requests[0]["image"]["media_type"], "image/png")
+
+  async def test_http_vision_detector_rejects_invalid_service_envelope(self) -> None:
+    detector = HTTPVisionDetector("https://vision.example/detect", post_json=lambda _payload: {"ok": True})
+
+    with self.assertRaisesRegex(RuntimeError, "detections"):
+      detector.detect(b"\x89PNG\r\n", "mobile", "device_1")
+
+  async def test_mobile_dump_ui_accepts_http_vision_detector(self) -> None:
+    runner = _ADBRunner()
+    backend = ADBMobileBackend(
+      adb_path="adb",
+      runner=runner.run,
+      vision_detector=HTTPVisionDetector("https://vision.example/detect", post_json=_VisionHTTPTransport().post_json),
+    )
+
+    result = await backend.execute(ControlTargetCommandFactory.dump_mobile_ui("device_1"))
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["nodes"][1]["source"], "vision")
+    self.assertEqual(result.output["nodes"][1]["label"], "Submit")
 
 
 class ControlTargetCommandFactory:
@@ -431,7 +476,7 @@ class ControlTargetCommandFactory:
     return ControlCommand.create("desktop", "dump_ui", target_id=target_id, timeout_seconds=2)
 
 
-class _TMWebDriverTransport:
+class _BrowserLinkTransport:
   def __init__(self) -> None:
     self.requests: list[dict[str, object]] = []
 
@@ -451,6 +496,24 @@ class _TMWebDriverTransport:
     if payload.get("cmd") == "execute_js":
       return {"r": {"data": "Example"}}
     return {"r": {"error": "unsupported"}}
+
+
+class _VisionHTTPTransport:
+  def __init__(self) -> None:
+    self.requests: list[dict[str, object]] = []
+
+  def post_json(self, payload: dict[str, object]) -> dict[str, object]:
+    self.requests.append(payload)
+    return {
+      "detections": [
+        {
+          "label": "Submit",
+          "confidence": 0.91,
+          "bounds": [10, 20, 30, 40],
+          "clickable": True,
+        }
+      ]
+    }
 
 
 class _ADBRunner:

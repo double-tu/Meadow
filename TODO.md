@@ -74,7 +74,7 @@
 目标: 外部能力统一封装，并对副作用执行做权限和审批控制。
 
 - [x] 实现 CapabilityRegistry 和 CapabilityRuntime。
-- [ ] 实现 ToolResult 标准 envelope。
+- [x] 实现 ToolResult 标准 envelope，包含 result_id、capability_id、tool_call_id、provider、status、时间戳、metadata、artifact/event refs，并保持 ok/output/error 兼容。
 - [x] 实现 LocalTool adapter。
 - [x] 实现 Process adapter timeout 与 tool_call 状态。
 - [x] 实现 Process adapter 外部 cancel/kill 控制。
@@ -84,11 +84,11 @@
 - [x] 实现 Workbench 协议。
 - [x] 实现通用 HTTP Workbench adapter，并接入 CapabilityRuntime policy/audit/tool_call 路径。
 - [x] 实现浏览器/桌面/移动控制 ControlWorkbench 协议与 fake backend，并接入 CapabilityRuntime policy/audit/tool_call 路径。
-- [x] 实现 TMWebDriver-compatible HTTP browser backend，支持 session list、execute_js、navigate。
+- [x] 实现 `/link`-style HTTP browser backend，支持 session list、execute_js、navigate，并保留参考项目兼容别名。
 - [x] 实现 ADB mobile backend，支持 devices、uiautomator dump 解析、tap、type_text、keyevent、screenshot。
 - [x] 实现 Win32 desktop backend，支持窗口枚举、截图、物理坐标点击、快捷键、剪贴板粘贴输入。
 - [x] 实现 DesktopUIDetector 协议与 UIA-style desktop tree detector，支持 dump_ui 节点归一化。
-- [x] 实现 VisionDetector 协议与 driver adapter，并接入 desktop/mobile dump_ui 视觉节点融合。
+- [x] 实现 VisionDetector 协议、driver adapter 与 HTTP vision service adapter，并接入 desktop/mobile dump_ui 视觉节点融合。
 - [x] 实现 CapabilityGrant、ApprovalRequest、PolicyEngine 基础能力。
 - [x] 实现 GrantStore 和 grant 过期检查。
 - [x] 实现 Approval approve/reject resolution。
@@ -419,7 +419,7 @@
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator、可插拔隔离策略和 POSIX process group cancel/kill；仍缺结构化终端协议、跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
-- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector、VisionDetector driver adapter 和 ADB mobile backend；具体 UIA provider、具体 CV 模型/服务 adapter、产品原生深度协议 adapter 尚未实现。
+- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；具体 UIA provider、产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
 - [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行、冲突 rollback 和 priority merge queue；仍缺冲突自动修复 workflow 和更完整 review policy。
 - [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint；仍缺上下文纠偏和当前 step 中止。
@@ -745,11 +745,11 @@
 - 覆盖 browser `inspect/execute_js/navigate`、desktop `screenshot/click/key/type_text/dump_ui`、mobile `screenshot/dump_ui/tap/type_text` 等原子控制入口。
 - `CapabilityRuntime` 支持 `kind="workbench"`，control 调用统一经过 policy、approval、audit 和 tool_call 状态记录。
 - 新增 deterministic `FakeControlBackend`，用于真实 adapter 尚未接入前的可运行测试和 dry-run。
-- 新增 `TMWebDriverHTTPBackend`，兼容 GenericAgent `/link` API，支持 `get_all_sessions`、`execute_js` 和基于 JS 的 `navigate`。
+- 新增中性命名的 `BrowserLinkHTTPBackend`，兼容 `/link` API，支持 `get_all_sessions`、`execute_js` 和基于 JS 的 `navigate`；`TMWebDriverHTTPBackend` 仅保留为兼容别名。
 - 新增 `ADBMobileBackend`，兼容 GenericAgent `adb_ui.py` 的能力边界，支持设备枚举、UI dump 解析、tap、text、keyevent 和 screenshot。
 - 新增 `Win32DesktopBackend`，通过可选 desktop driver 支持窗口枚举、截图、物理坐标 click、快捷键和剪贴板粘贴输入；公共 API 不照搬个人命名。
 - 新增 `DesktopUIDetector` 协议和 `UIAStyleDesktopDetector`，将 UIA-like 控件树归一化为 control nodes 并接入 desktop `dump_ui`。
-- 新增 `VisionDetector` 协议和 `DriverVisionDetector`，将截图检测结果归一化为 control nodes，并接入 desktop/mobile `dump_ui`。
+- 新增 `VisionDetector` 协议、`DriverVisionDetector` 和 `HTTPVisionDetector`，将截图检测结果归一化为 control nodes，并接入 desktop/mobile `dump_ui`。
 - 后续真实平台 adapter 可继续接入具体 UIA provider 和 CV 模型/服务，不需要修改 runtime/policy/agent 层。
 - 新增 `AgentConnectorRouter`、`ConnectorRoute`、`RoutedConnectorTurn`，支持不同 participant 路由到不同 persistent connector/session，并把外部 session turn 写回 interaction channel。
 - 新增 `StructuredStdioAgentConnector` 和 `StdioAgentCommand`，使用 JSONL `start/message/turn/stop` 帧连接长驻 CLI shim，不依赖终端文本 marker 判断完成。
@@ -765,7 +765,7 @@
 - 补 HTTP host task create: `POST /tasks` 默认通过 `TaskLauncher` 创建 Runtime run，可选择立即执行或保持 pending。
 - 补 HumanIntervention `cancel_current_step_and_resume`: 通过 `CurrentStepInterrupter` 协议把当前 RUNNING step 标记为 interrupted，run 保持可继续执行。
 - 补测试覆盖 intervene、skill service、plan patch、MCP stdio/fake、Workbench fake、connector、host DTO。
-- 当前浏览器控制已有 TMWebDriver HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter 和 UIA-style tree detector；具体 UIA provider 与视觉检测仍待补。
+- 当前浏览器控制已有 `/link`-style HTTP adapter，移动控制已有 ADB adapter，桌面控制已有 Win32 desktop adapter 和 UIA-style tree detector，视觉检测已有 driver 与 HTTP service adapter；具体 UIA provider 和生产级 CV 模型打包/部署仍待补。
 
 ## 风险与待决策
 

@@ -103,16 +103,31 @@ class CapabilityRuntime:
         decision=decision,
       )
     self._update_tool_call(tool_call, status=ToolCallStatus.RUNNING)
+    started_at = utc_now()
     if spec.kind == "workbench":
-      result = await self._call_workbench_adapter(input)
+      raw_result = await self._call_workbench_adapter(input)
     else:
-      result = await self._call_tool_adapter(capability_id, input, tool_call.tool_call_id)
+      raw_result = await self._call_tool_adapter(capability_id, input, tool_call.tool_call_id)
+    result = ToolResult.from_value(raw_result).with_context(
+      capability_id=capability_id,
+      tool_call_id=tool_call.tool_call_id,
+      provider=spec.kind,
+      started_at=started_at,
+      finished_at=utc_now(),
+      metadata={"side_effect_level": spec.side_effect_level.value},
+    )
     terminal_status = self._terminal_status_from_result(result)
     self._update_tool_call(
       tool_call,
       status=terminal_status,
-      output=result.output,
+      output=self._tool_call_output(result),
       error=result.error,
+    )
+    self._write_audit(
+      ctx=ctx,
+      capability_id=capability_id,
+      decision="result",
+      payload={"tool_call_id": tool_call.tool_call_id, "result": result.envelope()},
     )
     return CapabilityCallOutcome(result=result, decision=decision)
 
@@ -329,6 +344,20 @@ class CapabilityRuntime:
       with self._uow_factory() as uow:
         uow.tool_calls.save(updated)
     return updated
+
+  @staticmethod
+  def _tool_call_output(result: ToolResult) -> dict[str, Any]:
+    output = dict(result.output)
+    output["_tool_result"] = {
+      "result_id": result.result_id,
+      "status": result.status,
+      "capability_id": result.capability_id,
+      "tool_call_id": result.tool_call_id,
+      "provider": result.provider,
+      "finished_at": result.finished_at.isoformat(),
+      "metadata": result.metadata,
+    }
+    return output
 
   def _write_audit(
     self,

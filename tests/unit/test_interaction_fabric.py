@@ -131,7 +131,7 @@ class InteractionFabricTests(unittest.TestCase):
       fabric = InteractionFabric(uow_factory)
       channel = fabric.create_channel("architecture decision", ["moderator", "builder", "reviewer"])
       service = GroupChatService(uow_factory, fabric)
-      chat = service.create("thread_1", "replace GenericAgent", ["builder", "reviewer"])
+      chat = service.create("thread_1", "replacement milestone", ["builder", "reviewer"])
       service.add_turn(chat, channel.channel_id, {"text": "implement control workbench"})
       service.add_turn(chat, channel.channel_id, {"type": "decision", "summary": "ship adapter boundary"})
 
@@ -148,7 +148,7 @@ class InteractionFabricTests(unittest.TestCase):
 
       self.assertEqual(artifact.media_type, "application/vnd.meadow.decision+json")
       self.assertEqual(metadata["kind"], "decision_artifact")
-      self.assertEqual(metadata["payload"]["topic"], "replace GenericAgent")
+      self.assertEqual(metadata["payload"]["topic"], "replacement milestone")
       self.assertEqual(metadata["payload"]["message_count"], 2)
       self.assertEqual(metadata["payload"]["decision"]["summary"], "ship adapter boundary")
       self.assertEqual(saved_chat.status, "completed")
@@ -170,7 +170,7 @@ class InteractionFabricTests(unittest.TestCase):
       fabric.send_message(operations.channel_id, "operator", {"text": "deployment needs env flags"})
 
       artifact = DecisionArtifactService(uow_factory, fabric).create_cross_channel(
-        "GenericAgent replacement milestone",
+        "replacement milestone",
         [implementation.channel_id, operations.channel_id],
         decided_by_participant_id="moderator",
       )
