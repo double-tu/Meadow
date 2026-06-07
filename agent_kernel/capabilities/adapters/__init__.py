@@ -33,6 +33,8 @@ from agent_kernel.capabilities.adapters.process import (
 )
 from agent_kernel.capabilities.adapters.workbench import (
   FakeWorkbenchClient,
+  HTTPWorkbenchClient,
+  HTTPWorkbenchEndpoint,
   WorkbenchClient,
   WorkbenchCommand,
   WorkbenchResult,
@@ -50,6 +52,8 @@ __all__ = [
   "FakeMCPClient",
   "FakeControlBackend",
   "FakeWorkbenchClient",
+  "HTTPWorkbenchClient",
+  "HTTPWorkbenchEndpoint",
   "LocalToolExecutor",
   "MCPClient",
   "MCPServerCommand",

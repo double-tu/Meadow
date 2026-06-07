@@ -12,6 +12,15 @@ from agent_kernel.memory.episodic import (
   EpisodeSummarizer,
   KeywordEpisodeRetriever,
 )
+from agent_kernel.memory.semantic import (
+  FactConflict,
+  FactConflictDetector,
+  SemanticQuery,
+  SemanticRetriever,
+  SemanticSearchResult,
+  SparseSemanticRetriever,
+  StructuredFactConflictDetector,
+)
 
 MAX_INLINE_MEMORY_CHARS = 1200
 
@@ -22,10 +31,14 @@ class MemoryFacade:
     uow_factory,
     episode_summarizer: EpisodeSummarizer | None = None,
     episode_retriever: EpisodeRetriever | None = None,
+    semantic_retriever: SemanticRetriever | None = None,
+    fact_conflict_detector: FactConflictDetector | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._episode_summarizer = episode_summarizer or DeterministicEpisodeSummarizer()
     self._episode_retriever = episode_retriever or KeywordEpisodeRetriever()
+    self._semantic_retriever = semantic_retriever or SparseSemanticRetriever()
+    self._fact_conflict_detector = fact_conflict_detector or StructuredFactConflictDetector()
 
   def write_working(
     self,
@@ -112,12 +125,53 @@ class MemoryFacade:
       source_event_ids=episode.source_event_ids,
     )
 
+  def write_semantic(
+    self,
+    scope: str,
+    content: dict[str, Any],
+    importance: float | None = None,
+    confidence: float | None = None,
+    created_by: str | None = None,
+    check_conflicts: bool = False,
+  ) -> MemoryItem:
+    item = self.write(
+      memory_type="semantic",
+      scope=scope,
+      content=content,
+      importance=importance,
+      confidence=confidence,
+      created_by=created_by,
+    )
+    if check_conflicts:
+      conflicts = self.detect_fact_conflicts(scope, item)
+      if conflicts:
+        item.content = {
+          **item.content,
+          "conflicts": [
+            {
+              "incoming_memory_id": conflict.incoming.memory_id,
+              "existing_memory_id": conflict.existing.memory_id,
+              "subject": conflict.incoming.subject,
+              "predicate": conflict.incoming.predicate,
+              "incoming_value": conflict.incoming.value,
+              "existing_value": conflict.existing.value,
+              "reason": conflict.reason,
+              "severity": conflict.severity,
+            }
+            for conflict in conflicts
+          ],
+        }
+        with self._uow_factory() as uow:
+          uow.memory.save(item)
+    return item
+
   def write(
     self,
     memory_type: str,
     scope: str,
     content: dict[str, Any],
     importance: float | None = None,
+    confidence: float | None = None,
     created_by: str | None = None,
     source_artifact_refs: list[ArtifactRef] | None = None,
     source_event_ids: list[str] | None = None,
@@ -145,6 +199,7 @@ class MemoryFacade:
       created_by=created_by,
       source_artifact_refs=artifact_refs,
       source_event_ids=source_event_ids or [],
+      confidence=confidence,
     )
     with self._uow_factory() as uow:
       uow.memory.save(item)
@@ -157,3 +212,38 @@ class MemoryFacade:
   def retrieve_episodic(self, scope: str, query: str, limit: int = 5) -> list[MemoryItem]:
     memories = self.retrieve(scope, memory_type="episodic", limit=100)
     return self._episode_retriever.retrieve(query, memories, limit=limit)
+
+  def retrieve_semantic(
+    self,
+    scope: str,
+    query: str,
+    limit: int = 5,
+    min_score: float = 0.0,
+    memory_types: set[str] | None = None,
+  ) -> list[SemanticSearchResult]:
+    memories: list[MemoryItem] = []
+    for memory_type in memory_types or {"semantic"}:
+      memories.extend(self.retrieve(scope, memory_type=memory_type, limit=100))
+    return self._semantic_retriever.retrieve(
+      SemanticQuery(
+        scope=scope,
+        text=query,
+        memory_types=memory_types or {"semantic"},
+        limit=limit,
+        min_score=min_score,
+      ),
+      memories,
+    )
+
+  def detect_fact_conflicts(
+    self,
+    scope: str,
+    incoming: MemoryItem,
+    memory_type: str | None = "semantic",
+  ) -> list[FactConflict]:
+    existing = [
+      item
+      for item in self.retrieve(scope, memory_type=memory_type, limit=200)
+      if item.memory_id != incoming.memory_id
+    ]
+    return self._fact_conflict_detector.detect(incoming, existing)

@@ -188,6 +188,90 @@ class MemoryContextTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_semantic_memory_retrieval_ranks_by_sparse_similarity(self) -> None:
+    conn = connect_sqlite()
+    try:
+      memory = MemoryFacade(unit_of_work_factory(conn))
+      runtime = memory.write_semantic(
+        scope="project_1",
+        content={
+          "summary": "Runtime checkpoint recovery uses sqlite event log replay",
+          "keywords": ["runtime", "checkpoint", "sqlite", "recovery"],
+        },
+        importance=0.7,
+      )
+      memory.write_semantic(
+        scope="project_1",
+        content={"summary": "Button color polish and layout spacing"},
+        importance=1.0,
+      )
+
+      results = memory.retrieve_semantic("project_1", "sqlite checkpoint replay", limit=2)
+
+      self.assertEqual(results[0].memory.memory_id, runtime.memory_id)
+      self.assertGreater(results[0].score, 0)
+      self.assertIn("Matched terms", results[0].rationale)
+    finally:
+      conn.close()
+
+  def test_fact_conflict_detection_finds_conflicting_semantic_values(self) -> None:
+    conn = connect_sqlite()
+    try:
+      memory = MemoryFacade(unit_of_work_factory(conn))
+      memory.write_semantic(
+        scope="project_1",
+        content={
+          "facts": [
+            {
+              "subject": "runtime.storage",
+              "predicate": "backend",
+              "value": "sqlite",
+            }
+          ]
+        },
+        confidence=0.95,
+      )
+      incoming = memory.write_semantic(
+        scope="project_1",
+        content={
+          "subject": "runtime.storage",
+          "predicate": "backend",
+          "value": "postgres",
+        },
+        confidence=0.9,
+      )
+
+      conflicts = memory.detect_fact_conflicts("project_1", incoming)
+
+      self.assertEqual(len(conflicts), 1)
+      self.assertEqual(conflicts[0].incoming.value, "postgres")
+      self.assertEqual(conflicts[0].existing.value, "sqlite")
+      self.assertEqual(conflicts[0].severity, "error")
+    finally:
+      conn.close()
+
+  def test_write_semantic_can_attach_fact_conflict_metadata(self) -> None:
+    conn = connect_sqlite()
+    try:
+      memory = MemoryFacade(unit_of_work_factory(conn))
+      memory.write_semantic(
+        scope="project_1",
+        content={"subject": "agent.mode", "predicate": "default", "value": "autonomous"},
+        confidence=0.9,
+      )
+
+      incoming = memory.write_semantic(
+        scope="project_1",
+        content={"subject": "agent.mode", "predicate": "default", "value": "manual"},
+        confidence=0.9,
+        check_conflicts=True,
+      )
+
+      self.assertEqual(incoming.content["conflicts"][0]["existing_value"], "autonomous")
+      self.assertEqual(incoming.content["conflicts"][0]["incoming_value"], "manual")
+    finally:
+      conn.close()
+
 
 if __name__ == "__main__":
   unittest.main()

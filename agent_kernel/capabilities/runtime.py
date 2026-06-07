@@ -10,6 +10,7 @@ from agent_kernel.capabilities.adapters.control import ControlResult, ControlTar
 from agent_kernel.capabilities.adapters.local import LocalToolExecutor
 from agent_kernel.capabilities.adapters.mcp import MCPToolExecutor
 from agent_kernel.capabilities.adapters.process import ProcessToolExecutor
+from agent_kernel.capabilities.adapters.workbench import WorkbenchClient, WorkbenchCommand
 from agent_kernel.capabilities.registry import CapabilityRegistry
 from agent_kernel.domain.base import new_id, utc_now
 from agent_kernel.domain.capability import ToolResult
@@ -46,6 +47,7 @@ class CapabilityRuntime:
     process_tools: ProcessToolExecutor | None = None,
     mcp_tools: MCPToolExecutor | None = None,
     control_workbench: ControlWorkbench | None = None,
+    workbench_client: WorkbenchClient | None = None,
     uow_factory=None,
   ) -> None:
     self._registry = registry
@@ -54,6 +56,7 @@ class CapabilityRuntime:
     self._process_tools = process_tools
     self._mcp_tools = mcp_tools
     self._control_workbench = control_workbench
+    self._workbench_client = workbench_client
     self._uow_factory = uow_factory
 
   async def call(
@@ -149,6 +152,36 @@ class CapabilityRuntime:
     return await self._local_tools.call(capability_id, input)
 
   async def _call_workbench_adapter(self, input: dict[str, Any]) -> ToolResult:
+    if self._is_control_workbench_input(input):
+      return await self._call_control_workbench_adapter(input)
+    if self._workbench_client is None:
+      return ToolResult(
+        ok=False,
+        error={"type": "workbench_client_not_configured"},
+      )
+    command_kind = input.get("command_kind") or input.get("kind")
+    if not isinstance(command_kind, str) or not command_kind:
+      return ToolResult(
+        ok=False,
+        error={"type": "invalid_workbench_command", "message": "command_kind is required."},
+      )
+    payload = input.get("payload", {})
+    if not isinstance(payload, dict):
+      return ToolResult(
+        ok=False,
+        error={"type": "invalid_workbench_command", "message": "payload must be a dictionary."},
+      )
+    command_id = input.get("command_id")
+    result = await self._workbench_client.execute(
+      WorkbenchCommand(
+        command_id=command_id if isinstance(command_id, str) and command_id else new_id("workbench_cmd"),
+        kind=command_kind,
+        payload=payload,
+      )
+    )
+    return ToolResult(ok=result.ok, output=result.output, error=result.error)
+
+  async def _call_control_workbench_adapter(self, input: dict[str, Any]) -> ToolResult:
     if self._control_workbench is None:
       return ToolResult(
         ok=False,
@@ -173,6 +206,10 @@ class CapabilityRuntime:
     except (TypeError, ValueError) as exc:
       return ToolResult(ok=False, error={"type": "invalid_control_command", "message": str(exc)})
     return ToolResult(ok=result.ok, output=result.output, error=result.error)
+
+  @staticmethod
+  def _is_control_workbench_input(input: dict[str, Any]) -> bool:
+    return "action" in input or "target_kind" in input or "target_id" in input
 
   async def _dispatch_control_action(
     self,

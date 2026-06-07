@@ -173,6 +173,57 @@ class CapabilityRuntimeTests(unittest.IsolatedAsyncioTestCase):
     self.assertTrue(workbench_result.ok)
     self.assertEqual(workbench.commands[0].kind, "inspect")
 
+  async def test_generic_workbench_client_runs_through_policy_audit_and_tool_call(self) -> None:
+    from agent_kernel.persistence import UnitOfWork, connect_sqlite
+    from agent_kernel.runtime import unit_of_work_factory
+
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      registry.register(
+        CapabilitySpec(
+          capability_id="workbench.generic",
+          name="generic workbench",
+          kind="workbench",
+          input_schema={},
+          output_schema={},
+          side_effect_level=SideEffectLevel.NONE,
+        )
+      )
+      workbench = FakeWorkbenchClient()
+      workbench.register_response("inspect", WorkbenchResult(ok=True, output={"status": "ok"}))
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(),
+        LocalToolExecutor(),
+        workbench_client=workbench,
+        uow_factory=uow_factory,
+      )
+
+      outcome = await runtime.call(
+        "workbench.generic",
+        {
+          "command_id": "cmd_runtime",
+          "command_kind": "inspect",
+          "payload": {"target": "workspace"},
+        },
+        CapabilityCallContext(run_id="run_workbench_generic"),
+      )
+
+      self.assertTrue(outcome.result.ok)
+      self.assertEqual(outcome.result.output, {"status": "ok"})
+      self.assertEqual(workbench.commands[0].command_id, "cmd_runtime")
+      self.assertEqual(workbench.commands[0].payload, {"target": "workspace"})
+      with UnitOfWork(conn) as uow:
+        calls = uow.tool_calls.list_by_run("run_workbench_generic")
+        audit = uow.audit.list_by_run("run_workbench_generic")
+      self.assertEqual(calls[0].status, "succeeded")
+      self.assertEqual(calls[0].capability_id, "workbench.generic")
+      self.assertEqual(audit[0].target_ref, "workbench.generic")
+    finally:
+      conn.close()
+
   async def test_stdio_mcp_client_lists_and_calls_real_subprocess_server(self) -> None:
     import sys
 

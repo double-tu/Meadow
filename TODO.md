@@ -82,6 +82,7 @@
 - [x] 实现 Process adapter 可插拔隔离策略和 POSIX process group cancel/kill 基础接口。
 - [x] 实现 MCP adapter 接口、fake、stdio JSON-RPC client 和 MCP tool executor。
 - [x] 实现 Workbench 协议。
+- [x] 实现通用 HTTP Workbench adapter，并接入 CapabilityRuntime policy/audit/tool_call 路径。
 - [x] 实现浏览器/桌面/移动控制 ControlWorkbench 协议与 fake backend，并接入 CapabilityRuntime policy/audit/tool_call 路径。
 - [x] 实现 TMWebDriver-compatible HTTP browser backend，支持 session list、execute_js、navigate。
 - [x] 实现 ADB mobile backend，支持 devices、uiautomator dump 解析、tap、type_text、keyevent、screenshot。
@@ -104,6 +105,8 @@
 - [x] 实现 working memory。
 - [x] 实现 episodic memory。
 - [x] 实现 artifact memory。
+- [x] 实现接口化 sparse semantic retrieval。
+- [x] 实现结构化 fact conflict detection。
 - [x] 实现 retrieval pack 基础对象和 context.built ledger。
 - [x] 实现 context candidates、budget partition。
 - [x] 实现 tool visibility pruning。
@@ -411,13 +414,13 @@
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator、可插拔隔离策略和 POSIX process group cancel/kill；仍缺结构化终端协议、跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
-- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、多 session router、structured JSONL stdio connector 和 product CLI connector factory；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector 和 ADB mobile backend；通用 Workbench 真实 adapter、具体 UIA provider、视觉检测 adapter、Codex/Claude/Gemini 产品 CLI shim 尚未实现。
+- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector 和 product CLI connector factory；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector 和 ADB mobile backend；具体 UIA provider、视觉检测 adapter、Codex/Claude/Gemini 产品 CLI shim 尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；仍缺具体 Codex/Claude/Gemini 产品 shim。
 - [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行和冲突 rollback；仍缺多 agent merge queue、冲突自动修复 workflow 和更完整 review policy。
 - [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint；仍缺上下文纠偏和当前 step 中止。
 - [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService 和 deterministic failure reflector；仍缺动态工具/工作流组合。
 - [x] Skill 与 Workflow 的互调规则已有基础服务、Agent 自动选择 skill、compiled workflow 注册/解析和 workflow patch 应用闭环。
-- [ ] Memory 已有 episodic memory、deterministic retrieval 和高重要度 episode 到 semantic 的基础 consolidation；仍缺 vector/semantic retrieval、后台长期 consolidation、事实冲突检测。
+- [ ] Memory 已有 episodic memory、deterministic retrieval、高重要度 episode 到 semantic 的基础 consolidation、sparse semantic retrieval 和结构化 fact conflict detection；仍缺外部 vector store-backed retrieval、后台长期 consolidation 和复杂事实归并策略。
 - [ ] Recovery 已有 stale step scanner、event/checkpoint/artifact consistency check 和保守 metadata repair；仍缺复杂 artifact/event repair、不可恢复对象 repair workflow 和真实 worker 接管闭环。
 - [ ] HTTP/event stream/workspace DTO 已实现；HTTP host 已支持 run inspect、event NDJSON stream、artifact inspect、run/tool-call 控制、审批和人工干预；SSE/WebSocket event stream、task create 和 Web/Desktop 工作台仍未实现。
 - [ ] Extension SDK 目前只注册 metadata，不动态 import/执行 extension entrypoint；还不是完整插件运行时。
@@ -437,7 +440,7 @@
 - [ ] P1: 补 Exploration 动态组合能力；多策略探索、PlanPatchValidator、SkillService、deterministic reflector 已完成基础版。
 - [x] P2: 实现 HTTP route DTO 和 event stream DTO，为 Web/Desktop task workspace 做数据面准备。
 - [x] P2: 补 episodic memory 和 deterministic retrieval/consolidation 接口。
-- [ ] P2: 补 vector/semantic retrieval、background long-term consolidation、事实冲突检测。
+- [ ] P2: 补外部 vector store-backed retrieval、background long-term consolidation、复杂事实归并策略；sparse semantic retrieval 和结构化 fact conflict detection 已完成基础版。
 
 ## 进度日志
 
@@ -592,6 +595,14 @@
 - 验证命令: `python3 -m unittest discover -s tests`，结果 66 passed。
 - 下一步: 进入 Phase 5 Observability、Replay、Evaluation。
 
+### 2026-06-07 01:24:00 CST
+
+- 新增 `SemanticRetriever`、`SemanticQuery`、`SemanticSearchResult` 协议/DTO。
+- 新增 `SparseSemanticRetriever`，用标准库稀疏向量余弦相似度提供可运行 semantic retrieval 基础版。
+- 新增 `FactConflictDetector`、`FactStatement`、`FactConflict` 和 `StructuredFactConflictDetector`。
+- `MemoryFacade` 新增 `write_semantic`、`retrieve_semantic`、`detect_fact_conflicts`，支持写入 semantic fact 时附加 conflict metadata。
+- 新增测试覆盖 semantic retrieval 排序、结构化事实冲突检测和 conflict metadata 写回。
+
 ### 2026-06-06 22:20:22 CST
 
 - 新增 `TraceService`, `TraceTimeline`, `TimelineEntry`。
@@ -718,6 +729,8 @@
 - 补 PlanPatchValidator，校验 patch commands、goto target 和 required capabilities。
 - 补 MCP adapter protocol + FakeMCPClient + stdio JSON-RPC client + MCP tool executor。
 - 补 Workbench protocol + FakeWorkbenchClient。
+- 补通用 `HTTPWorkbenchClient` + `HTTPWorkbenchEndpoint`，支持 JSON HTTP Workbench command envelope。
+- `CapabilityRuntime` 支持 generic `workbench_client`，非 control workbench command 同样经过 policy、audit 和 tool_call 状态记录。
 - 补 AgentConnector protocol + FakeAgentConnector，为后续真实 Codex/Claude/Gemini CLI connector 留接口。
 
 ### 2026-06-07 01:22:00 CST
