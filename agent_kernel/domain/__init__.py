@@ -18,6 +18,7 @@ from agent_kernel.domain.autonomy import (
 from agent_kernel.domain.capability import CapabilityGrant, CapabilitySpec, ToolResult
 from agent_kernel.domain.context import ContextCandidate, ContextPlan, ModelContext, RetrievalPack
 from agent_kernel.domain.conversation import Message, Objective, Thread
+from agent_kernel.domain.delegation import DelegationStatus, DelegationTask, DelegationTaskReport
 from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
 from agent_kernel.domain.extension import ExtensionContribution, ExtensionManifest
 from agent_kernel.domain.identifiers import ArtifactRef, EntityRef, MemoryRef
@@ -102,6 +103,9 @@ __all__ = [
   "ContextCandidate",
   "ContextPlan",
   "DeadLetterItem",
+  "DelegationStatus",
+  "DelegationTask",
+  "DelegationTaskReport",
   "DiscussionTurn",
   "EdgeSpec",
   "EntityRef",

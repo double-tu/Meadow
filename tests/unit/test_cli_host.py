@@ -1,10 +1,12 @@
 import contextlib
 import io
 import json
+import sys
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from datetime import timedelta
 
 from agent_kernel.hosts.cli import main
 from agent_kernel.persistence import connect_sqlite
@@ -15,10 +17,13 @@ from agent_kernel.domain import (
   NodeStepStatus,
   RunState,
   RunStatus,
+  RuntimeEvent,
   RuntimeEventType,
   ToolCallRecord,
   ToolCallStatus,
 )
+from agent_kernel.domain.base import utc_now
+from agent_kernel.domain.delegation import DelegationTask
 
 
 class CliHostTests(unittest.TestCase):
@@ -240,6 +245,210 @@ class CliHostTests(unittest.TestCase):
     self.assertEqual(payload["result"]["content"], "key-file")
     self.assertEqual(payload["result"]["base_url"], "https://llm.file/v1")
 
+  def test_delegation_commands_use_configured_connector(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      db = str(Path(tmp) / "kernel.sqlite")
+      config_path = Path(tmp) / "agent-kernel.json"
+      config_path.write_text(
+        json.dumps(
+          {
+            "agent_connectors": [
+              {
+                "connector_id": "worker_cli",
+                "product": "worker",
+                "argv": _delegation_jsonl_argv(),
+                "startup_timeout_seconds": 2,
+                "turn_timeout_seconds": 2,
+              }
+            ]
+          }
+        ),
+        encoding="utf-8",
+      )
+
+      delegated = self._run_cli(
+        [
+          "--db",
+          db,
+          "--config",
+          str(config_path),
+          "delegate-agent",
+          "--parent-run-id",
+          "run_delegate_cli",
+          "--connector-id",
+          "worker_cli",
+          "--task",
+          "summarize repo",
+          "--agent-type",
+          "reviewer",
+          "--metadata-json",
+          '{"priority":"high"}',
+        ]
+      )
+      task_id = delegated["delegation"]["task_id"]
+      status = self._run_cli(
+        [
+          "--db",
+          db,
+          "--config",
+          str(config_path),
+          "delegation-status",
+          "--parent-run-id",
+          "run_delegate_cli",
+          "--task-id",
+          task_id,
+        ]
+      )
+      hidden = self._run_cli(
+        [
+          "--db",
+          db,
+          "--config",
+          str(config_path),
+          "delegation-status",
+          "--parent-run-id",
+          "other_parent",
+          "--task-id",
+          task_id,
+        ]
+      )
+
+    self.assertTrue(delegated["ok"])
+    self.assertFalse(delegated["detached"])
+    self.assertEqual(delegated["delegation"]["status"], "completed")
+    self.assertEqual(delegated["delegation"]["output"]["task"], "summarize repo")
+    self.assertEqual(delegated["delegation"]["agent_type"], "reviewer")
+    self.assertEqual(status["delegations"][0]["status"], "completed")
+    self.assertEqual(hidden["delegations"][0]["status"], "unknown")
+
+  def test_settle_memory_command_writes_candidate_memory(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      db = str(Path(tmp) / "kernel.sqlite")
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          uow.events.append(
+            RuntimeEvent(
+              event_type=RuntimeEventType.MEMORY_EVOLUTION_CANDIDATE,
+              run_id="run_settle_cli",
+              payload={
+                "candidate_id": "candidate_cli",
+                "note": "SOP: run focused tests after connector changes.",
+              },
+            )
+          )
+      finally:
+        conn.close()
+
+      payload = self._run_cli(["--db", db, "settle-memory", "run_settle_cli", "--scope", "project_cli"])
+
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          memories = uow.memory.list_by_scope("project_cli", memory_type="procedural")
+      finally:
+        conn.close()
+
+    self.assertTrue(payload["ok"])
+    self.assertEqual(payload["settlements"][0]["candidate_id"], "candidate_cli")
+    self.assertEqual(memories[0].content["candidate_id"], "candidate_cli")
+
+  def test_recover_delegations_command_marks_orphaned_running_failed(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      db = str(Path(tmp) / "kernel.sqlite")
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          uow.interactions.save_delegation_task(
+            DelegationTask(
+              task_id="delegation_cli_orphaned",
+              parent_run_id="run_cli_recover",
+              connector_id="missing",
+              connector_session_id="connector_cli_orphaned",
+              task="stale child",
+            )
+          )
+      finally:
+        conn.close()
+
+      payload = self._run_cli(["--db", db, "recover-delegations", "--reason", "restart"])
+
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          task = uow.interactions.get_delegation_task("delegation_cli_orphaned")
+      finally:
+        conn.close()
+
+    self.assertTrue(payload["ok"])
+    self.assertEqual(payload["recovered"][0]["status"], "failed")
+    self.assertEqual(task.error["message"], "restart")
+
+  def test_mcp_config_commands_import_list_and_delete(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      db = str(Path(tmp) / "kernel.sqlite")
+      config_path = Path(tmp) / "agent-kernel.json"
+      config_path.write_text(
+        json.dumps(
+          {
+            "mcp_servers": [
+              {
+                "name": "echo",
+                "enabled": True,
+                "agent_types": ["codex"],
+                "transport": {"type": "stdio", "command": sys.executable, "args": ["-u", "-c", "pass"]},
+              }
+            ]
+          }
+        ),
+        encoding="utf-8",
+      )
+
+      imported = self._run_cli(["--db", db, "--config", str(config_path), "mcp-import"])
+      listed = self._run_cli(["--db", db, "mcp-list", "--enabled-only", "--agent-type", "codex"])
+      deleted = self._run_cli(["--db", db, "mcp-delete", "echo"])
+
+    self.assertTrue(imported["ok"])
+    self.assertEqual(imported["mcp_servers"][0]["name"], "echo")
+    self.assertEqual(listed["mcp_servers"][0]["transport"]["command"], sys.executable)
+    self.assertTrue(deleted["deleted"])
+
+  def test_schedule_commands_create_and_run_due_task(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      db = str(Path(tmp) / "kernel.sqlite")
+      due_at = (utc_now() - timedelta(minutes=1)).isoformat()
+
+      created = self._run_cli(
+        [
+          "--db",
+          db,
+          "schedule-create",
+          "--task-id",
+          "scheduled_cli",
+          "--name",
+          "CLI scheduled task",
+          "--kind",
+          "at",
+          "--value",
+          due_at,
+          "--payload-json",
+          '{"title":"scheduled from cli","run_id":"run_scheduled_cli"}',
+        ]
+      )
+      ran = self._run_cli(["--db", db, "schedule-run-due"])
+      listed = self._run_cli(["--db", db, "schedule-list"])
+
+    self.assertTrue(created["ok"])
+    self.assertEqual(created["scheduled_task"]["task_id"], "scheduled_cli")
+    self.assertEqual(ran["triggers"][0]["result"]["task"]["run_id"], "run_scheduled_cli")
+    self.assertEqual(listed["scheduled_tasks"][0]["trigger_count"], 1)
+
+  def test_control_health_command_uses_configured_control_plane(self) -> None:
+    payload = self._run_cli(["control-health"])
+
+    self.assertTrue(payload["ok"])
+    self.assertIn("browser", payload["checks"])
+
   @staticmethod
   def _run_cli(argv: list[str]) -> dict[str, object]:
     stdout = io.StringIO()
@@ -247,6 +456,27 @@ class CliHostTests(unittest.TestCase):
       exit_code = main(argv)
     assert exit_code == 0
     return json.loads(stdout.getvalue())
+
+
+def _delegation_jsonl_argv() -> list[str]:
+  return [
+    sys.executable,
+    "-u",
+    "-c",
+    (
+      "import json, sys\n"
+      "for line in sys.stdin:\n"
+      "    frame = json.loads(line)\n"
+      "    if frame['type'] == 'start':\n"
+      "        print(json.dumps({'type': 'started', 'session_id': frame['session_id']}), flush=True)\n"
+      "    elif frame['type'] == 'message':\n"
+      "        content = frame['content']\n"
+      "        print(json.dumps({'type': 'turn', 'turn_id': 'turn_cli', "
+      "'output': {'task': content['task'], 'metadata': content.get('metadata')}, 'completed': True}), flush=True)\n"
+      "    elif frame['type'] == 'stop':\n"
+      "        break\n"
+    ),
+  ]
 
 
 if __name__ == "__main__":

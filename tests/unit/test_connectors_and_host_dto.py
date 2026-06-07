@@ -1,5 +1,8 @@
 import unittest
+import json
 import sys
+import tempfile
+from pathlib import Path
 
 from agent_kernel.agents import (
   AgentConnectorRouter,
@@ -13,6 +16,8 @@ from agent_kernel.agents import (
   ProductCLIShimProfile,
   StdioAgentCommand,
   StructuredStdioAgentConnector,
+  load_product_cli_connector_specs,
+  product_cli_connector_spec_from_config,
 )
 from agent_kernel.hosts.dto import EventStreamEnvelope, TaskWorkspaceDTO, default_http_routes
 from agent_kernel.persistence import connect_sqlite
@@ -254,6 +259,54 @@ class ConnectorsAndHostDTOTests(unittest.IsolatedAsyncioTestCase):
     self.assertTrue(all("agent_kernel.agents.cli_shim" in spec.argv for spec in specs))
     self.assertIn("--prompt-argument", specs[1].argv)
     self.assertIn("json_stdin", specs[2].argv)
+
+  def test_product_cli_connector_spec_from_profile_config(self) -> None:
+    spec = product_cli_connector_spec_from_config(
+      {
+        "connector_id": "codex_cli",
+        "product": "codex",
+        "executable": sys.executable,
+        "default_args": ["-c", "print('ok')"],
+        "request_timeout_seconds": 2,
+        "metadata": {"role": "implementation"},
+      }
+    )
+
+    self.assertEqual(spec.connector_id, "codex_cli")
+    self.assertEqual(spec.product, "codex")
+    self.assertIn("agent_kernel.agents.cli_shim", spec.argv)
+    self.assertEqual(spec.metadata["role"], "implementation")
+
+  def test_load_product_cli_connector_specs_supports_json_map_and_direct_argv(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      config_path = Path(tmp) / "agent-kernel.json"
+      config_path.write_text(
+        (
+          '{'
+          '"agent_connectors": {'
+          '"codex_cli": {'
+          '"product": "codex", '
+          f'"executable": {json.dumps(sys.executable)}, '
+          '"default_args": ["-c", "print(\\"ok\\")"], '
+          '"request_timeout_seconds": 2'
+          '}, '
+          '"raw_cli": {'
+          '"product": "raw", '
+          f'"argv": {json.dumps(_jsonl_shim_argv("raw"))}, '
+          '"startup_timeout_seconds": 2, '
+          '"turn_timeout_seconds": 2'
+          '}'
+          '}'
+          '}'
+        ),
+        encoding="utf-8",
+      )
+
+      specs = load_product_cli_connector_specs(config_path)
+
+    self.assertEqual([spec.connector_id for spec in specs], ["codex_cli", "raw_cli"])
+    self.assertEqual(specs[0].product, "codex")
+    self.assertEqual(specs[1].argv, _jsonl_shim_argv("raw"))
 
   async def test_host_dtos_are_serializable(self) -> None:
     envelope = EventStreamEnvelope(

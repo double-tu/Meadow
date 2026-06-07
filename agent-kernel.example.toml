@@ -8,3 +8,52 @@ model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 timeout_seconds = 60
+
+# Optional external agent connectors for multi-agent delegation.
+# Map keys become connector_id when connector_id is omitted.
+[agent_connectors.codex_cli]
+product = "codex"
+executable = "codex"
+default_args = []
+prompt_mode = "stdin"
+output_format = "text"
+startup_timeout_seconds = 5
+request_timeout_seconds = 120
+
+[agent_connectors.claude_cli]
+product = "claude"
+executable = "claude"
+default_args = []
+prompt_mode = "stdin"
+output_format = "text"
+startup_timeout_seconds = 5
+request_timeout_seconds = 120
+
+# Optional MCP server definitions managed by MCPConfigService.
+# These can be imported with:
+# python3 -m agent_kernel.hosts.cli --config agent-kernel.toml mcp-import
+[mcp_servers.echo]
+enabled = false
+agent_types = ["codex", "claude"]
+description = "Example stdio MCP server."
+
+[mcp_servers.echo.transport]
+type = "stdio"
+command = "echo"
+args = ["mcp-ready"]
+timeout_seconds = 30
+
+# Optional real control adapter assembly.
+# Browser uses a /link-compatible bridge such as TMWebDriver.
+# Mobile uses adb; desktop uses optional Win32/UIAutomation drivers when available.
+[control.browser]
+enabled = true
+base_url = "http://127.0.0.1:18766/link"
+request_timeout_seconds = 30
+
+[control.mobile]
+enabled = false
+adb_path = "adb"
+
+[control.desktop]
+enabled = false

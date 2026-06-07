@@ -8,13 +8,24 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent_kernel.agents import (
+  AgentDelegationBroker,
+  DelegationMCPServer,
+  ProductCLIConnectorFactory,
+  load_product_cli_connector_specs,
+  run_delegation_mcp_stdio,
+)
 from agent_kernel.app.tool_call_control import ToolCallControlService
-from agent_kernel.config import LLMConfig
+from agent_kernel.app.control_plane import ControlPlaneService
+from agent_kernel.app.mcp_config import MCPConfigService
+from agent_kernel.app.scheduled_tasks import ScheduledTaskService
+from agent_kernel.config import LLMConfig, load_config_dict
 from agent_kernel.domain import EdgeSpec, NodeSpec, WorkflowSpec
 from agent_kernel.domain.context import ModelContext
 from agent_kernel.domain.workflow import ExecutionCommand, NodeContext, NodeResult
 from agent_kernel.evaluation import ReplayService
 from agent_kernel.hosts.dto import ok_response
+from agent_kernel.memory import MemoryEvolutionSettlementService
 from agent_kernel.models import ModelGateway, OpenAICompatibleProvider
 from agent_kernel.observability import TraceService
 from agent_kernel.persistence import connect_sqlite
@@ -69,6 +80,74 @@ def build_parser() -> argparse.ArgumentParser:
   llm_smoke.add_argument("--prompt", default="Say hello in one short sentence.")
   llm_smoke.add_argument("--model", default=None)
   llm_smoke.add_argument("--provider", default=None)
+
+  delegate_agent = subcommands.add_parser("delegate-agent")
+  delegate_agent.add_argument("--parent-run-id", required=True)
+  delegate_agent.add_argument("--connector-id", required=True)
+  delegate_agent.add_argument("--task", required=True)
+  delegate_agent.add_argument("--agent-type", default=None)
+  delegate_agent.add_argument("--parent-agent-id", default=None)
+  delegate_agent.add_argument("--parent-session-id", default=None)
+  delegate_agent.add_argument("--metadata-json", default=None)
+  delegate_agent.add_argument(
+    "--detach",
+    action="store_true",
+    help="Return after starting the task. Intended for long-lived hosts; standalone CLI cannot keep the child process alive.",
+  )
+
+  delegation_status = subcommands.add_parser("delegation-status")
+  delegation_status.add_argument("--parent-run-id", required=True)
+  delegation_status.add_argument("--task-id", action="append", default=None)
+  delegation_status.add_argument("--wait-ms", type=int, default=None)
+
+  cancel_delegation = subcommands.add_parser("cancel-delegation")
+  cancel_delegation.add_argument("--parent-run-id", required=True)
+  cancel_delegation.add_argument("--task-id", required=True)
+  cancel_delegation.add_argument("--reason", default="user requested delegation cancel")
+
+  recover_delegations = subcommands.add_parser("recover-delegations")
+  recover_delegations.add_argument(
+    "--reason",
+    default="delegation process was not reattached after host restart",
+  )
+
+  mcp_delegation = subcommands.add_parser("mcp-delegation-server")
+  mcp_delegation.add_argument("--parent-run-id", required=True)
+
+  mcp_list = subcommands.add_parser("mcp-list")
+  mcp_list.add_argument("--enabled-only", action="store_true")
+  mcp_list.add_argument("--agent-type", default=None)
+
+  mcp_upsert = subcommands.add_parser("mcp-upsert")
+  mcp_upsert.add_argument("--json", required=True, help="MCP server definition JSON object.")
+
+  mcp_import = subcommands.add_parser("mcp-import")
+  mcp_import.add_argument("--path", default=None, help="Config file path. Defaults to --config.")
+
+  mcp_delete = subcommands.add_parser("mcp-delete")
+  mcp_delete.add_argument("name")
+
+  schedule_create = subcommands.add_parser("schedule-create")
+  schedule_create.add_argument("--name", required=True)
+  schedule_create.add_argument("--kind", required=True, choices=["at", "every", "cron"])
+  schedule_create.add_argument("--value", required=True)
+  schedule_create.add_argument("--payload-json", required=True)
+  schedule_create.add_argument("--task-id", default=None)
+  schedule_create.add_argument("--max-triggers", type=int, default=None)
+
+  schedule_list = subcommands.add_parser("schedule-list")
+  schedule_list.add_argument("--enabled-only", action="store_true")
+
+  schedule_run_due = subcommands.add_parser("schedule-run-due")
+  schedule_run_due.add_argument("--limit", type=int, default=None)
+
+  control_health = subcommands.add_parser("control-health")
+  control_health.add_argument("--targets", action="store_true")
+  control_health.add_argument("--kind", choices=["browser", "desktop", "mobile"], default=None)
+
+  settle_memory = subcommands.add_parser("settle-memory")
+  settle_memory.add_argument("run_id")
+  settle_memory.add_argument("--scope", default=None)
 
   return parser
 
@@ -170,6 +249,115 @@ async def _dispatch(args: argparse.Namespace, conn) -> dict[str, Any]:
       context=ModelContext(messages=[{"role": "user", "content": args.prompt}]),
     )
     return ok_response(provider=provider_name, model=model_ref, result=result)
+  if args.command == "delegate-agent":
+    broker = _build_delegation_broker(args, uow_factory)
+    metadata = _metadata_json(args.metadata_json)
+    report = await broker.delegate(
+      parent_run_id=args.parent_run_id,
+      parent_agent_id=args.parent_agent_id,
+      parent_session_id=args.parent_session_id,
+      connector_id=args.connector_id,
+      agent_type=args.agent_type,
+      task=args.task,
+      metadata=metadata,
+    )
+    if not args.detach:
+      await broker.await_task(report.task_id)
+      final_reports = await broker.get_status(parent_run_id=args.parent_run_id, task_ids=[report.task_id])
+      report = final_reports[0]
+    return ok_response(delegation=report.to_dict(), detached=bool(args.detach))
+  if args.command == "delegation-status":
+    broker = _build_delegation_broker(args, uow_factory)
+    reports = await broker.get_status(
+      parent_run_id=args.parent_run_id,
+      task_ids=args.task_id,
+      wait_ms=args.wait_ms,
+    )
+    return ok_response(delegations=[report.to_dict() for report in reports])
+  if args.command == "cancel-delegation":
+    broker = _build_delegation_broker(args, uow_factory)
+    report = await broker.cancel(
+      parent_run_id=args.parent_run_id,
+      task_id=args.task_id,
+      reason=args.reason,
+    )
+    return ok_response(delegation=report.to_dict())
+  if args.command == "recover-delegations":
+    broker = _build_delegation_broker(args, uow_factory)
+    reports = broker.recover_orphaned_running(reason=args.reason)
+    return ok_response(recovered=[report.to_dict() for report in reports])
+  if args.command == "mcp-delegation-server":
+    broker = _build_delegation_broker(args, uow_factory)
+    await run_delegation_mcp_stdio(
+      DelegationMCPServer(broker, default_parent_run_id=args.parent_run_id)
+    )
+    return ok_response(status="mcp_delegation_server_stopped")
+  if args.command == "mcp-list":
+    servers = MCPConfigService(uow_factory).list_servers(
+      enabled_only=args.enabled_only,
+      agent_type=args.agent_type,
+    )
+    return ok_response(mcp_servers=[server.to_dict() for server in servers])
+  if args.command == "mcp-upsert":
+    payload = json.loads(args.json)
+    if not isinstance(payload, dict):
+      raise ValueError("--json must decode to an object.")
+    server = MCPConfigService(uow_factory).upsert_server(payload)
+    return ok_response(mcp_server=server.to_dict())
+  if args.command == "mcp-import":
+    path = args.path or args.config
+    if not path:
+      raise ValueError("mcp-import requires --path or global --config.")
+    servers = MCPConfigService(uow_factory).import_config(load_config_dict(path))
+    return ok_response(mcp_servers=[server.to_dict() for server in servers])
+  if args.command == "mcp-delete":
+    deleted = MCPConfigService(uow_factory).delete_server(args.name)
+    return ok_response(name=args.name, deleted=deleted)
+  if args.command == "schedule-create":
+    payload = json.loads(args.payload_json)
+    if not isinstance(payload, dict):
+      raise ValueError("--payload-json must decode to an object.")
+    scheduled = ScheduledTaskService(uow_factory, _CliScheduledTaskLauncher(uow_factory)).create(
+      {
+        "task_id": args.task_id,
+        "name": args.name,
+        "schedule_kind": args.kind,
+        "schedule_value": args.value,
+        "payload": payload,
+        "max_triggers": args.max_triggers,
+      }
+    )
+    return ok_response(scheduled_task=scheduled.to_dict())
+  if args.command == "schedule-list":
+    tasks = ScheduledTaskService(uow_factory, _CliScheduledTaskLauncher(uow_factory)).list(
+      enabled_only=args.enabled_only
+    )
+    return ok_response(scheduled_tasks=[task.to_dict() for task in tasks])
+  if args.command == "schedule-run-due":
+    triggers = await ScheduledTaskService(uow_factory, _CliScheduledTaskLauncher(uow_factory)).run_due(limit=args.limit)
+    return ok_response(triggers=[trigger.to_dict() for trigger in triggers])
+  if args.command == "control-health":
+    config = load_config_dict(args.config).get("control", {}) if args.config else {"browser": {"enabled": False}}
+    control = ControlPlaneService.from_config(config if isinstance(config, dict) else {})
+    if args.targets:
+      return control.list_targets(args.kind)
+    return await control.health()
+  if args.command == "settle-memory":
+    settlements = MemoryEvolutionSettlementService(uow_factory).settle_run(args.run_id, scope=args.scope)
+    return ok_response(
+      run_id=args.run_id,
+      settlements=[
+        {
+          "candidate_id": item.candidate_id,
+          "source_event_id": item.source_event_id,
+          "memory_id": item.memory_id,
+          "memory_type": item.memory_type,
+          "scope": item.scope,
+          "decision": item.decision,
+        }
+        for item in settlements
+      ],
+    )
   raise ValueError(f"Unsupported command: {args.command}")
 
 
@@ -191,6 +379,34 @@ def _sample_workflow() -> WorkflowSpec:
 
 def _echo_node(ctx: NodeContext) -> NodeResult:
   return NodeResult(state_patch={"echo": ctx.input.get("text")})
+
+
+def _build_delegation_broker(args: argparse.Namespace, uow_factory) -> AgentDelegationBroker:
+  specs = load_product_cli_connector_specs(args.config)
+  connectors = ProductCLIConnectorFactory().build_many(specs)
+  return AgentDelegationBroker(uow_factory, connectors)
+
+
+class _CliScheduledTaskLauncher:
+  def __init__(self, uow_factory) -> None:
+    self._launcher = None
+    self._uow_factory = uow_factory
+
+  async def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+    from agent_kernel.hosts.http import SampleWorkflowTaskLauncher
+
+    if self._launcher is None:
+      self._launcher = SampleWorkflowTaskLauncher(self._uow_factory)
+    return await self._launcher.create_task(payload)
+
+
+def _metadata_json(raw: str | None) -> dict[str, Any] | None:
+  if raw is None:
+    return None
+  value = json.loads(raw)
+  if not isinstance(value, dict):
+    raise ValueError("--metadata-json must decode to a JSON object.")
+  return value
 
 
 if __name__ == "__main__":

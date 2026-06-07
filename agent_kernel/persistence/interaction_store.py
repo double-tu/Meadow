@@ -21,6 +21,9 @@ from agent_kernel.domain.interaction import (
   TaskBoardItem,
   WorkspaceLease,
 )
+from agent_kernel.domain.delegation import DelegationTask
+from agent_kernel.domain.mcp_config import MCPServerDefinition
+from agent_kernel.domain.scheduled_task import ScheduledTask, ScheduledTaskTrigger
 from agent_kernel.domain.serialization import to_primitive
 
 
@@ -119,6 +122,52 @@ class InteractionStore:
 
   def list_handoffs(self, task_id: str) -> list[HandoffRecord]:
     return [HandoffRecord.from_dict(data) for data in self._list("handoff", task_id)]
+
+  def save_delegation_task(self, item: DelegationTask) -> None:
+    self._save(item.task_id, "delegation_task", item.parent_run_id, item)
+
+  def get_delegation_task(self, task_id: str) -> DelegationTask | None:
+    data = self._get(task_id)
+    return DelegationTask.from_dict(data) if data is not None else None
+
+  def list_delegation_tasks_by_parent(self, parent_run_id: str) -> list[DelegationTask]:
+    return [DelegationTask.from_dict(data) for data in self._list("delegation_task", parent_run_id)]
+
+  def list_delegation_tasks(self) -> list[DelegationTask]:
+    return [DelegationTask.from_dict(data) for data in self._list_all("delegation_task")]
+
+  def save_mcp_server(self, item: MCPServerDefinition) -> None:
+    self._save(item.name, "mcp_server", None, item)
+
+  def get_mcp_server(self, name: str) -> MCPServerDefinition | None:
+    data = self._get(name)
+    return MCPServerDefinition.from_dict(data) if data is not None else None
+
+  def list_mcp_servers(self) -> list[MCPServerDefinition]:
+    return [MCPServerDefinition.from_dict(data) for data in self._list_all("mcp_server")]
+
+  def delete_mcp_server(self, name: str) -> bool:
+    cursor = self._conn.execute(
+      "DELETE FROM interaction_records WHERE record_type = ? AND record_id = ?",
+      ("mcp_server", name),
+    )
+    return cursor.rowcount > 0
+
+  def save_scheduled_task(self, item: ScheduledTask) -> None:
+    self._save(item.task_id, "scheduled_task", None, item)
+
+  def get_scheduled_task(self, task_id: str) -> ScheduledTask | None:
+    data = self._get(task_id)
+    return ScheduledTask.from_dict(data) if data is not None else None
+
+  def list_scheduled_tasks(self) -> list[ScheduledTask]:
+    return [ScheduledTask.from_dict(data) for data in self._list_all("scheduled_task")]
+
+  def save_scheduled_task_trigger(self, item: ScheduledTaskTrigger) -> None:
+    self._save(item.trigger_id, "scheduled_task_trigger", item.scheduled_task_id, item)
+
+  def list_scheduled_task_triggers(self, scheduled_task_id: str) -> list[ScheduledTaskTrigger]:
+    return [ScheduledTaskTrigger.from_dict(data) for data in self._list("scheduled_task_trigger", scheduled_task_id)]
 
   def _save(self, record_id: str, record_type: str, parent_id: str | None, value: Any) -> None:
     self._conn.execute(

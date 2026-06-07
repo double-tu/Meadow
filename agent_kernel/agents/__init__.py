@@ -13,12 +13,21 @@ from agent_kernel.agents.connectors import (
   RoutedConnectorTurn,
   StdioAgentCommand,
   StructuredStdioAgentConnector,
+  load_product_cli_connector_specs,
+  product_cli_connector_spec_from_config,
 )
 from agent_kernel.agents.conversation_runner import (
   ContinuousAgentRunner,
   ContinuousRunnerConfig,
   ContinuousRunnerResult,
   ContinuousToolCallRecord,
+)
+from agent_kernel.agents.delegation import AgentDelegationBroker, AgentDelegationBrokerOptions
+from agent_kernel.agents.delegation_mcp import (
+  DelegationMCPServer,
+  DelegationMCPToolNames,
+  delegation_mcp_tool_schemas,
+  run_delegation_mcp_stdio,
 )
 from agent_kernel.agents.loop import AgentLoop, AgentTurnResult
 from agent_kernel.agents.mailbox import build_mailbox_message
@@ -60,6 +69,8 @@ from agent_kernel.agents.workspace import (
 __all__ = [
   "AgentConnector",
   "AgentConnectorRouter",
+  "AgentDelegationBroker",
+  "AgentDelegationBrokerOptions",
   "AgentLoop",
   "AgentTurnResult",
   "AgentPoolScheduler",
@@ -71,6 +82,8 @@ __all__ = [
   "ConnectorMessage",
   "ConnectorRoute",
   "ConnectorTurn",
+  "DelegationMCPServer",
+  "DelegationMCPToolNames",
   "FakeAgentConnector",
   "FakeWorkspaceBackend",
   "GitPatchReviewBackend",
@@ -107,5 +120,9 @@ __all__ = [
   "WorkspaceIsolationService",
   "WorkspaceMergeQueueService",
   "build_mailbox_message",
+  "delegation_mcp_tool_schemas",
+  "load_product_cli_connector_specs",
   "oneshot_agent_spec",
+  "product_cli_connector_spec_from_config",
+  "run_delegation_mcp_stdio",
 ]

@@ -1,7 +1,10 @@
 import io
 import json
 import unittest
+from datetime import timedelta
 
+from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
+from agent_kernel.app.control_plane import ControlPlaneService
 from agent_kernel.domain import (
   ArtifactRef,
   NodeStepRecord,
@@ -13,6 +16,7 @@ from agent_kernel.domain import (
   ToolCallRecord,
   ToolCallStatus,
 )
+from agent_kernel.domain.base import utc_now
 from agent_kernel.hosts.http import HTTPHost, make_handler
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.policy import ApprovalService
@@ -219,6 +223,75 @@ class HTTPHostTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_http_host_exposes_agent_delegation_controls(self) -> None:
+    conn = connect_sqlite()
+    try:
+      connector = FakeAgentConnector()
+      connector.queue_response(
+        ConnectorTurn(
+          turn_id="turn_http_delegate",
+          session_id="unused",
+          output={"summary": "done"},
+          completed=True,
+        )
+      )
+      broker = AgentDelegationBroker(unit_of_work_factory(conn), {"codex": connector})
+      handler = make_handler(HTTPHost(unit_of_work_factory(conn), delegation_control=broker))
+
+      status, _headers, body = _dispatch_fake_request_with_headers(
+        handler,
+        "POST",
+        "/delegations",
+        {
+          "parent_run_id": "run_http_delegate",
+          "connector_id": "codex",
+          "agent_type": "implementation",
+          "task": "implement HTTP delegation",
+        },
+      )
+      created = json.loads(body.decode("utf-8"))
+      task_id = created["delegation"]["task_id"]
+      status_payload = self._request_json(
+        handler,
+        "POST",
+        "/delegations/status",
+        {
+          "parent_run_id": "run_http_delegate",
+          "task_ids": [task_id],
+          "wait_ms": 500,
+        },
+      )
+      get_payload = self._request_json(
+        handler,
+        "GET",
+        f"/delegations/{task_id}?parent_run_id=run_http_delegate",
+      )
+
+      self.assertIn("201 Created", status)
+      self.assertTrue(created["ok"])
+      self.assertEqual(status_payload["delegations"][0]["status"], "completed")
+      self.assertEqual(get_payload["delegations"][0]["output"], {"summary": "done"})
+      self.assertEqual(connector.messages[0].content["task"], "implement HTTP delegation")
+    finally:
+      conn.close()
+
+  def test_http_delegation_endpoint_requires_configured_broker(self) -> None:
+    conn = connect_sqlite()
+    try:
+      handler = make_handler(HTTPHost(unit_of_work_factory(conn)))
+
+      payload = self._request_json(
+        handler,
+        "POST",
+        "/delegations/status",
+        {"parent_run_id": "run_missing", "task_ids": ["delegation_missing"]},
+      )
+
+      self.assertFalse(payload["ok"])
+      self.assertIn("not configured", payload["error"])
+    finally:
+      conn.close()
+
   def test_http_intervention_can_cancel_current_step_and_resume(self) -> None:
     conn = connect_sqlite()
     try:
@@ -267,6 +340,56 @@ class HTTPHostTests(unittest.TestCase):
       payload = json.loads(response.decode("utf-8"))
       self.assertFalse(payload["ok"])
       self.assertIn("error", payload)
+    finally:
+      conn.close()
+
+  def test_http_host_exposes_mcp_scheduled_task_and_control_interfaces(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      handler = make_handler(
+        HTTPHost(
+          uow_factory,
+          control_plane=ControlPlaneService.from_config({"fake": True, "browser": {"enabled": False}}),
+        )
+      )
+      due_at = (utc_now() - timedelta(minutes=1)).isoformat()
+
+      mcp_created = self._request_json(
+        handler,
+        "POST",
+        "/mcp-servers",
+        {
+          "name": "echo",
+          "enabled": True,
+          "transport": {"type": "stdio", "command": "echo", "args": ["mcp"]},
+        },
+      )
+      mcp_listed = self._request_json(handler, "GET", "/mcp-servers?enabled_only=true")
+      scheduled = self._request_json(
+        handler,
+        "POST",
+        "/scheduled-tasks",
+        {
+          "task_id": "scheduled_http",
+          "name": "HTTP schedule",
+          "schedule_kind": "at",
+          "schedule_value": due_at,
+          "payload": {"title": "scheduled http", "run_id": "run_scheduled_http"},
+        },
+      )
+      triggered = self._request_json(handler, "POST", "/scheduled-tasks/run-due", {})
+      control_health = self._request_json(handler, "GET", "/control/health")
+      control_targets = self._request_json(handler, "GET", "/control/targets?kind=browser")
+      deleted = self._request_json(handler, "DELETE", "/mcp-servers/echo")
+
+      self.assertTrue(mcp_created["ok"])
+      self.assertEqual(mcp_listed["mcp_servers"][0]["name"], "echo")
+      self.assertEqual(scheduled["scheduled_task"]["task_id"], "scheduled_http")
+      self.assertEqual(triggered["triggers"][0]["result"]["task"]["run_id"], "run_scheduled_http")
+      self.assertTrue(control_health["ok"])
+      self.assertEqual(control_targets["targets"], [])
+      self.assertTrue(deleted["deleted"])
     finally:
       conn.close()
 

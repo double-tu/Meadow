@@ -47,6 +47,10 @@ class RuntimeEventType(StrEnum):
   AGENT_SESSION_CREATED = "agent.session.created"
   AGENT_TURN_COMPLETED = "agent.turn.completed"
   AGENT_SESSION_CANCELLED = "agent.session.cancelled"
+  AGENT_DELEGATION_STARTED = "agent.delegation.started"
+  AGENT_DELEGATION_COMPLETED = "agent.delegation.completed"
+  AGENT_DELEGATION_FAILED = "agent.delegation.failed"
+  AGENT_DELEGATION_CANCELLED = "agent.delegation.cancelled"
 
 
 @dataclass(slots=True)

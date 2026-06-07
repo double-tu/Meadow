@@ -46,6 +46,9 @@ class AtomicCapabilityIds:
   MEMORY_CHECKPOINT = "atom.memory.checkpoint"
   MEMORY_EVOLUTION_NOTE = "atom.memory.evolution_note"
   USER_INPUT_REQUEST = "atom.user.input_request"
+  AGENT_DELEGATE = "atom.agent.delegate"
+  AGENT_DELEGATION_STATUS = "atom.agent.delegation_status"
+  AGENT_CANCEL_DELEGATION = "atom.agent.cancel_delegation"
 
 
 @dataclass(slots=True)
@@ -70,6 +73,39 @@ class AtomicToolCatalog(Protocol):
     ...
 
 
+class AgentDelegationTool(Protocol):
+  async def delegate(
+    self,
+    *,
+    parent_run_id: str,
+    task: str,
+    connector_id: str,
+    agent_type: str | None = None,
+    parent_agent_id: str | None = None,
+    parent_session_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+  ):
+    ...
+
+  async def get_status(
+    self,
+    *,
+    parent_run_id: str,
+    task_ids: list[str] | None = None,
+    wait_ms: int | None = None,
+  ):
+    ...
+
+  async def cancel(
+    self,
+    *,
+    parent_run_id: str,
+    task_id: str,
+    reason: str = "delegation cancelled",
+  ):
+    ...
+
+
 class AtomicCapabilityProvider:
   """Registers default atomic capabilities and renders model-visible schemas."""
 
@@ -79,11 +115,13 @@ class AtomicCapabilityProvider:
     file_workspace: FileWorkspace | None = None,
     http_client: HTTPClient | None = None,
     memory: MemoryFacade | None = None,
+    delegation: AgentDelegationTool | None = None,
     default_code_cwd: str | None = None,
   ) -> None:
     self._file_workspace = file_workspace
     self._http_client = http_client
     self._memory = memory
+    self._delegation = delegation
     self._default_code_cwd = default_code_cwd
     self._aliases = {
       "workspace_read": AtomicCapabilityIds.WORKSPACE_READ,
@@ -107,6 +145,9 @@ class AtomicCapabilityProvider:
       "memory_checkpoint": AtomicCapabilityIds.MEMORY_CHECKPOINT,
       "memory_evolution_note": AtomicCapabilityIds.MEMORY_EVOLUTION_NOTE,
       "user_input_request": AtomicCapabilityIds.USER_INPUT_REQUEST,
+      "agent_delegate": AtomicCapabilityIds.AGENT_DELEGATE,
+      "agent_delegation_status": AtomicCapabilityIds.AGENT_DELEGATION_STATUS,
+      "agent_cancel_delegation": AtomicCapabilityIds.AGENT_CANCEL_DELEGATION,
     }
 
   def register(self, registry: CapabilityRegistry, local_tools: LocalToolExecutor) -> None:
@@ -120,6 +161,9 @@ class AtomicCapabilityProvider:
     local_tools.register(AtomicCapabilityIds.MEMORY_CHECKPOINT, self.update_memory_checkpoint)
     local_tools.register(AtomicCapabilityIds.MEMORY_EVOLUTION_NOTE, self.record_memory_evolution_note)
     local_tools.register(AtomicCapabilityIds.USER_INPUT_REQUEST, self.request_user_input)
+    local_tools.register(AtomicCapabilityIds.AGENT_DELEGATE, self.delegate_agent)
+    local_tools.register(AtomicCapabilityIds.AGENT_DELEGATION_STATUS, self.get_delegation_status)
+    local_tools.register(AtomicCapabilityIds.AGENT_CANCEL_DELEGATION, self.cancel_delegation)
 
   def capability_specs(self) -> list[CapabilitySpec]:
     return [
@@ -239,6 +283,30 @@ class AtomicCapabilityProvider:
         output_schema={"type": "object"},
         side_effect_level=SideEffectLevel.NONE,
       ),
+      CapabilitySpec(
+        capability_id=AtomicCapabilityIds.AGENT_DELEGATE,
+        name="Delegate work to agent connector",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.EXTERNAL_MUTATION,
+      ),
+      CapabilitySpec(
+        capability_id=AtomicCapabilityIds.AGENT_DELEGATION_STATUS,
+        name="Inspect agent delegation status",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.READ,
+      ),
+      CapabilitySpec(
+        capability_id=AtomicCapabilityIds.AGENT_CANCEL_DELEGATION,
+        name="Cancel agent delegation",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.EXTERNAL_MUTATION,
+      ),
     ]
 
   def tool_schemas(self) -> list[dict[str, Any]]:
@@ -287,6 +355,40 @@ class AtomicCapabilityProvider:
         ["note"],
       ),
       self._schema("user_input_request", "Pause the loop and request user input.", ["question"]),
+      self._schema(
+        "agent_delegate",
+        "Start an asynchronous child-agent task through a configured connector.",
+        ["parent_run_id", "connector_id", "task"],
+        {
+          "parent_run_id": {"type": "string"},
+          "parent_agent_id": {"type": "string"},
+          "parent_session_id": {"type": "string"},
+          "connector_id": {"type": "string"},
+          "agent_type": {"type": "string"},
+          "task": {"type": "string"},
+          "metadata": {"type": "object"},
+        },
+      ),
+      self._schema(
+        "agent_delegation_status",
+        "Inspect one or more delegation tasks scoped to the parent run.",
+        ["parent_run_id"],
+        {
+          "parent_run_id": {"type": "string"},
+          "task_ids": {"type": "array", "items": {"type": "string"}},
+          "wait_ms": {"type": "integer"},
+        },
+      ),
+      self._schema(
+        "agent_cancel_delegation",
+        "Cancel a running delegation task scoped to the parent run.",
+        ["parent_run_id", "task_id"],
+        {
+          "parent_run_id": {"type": "string"},
+          "task_id": {"type": "string"},
+          "reason": {"type": "string"},
+        },
+      ),
     ]
 
   def normalize_call(
@@ -538,6 +640,77 @@ class AtomicCapabilityProvider:
       metadata={"interrupt": "user_input"},
     )
 
+  async def delegate_agent(self, input: dict[str, Any]) -> ToolResult:
+    if self._delegation is None:
+      return ToolResult.failure("adapter_not_configured", "Agent delegation broker is not configured.")
+    parent_run_id = self._required_string(input, "parent_run_id")
+    connector_id = self._required_string(input, "connector_id")
+    task = self._required_string(input, "task")
+    for value in (parent_run_id, connector_id, task):
+      if isinstance(value, ToolResult):
+        return value
+    metadata = input.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+      return ToolResult.failure("invalid_input", "metadata must be an object when provided.")
+    try:
+      report = await self._delegation.delegate(
+        parent_run_id=parent_run_id,
+        parent_agent_id=self._optional_string(input.get("parent_agent_id")),
+        parent_session_id=self._optional_string(input.get("parent_session_id")),
+        connector_id=connector_id,
+        agent_type=self._optional_string(input.get("agent_type")),
+        task=task,
+        metadata=metadata,
+      )
+    except (KeyError, ValueError) as exc:
+      return ToolResult.failure("delegation_error", str(exc))
+    return ToolResult.success({"delegation": report.to_dict()})
+
+  async def get_delegation_status(self, input: dict[str, Any]) -> ToolResult:
+    if self._delegation is None:
+      return ToolResult.failure("adapter_not_configured", "Agent delegation broker is not configured.")
+    parent_run_id = self._required_string(input, "parent_run_id")
+    if isinstance(parent_run_id, ToolResult):
+      return parent_run_id
+    task_ids = input.get("task_ids")
+    if task_ids is not None and not (
+      isinstance(task_ids, list) and all(isinstance(task_id, str) and task_id for task_id in task_ids)
+    ):
+      return ToolResult.failure("invalid_input", "task_ids must be a list of non-empty strings.")
+    wait_ms = input.get("wait_ms")
+    if wait_ms is not None:
+      try:
+        wait_ms = int(wait_ms)
+      except (TypeError, ValueError):
+        return ToolResult.failure("invalid_input", "wait_ms must be an integer.")
+    try:
+      reports = await self._delegation.get_status(
+        parent_run_id=parent_run_id,
+        task_ids=task_ids,
+        wait_ms=wait_ms,
+      )
+    except ValueError as exc:
+      return ToolResult.failure("delegation_error", str(exc))
+    return ToolResult.success({"delegations": [report.to_dict() for report in reports]})
+
+  async def cancel_delegation(self, input: dict[str, Any]) -> ToolResult:
+    if self._delegation is None:
+      return ToolResult.failure("adapter_not_configured", "Agent delegation broker is not configured.")
+    parent_run_id = self._required_string(input, "parent_run_id")
+    task_id = self._required_string(input, "task_id")
+    for value in (parent_run_id, task_id):
+      if isinstance(value, ToolResult):
+        return value
+    try:
+      report = await self._delegation.cancel(
+        parent_run_id=parent_run_id,
+        task_id=task_id,
+        reason=str(input.get("reason") or "delegation cancelled"),
+      )
+    except ValueError as exc:
+      return ToolResult.failure("delegation_error", str(exc))
+    return ToolResult.success({"delegation": report.to_dict()})
+
   @classmethod
   def _control_input(cls, target_kind: str, capability_id: str, input: dict[str, Any]) -> dict[str, Any]:
     action = cls._control_action(capability_id)
@@ -630,6 +803,12 @@ class AtomicCapabilityProvider:
     if not isinstance(value, str) or not value:
       return ToolResult.failure("invalid_input", f"{key} must be a non-empty string.")
     return value
+
+  @staticmethod
+  def _optional_string(value: object) -> str | None:
+    if value is None:
+      return None
+    return str(value)
 
   @staticmethod
   def _code_argv(language: str, code: str, cwd: str) -> tuple[list[str], str | None]:

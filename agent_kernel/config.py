@@ -103,6 +103,13 @@ def _read_config_file(path: Path) -> dict[str, Any]:
   return data
 
 
+def load_config_dict(config_path: str | Path | None = None) -> dict[str, Any]:
+  path = config_path or os.getenv("AGENT_KERNEL_CONFIG")
+  if not path:
+    return {}
+  return _read_config_file(Path(path))
+
+
 def _resolve_api_key(raw_llm: dict[str, Any]) -> str | None:
   explicit = _string_or_none(raw_llm.get("api_key"))
   env_name = _string_or_none(raw_llm.get("api_key_env"))

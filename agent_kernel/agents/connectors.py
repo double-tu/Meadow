@@ -6,7 +6,9 @@ import asyncio
 from dataclasses import dataclass
 from dataclasses import field
 import json
+from pathlib import Path
 import sys
+import tomllib
 from typing import Any, Literal, Protocol
 
 from agent_kernel.domain.base import new_id
@@ -359,6 +361,107 @@ class ProductCLIConnectorFactory:
         raise ValueError(f"Duplicate connector_id: {spec.connector_id}")
       connectors[spec.connector_id] = self.build(spec)
     return connectors
+
+
+def product_cli_connector_spec_from_config(data: dict[str, Any]) -> ProductCLIConnectorSpec:
+  """Build a connector spec from direct argv or a product shim profile config."""
+
+  if "argv" in data:
+    return ProductCLIConnectorSpec.from_dict(data)
+
+  connector_id = data.get("connector_id")
+  product = data.get("product") or data.get("profile")
+  executable = data.get("executable") or product
+  if not isinstance(connector_id, str) or not connector_id:
+    raise ValueError("Agent connector config requires connector_id.")
+  if not isinstance(product, str) or not product:
+    raise ValueError("Agent connector config requires product or profile.")
+  if not isinstance(executable, str) or not executable:
+    raise ValueError("Agent connector config executable must be a non-empty string.")
+
+  default_args = data.get("default_args", [])
+  if not isinstance(default_args, list) or not all(isinstance(part, str) for part in default_args):
+    raise ValueError("Agent connector config default_args must be a list of strings.")
+  metadata = data.get("metadata")
+  if metadata is not None and not isinstance(metadata, dict):
+    raise ValueError("Agent connector config metadata must be an object.")
+
+  profile = ProductCLIShimProfile(
+    product=product,
+    executable=executable,
+    default_args=default_args,
+    prompt_mode=_literal_choice(
+      data.get("prompt_mode", "stdin"),
+      {"stdin", "argument", "json_stdin"},
+      "prompt_mode",
+    ),
+    prompt_argument=data.get("prompt_argument") if isinstance(data.get("prompt_argument"), str) else None,
+    output_format=_literal_choice(data.get("output_format", "text"), {"text", "json"}, "output_format"),
+    request_timeout_seconds=float(data.get("request_timeout_seconds", 120.0)),
+  )
+  return profile.to_connector_spec(
+    connector_id,
+    cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else None,
+    startup_timeout_seconds=float(data.get("startup_timeout_seconds", 5.0)),
+    turn_timeout_seconds=float(data["turn_timeout_seconds"]) if "turn_timeout_seconds" in data else None,
+    metadata=metadata,
+  )
+
+
+def load_product_cli_connector_specs(config_path: str | Path | None) -> list[ProductCLIConnectorSpec]:
+  """Load product connector specs from an Agent Kernel TOML/JSON config file.
+
+  Supported shapes:
+  - TOML/JSON list: {"agent_connectors": [{"connector_id": "...", ...}]}
+  - TOML/JSON map: {"agent_connectors": {"codex": {"product": "codex", ...}}}
+  """
+
+  if config_path is None:
+    return []
+  data = _read_connector_config(Path(config_path))
+  raw = data.get("agent_connectors", [])
+  if raw is None:
+    return []
+  records: list[dict[str, Any]]
+  if isinstance(raw, list):
+    records = raw
+  elif isinstance(raw, dict):
+    records = []
+    for connector_id, value in raw.items():
+      if not isinstance(value, dict):
+        raise ValueError("agent_connectors map values must be objects.")
+      merged = dict(value)
+      merged.setdefault("connector_id", connector_id)
+      records.append(merged)
+  else:
+    raise ValueError("agent_connectors must be a list or object map.")
+
+  specs: list[ProductCLIConnectorSpec] = []
+  for record in records:
+    if not isinstance(record, dict):
+      raise ValueError("agent_connectors entries must be objects.")
+    specs.append(product_cli_connector_spec_from_config(record))
+  return specs
+
+
+def _read_connector_config(path: Path) -> dict[str, Any]:
+  if not path.exists():
+    raise FileNotFoundError(f"Config file not found: {path}")
+  if path.suffix.lower() == ".json":
+    with path.open("r", encoding="utf-8") as file:
+      data = json.load(file)
+  else:
+    with path.open("rb") as file:
+      data = tomllib.load(file)
+  if not isinstance(data, dict):
+    raise ValueError(f"Config file must contain an object/table: {path}")
+  return data
+
+
+def _literal_choice(value: Any, allowed: set[str], field_name: str) -> Any:
+  if not isinstance(value, str) or value not in allowed:
+    raise ValueError(f"{field_name} must be one of: {', '.join(sorted(allowed))}.")
+  return value
 
 
 class AgentConnectorRouter:

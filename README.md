@@ -12,18 +12,22 @@ Implemented MVP areas:
 - Capability runtime with policy checks, grant filesystem/network scope checks, approval flow, audit records, standard `ToolResult` envelopes, local/process tools, governed file/HTTP side-effect adapters, process stdout/stderr and structured JSONL streaming, timeout, injectable process isolation strategy, POSIX process group control, and tool-call cancel/kill control.
 - Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, browser-link HTTP backend, Win32 desktop backend, UIA-style/UIAutomation desktop tree detectors, driver/HTTP vision detector adapters, and ADB mobile backend routed through capability policy/audit.
 - Memory/context with working/artifact memory, context budget, sensitivity filtering, tool visibility pruning, large-memory artifact refs, and context ledger.
-- Episodic memory with deterministic summarizer/retriever interfaces, conservative semantic consolidation, sparse/vector-store semantic retrieval interfaces, and structured fact conflict detection.
+- Episodic memory with deterministic summarizer/retriever interfaces, conservative semantic consolidation, memory evolution candidate settlement, sparse/vector-store semantic retrieval interfaces, and structured fact conflict detection.
 - Observability/replay with timeline, artifact inspect, cost ledger, audit sinks, exact/partial/recovery replay, and eval assertions.
 - Extension manifest loader, contribution registry, permission-to-grant mapping, and dynamic importlib entrypoint runtime for registering tool providers.
 - Autonomous exploration MVP with composable multi-strategy planning, dynamic tool/workflow composition, attempts, verification, failure reflection, trace distillation, draft workflow templates, and skill evolution records.
 - Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings with runtime pause/context correction/current-step interrupt, connector routing, and channel/cross-channel decision artifacts.
+- Asynchronous agent delegation broker with parent-scoped delegate/status/cancel, depth limits, parent-run cancel cascade, orphaned-running recovery, large-result artifact handoff, long-poll status waits, connector cancellation, terminal reports, runtime events, HTTP endpoints, model-visible atomic tools, and a stdio MCP companion surface.
 - Workspace isolation interfaces with fake backend, Git worktree backend, and priority merge queue for isolated patch review/merge workflows.
 - Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
 - Human intervention with event append, working-memory steering, CLI/HTTP `intervene`, pause-and-resume, and current-step interruption metadata.
 - Skill service, compiled workflow registration/resolution, plan patch validation, and workflow patch application for controlled skill/workflow evolution.
 - MCP stdio client/tool executor, generic Workbench protocol/fake/HTTP client, control Workbench, persistent agent connector protocol, structured stdio connector, product CLI shim profiles, product CLI connector factory, and multi-session connector router boundaries.
-- Host DTOs plus HTTP host for task create, run inspect, run event NDJSON/SSE stream, artifact inspect, run cancel, human intervention, approval resolution, and tool-call cancel/kill requests.
-- CLI host for sample run, inspect, replay, approve, reject, cancel, cancel/kill tool call, intervene, and llm-smoke.
+- MCP configuration management service with import/export, enable/agent-type filtering, stdio command assembly, HTTP/CLI management routes, and config-file import support.
+- Scheduled task service with persisted one-shot/interval/simple-cron task definitions, due-task triggering, trigger history, and HTTP/CLI management routes.
+- Control plane assembly and health/target inspection routes for configured browser-link, ADB mobile, Win32 desktop, or fake control backends.
+- Host DTOs plus HTTP host for task create, run inspect, run event NDJSON/SSE stream, artifact inspect, run cancel, human intervention, approval resolution, tool-call cancel/kill, and agent delegation requests.
+- CLI host for sample run, inspect, replay, approve, reject, cancel, cancel/kill tool call, intervene, llm-smoke, and configured external-agent delegation.
 - OpenAI-compatible LLM smoke command configured by environment variables or TOML/JSON config.
 
 ## Quick Start
@@ -81,6 +85,64 @@ export OPENAI_API_KEY="your-api-key"
 python3 -m agent_kernel.hosts.cli --config agent-kernel.toml llm-smoke --prompt "Say hello."
 ```
 
+Run a configured external-agent delegation through a product CLI connector:
+
+```bash
+python3 -m agent_kernel.hosts.cli --config agent-kernel.toml delegate-agent \
+  --parent-run-id run_demo \
+  --connector-id codex_cli \
+  --agent-type codex \
+  --task "Review the current repository and return the top risks."
+```
+
+`delegate-agent` waits for completion by default because the CLI process is short-lived. Use the HTTP host delegation endpoints for true background delegation in a long-lived process.
+
+Expose delegation as MCP tools for an external agent CLI:
+
+```bash
+python3 -m agent_kernel.hosts.cli --config agent-kernel.toml mcp-delegation-server \
+  --parent-run-id run_demo
+```
+
+The MCP server provides `delegate_to_agent`, `get_delegation_status`, and `cancel_delegation` over stdio JSON-RPC.
+
+Recover orphaned running delegation records after a host restart:
+
+```bash
+python3 -m agent_kernel.hosts.cli --db /tmp/agent_kernel.sqlite recover-delegations
+```
+
+Settle memory evolution candidates from a completed run:
+
+```bash
+python3 -m agent_kernel.hosts.cli --db /tmp/agent_kernel.sqlite settle-memory run_demo --scope project_demo
+```
+
+Import MCP server definitions from config and inspect them:
+
+```bash
+python3 -m agent_kernel.hosts.cli --config agent-kernel.toml mcp-import
+python3 -m agent_kernel.hosts.cli --db /tmp/agent_kernel.sqlite mcp-list --enabled-only
+```
+
+Create and trigger a scheduled task:
+
+```bash
+python3 -m agent_kernel.hosts.cli --db /tmp/agent_kernel.sqlite schedule-create \
+  --name "daily repo check" \
+  --kind every \
+  --value 1h \
+  --payload-json '{"title":"daily repo check","run_id":"run_daily_repo_check"}'
+python3 -m agent_kernel.hosts.cli --db /tmp/agent_kernel.sqlite schedule-run-due
+```
+
+Inspect configured real-control backends:
+
+```bash
+python3 -m agent_kernel.hosts.cli --config agent-kernel.toml control-health
+python3 -m agent_kernel.hosts.cli --config agent-kernel.toml control-health --targets --kind browser
+```
+
 If installed as a package, the console script is:
 
 ```bash
@@ -100,9 +162,9 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 
 - HTTP host has task creation backed by a default runtime workflow, JSON control endpoints for run cancel, human intervention, approval resolution, and tool-call cancel/kill plus NDJSON/SSE event streams; WebSocket streaming and the full Web/Desktop workspace are not implemented.
 - Tool-call cancel/kill and process stream control only operate inside the current runtime process; after restart, host commands persist control requests but cannot signal or reattach to the original process group.
-- Product CLI shim profiles for Codex/Claude/Gemini exist and run through a generic JSONL subprocess adapter; deeper product-native protocol adapters remain future work.
+- Product CLI shim profiles for Codex/Claude/Gemini exist and run through a generic JSONL subprocess adapter; delegation can route through configured connectors, while deeper product-native protocol adapters remain future work.
 - Handoff has a persistent service and channel routing; product CLI sessions can be connected through the generic JSONL shim profile path.
-- Generic Workbench has a JSON HTTP client adapter. MCP has a stdio JSON-RPC client/tool executor; control has browser-link HTTP, Win32 desktop/UIA-style/UIAutomation/driver vision/HTTP vision, and ADB mobile backends. Product-specific Workbench adapters and production-grade CV model packaging remain future work.
+- Generic Workbench has a JSON HTTP client adapter. MCP has stdio JSON-RPC client/tool executor plus persisted config management. Control has config-driven browser-link HTTP, Win32 desktop/UIA-style/UIAutomation/driver vision/HTTP vision, ADB mobile backends, and health/target inspection. Product-specific Workbench adapters and production-grade CV model packaging remain future work.
 - Extension runtime can dynamically import entrypoints and register tool providers; sandboxed/plugin-process execution and richer contribution types remain future work.
 - Recovery scanner can reschedule or dead-letter stale steps and conservatively repair missing/misaligned RunState checkpoint metadata, but complex artifact/event repair workflows are not implemented.
 - Workspace isolation has protocol, fake-backed patch review workflow, Git worktree allocation/merge execution, and a priority merge queue; automatic conflict-resolution workflows and richer review policy are not implemented.

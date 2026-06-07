@@ -8,6 +8,7 @@ from agent_kernel.memory.episodic import (
   KeywordEpisodeRetriever,
 )
 from agent_kernel.memory.facade import MemoryFacade
+from agent_kernel.memory.evolution import MemoryEvolutionSettlement, MemoryEvolutionSettlementService
 from agent_kernel.memory.semantic import (
   FactConflict,
   FactConflictDetector,
@@ -39,6 +40,8 @@ __all__ = [
   "HTTPVectorStoreEndpoint",
   "InMemoryVectorStore",
   "KeywordEpisodeRetriever",
+  "MemoryEvolutionSettlement",
+  "MemoryEvolutionSettlementService",
   "MemoryFacade",
   "SemanticQuery",
   "SemanticRetriever",

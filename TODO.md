@@ -1,12 +1,12 @@
 # Agent Kernel Development TODO
 
-更新时间: 2026-06-07 00:55:20 CST
+更新时间: 2026-06-07 03:10:00 CST
 
 ## 当前目标
 
 从 `python-code-architecture-design.md` 出发，先搭建 Python Agent Kernel 的可运行代码骨架，再按阶段逐步实现稳定内核、工作流、能力运行时、Agent 编排、记忆上下文、治理回放和多 Agent 协作能力。
 
-当前仓库状态: 已完成 Phase 0-9 的 MVP 主线；已具备 Durable Runtime、Agent Orchestration、Capability/Policy、Memory/Context、Replay/Observability、Extension SDK、Autonomy、Interaction Fabric 和 CLI Host 基础闭环。
+当前仓库状态: 已完成 Phase 0-9 的 MVP 主线；已具备 Durable Runtime、Agent Orchestration、Capability/Policy、Memory/Context、Replay/Observability、Extension SDK、Autonomy、Interaction Fabric、CLI/HTTP Host、MCP 配置管理、Scheduled Task API 和 Control Plane 装配/健康检查基础闭环。
 
 重要边界: 当前实现是可运行 MVP 基座，不等价于 `python-code-architecture-design.md` 的完整目标。后续开发必须优先补齐实时干预、长期进程恢复、多 CLI AgentConnector、HTTP/event stream、MCP/Workbench、工作区隔离和自主探索深化等缺口，避免把“接口/草案/基础服务”误判为完整能力。
 
@@ -164,6 +164,7 @@
 - [x] 实现 DeterministicWorkflowComposer，支持工具、Workbench 和子工作流的线性动态组合并可注册 WorkflowSpec。
 - [x] 实现 SkillEvolutionRecord 基础记录。
 - [x] 实现 GoldenTrace 到 draft WorkflowTemplate 的归纳流程。
+- [x] 实现 MemoryEvolutionSettlementService，将 `memory.evolution_candidate` 确定性结算为 semantic/procedural memory，并提供 CLI `settle-memory` 验收入口。
 - [x] 编写测试: 成功 trace 归纳、失败探索、skill evolution 记录。
 - [x] 编写测试: 失败反思、PlanPatch 校验、WorkflowPatchApplier。
 - [x] 编写测试: 多策略探索。
@@ -178,6 +179,11 @@
 - [x] 实现 AgentPool 和 pool scheduler。
 - [x] 实现 persistent CLI AgentConnector 协议占位和 fake。
 - [x] 实现多 session AgentConnectorRouter，将 participant 路由到不同 connector/session，并把 turn 输出写回 channel。
+- [x] 实现异步 AgentDelegationBroker，支持 parent-scoped `delegate/status/cancel`、长轮询等待、连接器取消、终态报告缓存和事件落账。
+- [x] AgentDelegationBroker 增加 depth limit 和 parent-run cancel cascade 挂接点，避免无限递归委派并支持父任务取消时清理子委派。
+- [x] AgentDelegationBroker 增加 orphaned-running recovery，host 重启后可将无法 reattach 的 running delegation 保守标记为 failed，并通过 CLI `recover-delegations` 验收。
+- [x] AgentDelegationBroker 增加 large-result artifact handoff，大型子 agent 输出转为 artifact ref 并挂到 completed event，避免父上下文塞入大 payload。
+- [x] 实现 delegation stdio MCP companion，暴露 `delegate_to_agent`、`get_delegation_status`、`cancel_delegation` 给外部 Agent CLI/MCP client。
 - [x] 实现 StructuredStdioAgentConnector，使用 JSONL 结构化协议连接长驻 CLI shim。
 - [x] 实现 ProductCLIConnectorFactory，通过产品 shim spec 构建 structured stdio connectors。
 - [x] 实现 Codex/Claude/Gemini 产品 CLI shim profile 和通用 JSONL subprocess shim。
@@ -213,6 +219,11 @@
 - [x] 实现只读 HTTP host: run inspect、run event NDJSON stream、artifact inspect。
 - [x] 实现 HTTP host run event SSE stream。
 - [x] 实现 HTTP 写控制 host: run cancel、human intervention、approval approve/reject、tool-call cancel/kill。
+- [x] 实现 HTTP agent delegation host: `POST /delegations`、`POST /delegations/status`、`GET /delegations/{task_id}`、`POST /delegations/{task_id}/cancel`。
+- [x] 实现 MCP 配置管理服务和 HTTP/CLI 管理入口: import/export、upsert/delete、enabled/agent_type 过滤、stdio command 装配。
+- [x] 实现 Scheduled Task API 和 HTTP/CLI 管理入口: one-shot/every/simple-cron 定义、due trigger、trigger history。
+- [x] 实现 Control Plane 装配和 HTTP/CLI health/targets 入口，按配置接入 browser-link、ADB mobile、Win32 desktop 或 fake backend。
+- [x] 实现配置驱动的 product CLI connector 装配，并在 CLI 暴露 `delegate-agent`、`delegation-status`、`cancel-delegation` 验收入口。
 - [x] 实现 task workspace 数据结构 DTO: conversation、taskboard、agent sessions、channels、artifacts、runtime controls。
 - [x] 编写测试: CLI smoke。
 - [x] 编写测试: HTTP DTO serialization、event stream。
@@ -427,7 +438,7 @@
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream、结构化 JSONL stream、可插拔隔离策略和 POSIX process group cancel/kill；仍缺跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 已证明文件写入、命令执行、网络访问可通过 CapabilityRuntime 统一经过 policy check、grant scope、audit、tool_call 和 idempotency；仍缺对非 capability 旁路副作用的全局强制拦截/沙箱化。
-- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style/UIAutomation desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
+- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、delegation stdio MCP companion、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、配置驱动 connector 装配、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 `/link`-style HTTP browser backend、Win32 desktop backend、UIA-style/UIAutomation desktop tree detector、VisionDetector driver/HTTP service adapters 和 ADB mobile backend；产品原生深度协议 adapter、生产级 CV 模型打包/部署尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
 - [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行、冲突 rollback 和 priority merge queue；仍缺冲突自动修复 workflow 和更完整 review policy。
 - [x] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint，context correction 已可写入 working memory，current-step interrupt 已可中止当前 RUNNING step。
@@ -785,6 +796,18 @@
 - `PolicyEngine` 新增 `CapabilityScopeResolver` 和默认 resolver，支持基于 capability input 校验 grant 的 `filesystem_scope` 与 `network_scope`。
 - 新增测试覆盖文件写入、网络访问、命令执行均经过 policy、grant scope、audit、tool_call 和标准 `ToolResult` envelope；越权路径/host 在 adapter 执行前被拒绝。
 - 更新 `scripts/verify_realized_todo.py` Phase 3 验收，真实写入临时文件、执行本地命令、通过 fake HTTP client 验证网络治理路径。
+
+### 2026-06-07 03:10:00 CST
+
+- 新增 `DelegationTask` / `DelegationTaskReport` / `DelegationStatus` 领域模型，作为异步子代理委派的稳定任务报告边界。
+- 新增 `AgentDelegationBroker`，通过现有 `AgentConnector` 协议启动外部 agent session，支持 parent-run 作用域隔离、异步后台执行、`wait_ms` 长轮询、取消连接器 session、终态持久化和运行时事件。
+- 新增 delegation runtime events: `agent.delegation.started|completed|failed|cancelled`。
+- `InteractionStore` 新增 delegation task 持久化方法，复用 interaction records，避免为参考项目的 conversation/schema 细节硬融合新表。
+- HTTP Host 新增 delegation 接口，并通过可注入 `AgentDelegationControl` 协议预留 Web/Desktop/MCP/多端入口。
+- `AtomicCapabilityProvider` 新增模型可调用工具: `agent_delegate`、`agent_delegation_status`、`agent_cancel_delegation`，仍经过 `CapabilityRuntime`、Policy 和 tool_call envelope。
+- 新增测试覆盖 broker 完成、父作用域隔离、长轮询、取消、HTTP delegation endpoint 和原子能力 runtime 调用。
+- 验证命令: `python3 -m unittest discover -s tests`，结果 199 passed。
+- 验证命令: `python3 scripts/verify_realized_todo.py --no-real-llm`，通过 Phase 0-9。
 
 ## 风险与待决策
 

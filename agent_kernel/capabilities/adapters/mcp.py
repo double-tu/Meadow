@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import os
 from typing import Any, Protocol
 
 from agent_kernel.domain.capability import ToolResult
@@ -48,6 +49,7 @@ class FakeMCPClient:
 class MCPServerCommand:
   argv: list[str]
   cwd: str | None = None
+  env: dict[str, str] | None = None
   protocol_version: str = "2025-06-18"
   client_name: str = "meadow"
   client_version: str = "0.1.0"
@@ -91,6 +93,7 @@ class StdioMCPClient:
     process = await asyncio.create_subprocess_exec(
       *command.argv,
       cwd=command.cwd,
+      env={**os.environ, **(command.env or {})},
       stdin=asyncio.subprocess.PIPE,
       stdout=asyncio.subprocess.PIPE,
       stderr=asyncio.subprocess.PIPE,

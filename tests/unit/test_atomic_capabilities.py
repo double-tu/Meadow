@@ -19,8 +19,11 @@ from agent_kernel.capabilities.adapters import (
   LocalFileWorkspace,
   LocalToolExecutor,
 )
+from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
 from agent_kernel.domain import CapabilityGrant
 from agent_kernel.domain.base import utc_now
+from agent_kernel.persistence import connect_sqlite
+from agent_kernel.runtime import unit_of_work_factory
 from agent_kernel.policy import PolicyEngine
 
 
@@ -150,6 +153,69 @@ class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
     self.assertIn("desktop_click", names)
     self.assertIn("mobile_dump_ui", names)
     self.assertIn("memory_evolution_note", names)
+    self.assertIn("agent_delegate", names)
+    self.assertIn("agent_delegation_status", names)
+    self.assertIn("agent_cancel_delegation", names)
+
+  async def test_atomic_agent_delegation_routes_through_capability_runtime(self) -> None:
+    conn = connect_sqlite()
+    try:
+      connector = FakeAgentConnector()
+      connector.queue_response(
+        ConnectorTurn(
+          turn_id="turn_atomic_delegate",
+          session_id="unused",
+          output={"summary": "delegated"},
+          completed=True,
+        )
+      )
+      broker = AgentDelegationBroker(unit_of_work_factory(conn), {"codex": connector})
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      provider = AtomicCapabilityProvider(delegation=broker)
+      provider.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_delegate",
+              capability_id=AtomicCapabilityIds.AGENT_DELEGATE,
+              run_id="run_atomic_delegate",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+      )
+
+      delegated = await runtime.call(
+        AtomicCapabilityIds.AGENT_DELEGATE,
+        {
+          "parent_run_id": "run_atomic_delegate",
+          "connector_id": "codex",
+          "agent_type": "implementation",
+          "task": "implement capability",
+        },
+        CapabilityCallContext(run_id="run_atomic_delegate"),
+      )
+      task_id = delegated.result.output["delegation"]["task_id"]
+      status = await runtime.call(
+        AtomicCapabilityIds.AGENT_DELEGATION_STATUS,
+        {
+          "parent_run_id": "run_atomic_delegate",
+          "task_ids": [task_id],
+          "wait_ms": 500,
+        },
+        CapabilityCallContext(run_id="run_atomic_delegate"),
+      )
+
+      self.assertTrue(delegated.result.ok)
+      self.assertTrue(status.result.ok)
+      self.assertEqual(status.result.output["delegations"][0]["status"], "completed")
+      self.assertEqual(status.result.output["delegations"][0]["output"], {"summary": "delegated"})
+    finally:
+      conn.close()
 
 
 class _RecordingHTTPClient:

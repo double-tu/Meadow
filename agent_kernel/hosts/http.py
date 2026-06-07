@@ -11,6 +11,10 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlparse
 
 from agent_kernel.app.tool_call_control import ToolCallControlOutcome, ToolCallControlService
+from agent_kernel.app.control_plane import ControlPlaneService
+from agent_kernel.app.mcp_config import MCPConfigService
+from agent_kernel.app.scheduled_tasks import ScheduledTaskService
+from agent_kernel.domain.delegation import DelegationTaskReport
 from agent_kernel.domain.errors import DomainError
 from agent_kernel.domain.policy import ApprovalRequest
 from agent_kernel.domain.run import RunState
@@ -64,6 +68,39 @@ class ToolCallControl(Protocol):
     """Request kill of a tool call."""
 
 
+class AgentDelegationControl(Protocol):
+  async def delegate(
+    self,
+    *,
+    parent_run_id: str,
+    task: str,
+    connector_id: str,
+    agent_type: str | None = None,
+    parent_agent_id: str | None = None,
+    parent_session_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+  ) -> DelegationTaskReport:
+    """Start a child-agent delegation task."""
+
+  async def get_status(
+    self,
+    *,
+    parent_run_id: str,
+    task_ids: list[str] | None = None,
+    wait_ms: int | None = None,
+  ) -> list[DelegationTaskReport]:
+    """Inspect parent-scoped delegation task status."""
+
+  async def cancel(
+    self,
+    *,
+    parent_run_id: str,
+    task_id: str,
+    reason: str = "delegation cancelled",
+  ) -> DelegationTaskReport:
+    """Cancel a running child-agent delegation task."""
+
+
 class HTTPHost:
   def __init__(
     self,
@@ -73,14 +110,25 @@ class HTTPHost:
     approval_control: ApprovalControl | None = None,
     intervention_control: InterventionControl | None = None,
     tool_call_control: ToolCallControl | None = None,
+    delegation_control: AgentDelegationControl | None = None,
     task_launcher: TaskLauncher | None = None,
+    mcp_config_service: MCPConfigService | None = None,
+    scheduled_task_service: ScheduledTaskService | None = None,
+    control_plane: ControlPlaneService | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._run_control = run_control or RuntimeEngine(uow_factory, NodeExecutorRegistry())
     self._approval_control = approval_control or ApprovalService(uow_factory)
     self._intervention_control = intervention_control or HumanInterventionService(uow_factory)
     self._tool_call_control = tool_call_control or ToolCallControlService(uow_factory)
+    self._delegation_control = delegation_control
     self._task_launcher = task_launcher or SampleWorkflowTaskLauncher(uow_factory)
+    self._mcp_config_service = mcp_config_service or MCPConfigService(uow_factory)
+    self._scheduled_task_service = scheduled_task_service or ScheduledTaskService(
+      uow_factory,
+      self._task_launcher,
+    )
+    self._control_plane = control_plane or ControlPlaneService.from_config({"browser": {"enabled": False}})
 
   def inspect_run(self, run_id: str) -> dict[str, Any]:
     with self._uow_factory() as uow:
@@ -170,6 +218,83 @@ class HTTPHost:
   async def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
     return await self._task_launcher.create_task(payload)
 
+  async def delegate_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
+    control = self._require_delegation_control()
+    metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+      raise ValueError("metadata must be a JSON object when provided.")
+    report = await control.delegate(
+      parent_run_id=_required_str(payload.get("parent_run_id"), "parent_run_id"),
+      parent_agent_id=_optional_str(payload.get("parent_agent_id")),
+      parent_session_id=_optional_str(payload.get("parent_session_id")),
+      connector_id=_required_str(payload.get("connector_id"), "connector_id"),
+      agent_type=_optional_str(payload.get("agent_type")),
+      task=_required_str(payload.get("task"), "task"),
+      metadata=metadata,
+    )
+    return ok_response(delegation=report.to_dict())
+
+  async def get_delegation_status(
+    self,
+    parent_run_id: str,
+    task_ids: list[str] | None = None,
+    wait_ms: int | None = None,
+  ) -> dict[str, Any]:
+    control = self._require_delegation_control()
+    reports = await control.get_status(parent_run_id=parent_run_id, task_ids=task_ids, wait_ms=wait_ms)
+    return ok_response(delegations=[report.to_dict() for report in reports])
+
+  async def cancel_delegation(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    control = self._require_delegation_control()
+    report = await control.cancel(
+      parent_run_id=_required_str(payload.get("parent_run_id"), "parent_run_id"),
+      task_id=task_id,
+      reason=str(payload.get("reason") or "delegation cancelled"),
+    )
+    return ok_response(delegation=report.to_dict())
+
+  def list_mcp_servers(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    parsed = query or {}
+    enabled_only = _query_bool(parsed, "enabled_only", default=False)
+    agent_type = _query_optional_str(parsed, "agent_type")
+    servers = self._mcp_config_service.list_servers(enabled_only=enabled_only, agent_type=agent_type)
+    return ok_response(mcp_servers=[server.to_dict() for server in servers])
+
+  def upsert_mcp_server(self, payload: dict[str, Any]) -> dict[str, Any]:
+    server = self._mcp_config_service.upsert_server(payload)
+    return ok_response(mcp_server=server.to_dict())
+
+  def delete_mcp_server(self, name: str) -> dict[str, Any]:
+    return ok_response(deleted=self._mcp_config_service.delete_server(name), name=name)
+
+  def list_scheduled_tasks(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    enabled_only = _query_bool(query or {}, "enabled_only", default=False)
+    tasks = self._scheduled_task_service.list(enabled_only=enabled_only)
+    return ok_response(scheduled_tasks=[task.to_dict() for task in tasks])
+
+  def create_scheduled_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+    task = self._scheduled_task_service.create(payload)
+    return ok_response(scheduled_task=task.to_dict())
+
+  async def run_due_scheduled_tasks(self, payload: dict[str, Any]) -> dict[str, Any]:
+    limit = _optional_int(payload.get("limit"), field="limit")
+    triggers = await self._scheduled_task_service.run_due(limit=limit)
+    return ok_response(triggers=[trigger.to_dict() for trigger in triggers])
+
+  async def control_health(self) -> dict[str, Any]:
+    return await self._control_plane.health()
+
+  def control_targets(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    raw_kind = _query_optional_str(query or {}, "kind")
+    if raw_kind is not None and raw_kind not in {"browser", "desktop", "mobile"}:
+      raise ValueError("kind must be browser, desktop, or mobile.")
+    return ok_response(**self._control_plane.list_targets(raw_kind))
+
+  def _require_delegation_control(self) -> AgentDelegationControl:
+    if self._delegation_control is None:
+      raise ValueError("Agent delegation broker is not configured.")
+    return self._delegation_control
+
 
 def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
   class AgentKernelHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -193,6 +318,24 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           return
         if len(segments) == 2 and segments[0] == "artifacts":
           self._write_json(HTTPStatus.OK, host.inspect_artifact(segments[1]))
+          return
+        if len(segments) == 2 and segments[0] == "delegations":
+          parent_run_id = _query_required_str(query, "parent_run_id")
+          wait_ms = _query_optional_int(query, "wait_ms")
+          response = asyncio.run(host.get_delegation_status(parent_run_id, [segments[1]], wait_ms=wait_ms))
+          self._write_json(HTTPStatus.OK, response)
+          return
+        if len(segments) == 1 and segments[0] == "mcp-servers":
+          self._write_json(HTTPStatus.OK, host.list_mcp_servers(query))
+          return
+        if len(segments) == 1 and segments[0] == "scheduled-tasks":
+          self._write_json(HTTPStatus.OK, host.list_scheduled_tasks(query))
+          return
+        if len(segments) == 2 and segments[0] == "control" and segments[1] == "health":
+          self._write_json(HTTPStatus.OK, asyncio.run(host.control_health()))
+          return
+        if len(segments) == 2 and segments[0] == "control" and segments[1] == "targets":
+          self._write_json(HTTPStatus.OK, host.control_targets(query))
           return
         self._write_json(HTTPStatus.NOT_FOUND, error_response("route not found", path=path))
       except KeyError as exc:
@@ -227,9 +370,37 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           response = asyncio.run(host.kill_tool_call(segments[1]))
           self._write_json(HTTPStatus.OK, response)
           return
+        if len(segments) == 1 and segments[0] == "delegations":
+          response = asyncio.run(host.delegate_agent(payload))
+          self._write_json(HTTPStatus.CREATED, response)
+          return
+        if len(segments) == 2 and segments[0] == "delegations" and segments[1] == "status":
+          response = asyncio.run(
+            host.get_delegation_status(
+              _required_str(payload.get("parent_run_id"), "parent_run_id"),
+              _optional_string_list(payload.get("task_ids"), field="task_ids"),
+              wait_ms=_optional_int(payload.get("wait_ms"), field="wait_ms"),
+            )
+          )
+          self._write_json(HTTPStatus.OK, response)
+          return
+        if len(segments) == 3 and segments[0] == "delegations" and segments[2] == "cancel":
+          response = asyncio.run(host.cancel_delegation(segments[1], payload))
+          self._write_json(HTTPStatus.OK, response)
+          return
         if len(segments) == 1 and segments[0] == "tasks":
           response = asyncio.run(host.create_task(payload))
           self._write_json(HTTPStatus.CREATED, response)
+          return
+        if len(segments) == 1 and segments[0] == "mcp-servers":
+          self._write_json(HTTPStatus.OK, host.upsert_mcp_server(payload))
+          return
+        if len(segments) == 1 and segments[0] == "scheduled-tasks":
+          self._write_json(HTTPStatus.CREATED, host.create_scheduled_task(payload))
+          return
+        if len(segments) == 2 and segments[0] == "scheduled-tasks" and segments[1] == "run-due":
+          response = asyncio.run(host.run_due_scheduled_tasks(payload))
+          self._write_json(HTTPStatus.OK, response)
           return
         self._write_json(HTTPStatus.NOT_FOUND, error_response("route not found", path=path))
       except KeyError as exc:
@@ -238,6 +409,17 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
         self._write_json(HTTPStatus.BAD_REQUEST, error_response(str(exc)))
       except Exception as exc:
         self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, error_response("internal server error", detail=str(exc)))
+
+    def do_DELETE(self) -> None:
+      path = urlparse(self.path).path
+      segments = [unquote(segment) for segment in path.split("/") if segment]
+      try:
+        if len(segments) == 2 and segments[0] == "mcp-servers":
+          self._write_json(HTTPStatus.OK, host.delete_mcp_server(segments[1]))
+          return
+        self._write_json(HTTPStatus.NOT_FOUND, error_response("route not found", path=path))
+      except (ValueError, DomainError) as exc:
+        self._write_json(HTTPStatus.BAD_REQUEST, error_response(str(exc)))
 
     def log_message(self, format: str, *args: object) -> None:
       return
@@ -381,6 +563,52 @@ def _optional_str(value: object) -> str | None:
   if value is None:
     return None
   return str(value)
+
+
+def _required_str(value: object, field: str) -> str:
+  if not isinstance(value, str) or not value.strip():
+    raise ValueError(f"{field} must be a non-empty string.")
+  return value
+
+
+def _optional_string_list(value: object, *, field: str) -> list[str] | None:
+  if value is None:
+    return None
+  if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+    raise ValueError(f"{field} must be a list of non-empty strings.")
+  return value
+
+
+def _optional_int(value: object, *, field: str) -> int | None:
+  if value is None:
+    return None
+  try:
+    return int(value)
+  except (TypeError, ValueError) as exc:
+    raise ValueError(f"{field} must be an integer.") from exc
+
+
+def _query_required_str(query: dict[str, list[str]], field: str) -> str:
+  values = query.get(field) or []
+  value = values[0] if values else None
+  return _required_str(value, field)
+
+
+def _query_optional_str(query: dict[str, list[str]], field: str) -> str | None:
+  values = query.get(field) or []
+  return _optional_str(values[0]) if values else None
+
+
+def _query_optional_int(query: dict[str, list[str]], field: str) -> int | None:
+  values = query.get(field) or []
+  return _optional_int(values[0], field=field) if values else None
+
+
+def _query_bool(query: dict[str, list[str]], field: str, *, default: bool) -> bool:
+  values = query.get(field) or []
+  if not values:
+    return default
+  return values[0].lower() in {"1", "true", "yes", "on"}
 
 
 def _positive_int(value: object, *, default: int, field: str) -> int:
