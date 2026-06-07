@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from urllib.parse import unquote, urlparse
 
-from agent_kernel.agents import FakeWorkspaceBackend, GitWorktreeBackend, WorkspaceIsolationService
-from agent_kernel.domain import ArtifactRef
+from agent_kernel.agents import FakeWorkspaceBackend, GitWorktreeBackend, WorkspaceIsolationService, WorkspaceMergeQueueService
+from agent_kernel.domain import ArtifactRef, PatchArtifact
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.runtime import unit_of_work_factory
 
@@ -58,6 +58,77 @@ class WorkspaceIsolationTests(unittest.TestCase):
       self.assertEqual(patches[-1].status, "merged")
       self.assertEqual(reviews[0].comments, ["Looks safe."])
       self.assertIsNotNone(merged_artifact)
+    finally:
+      conn.close()
+
+  def test_workspace_merge_queue_processes_approved_patches_in_priority_order(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      merge_backend = _RecordingMergeBackend()
+      service = WorkspaceIsolationService(uow_factory, FakeWorkspaceBackend(), review_backend=merge_backend)
+      queue = WorkspaceMergeQueueService(uow_factory, service)
+      first_lease = service.allocate("task_queue", "session_1")
+      second_lease = service.allocate("task_queue", "session_2")
+      first_patch = service.submit_patch(
+        first_lease.lease_id,
+        ArtifactRef("patch_a", "artifact://patch/a"),
+        "first",
+      )
+      second_patch = service.submit_patch(
+        second_lease.lease_id,
+        ArtifactRef("patch_b", "artifact://patch/b"),
+        "second",
+      )
+      service.review(first_patch.patch_id, "reviewer", "approved")
+      service.review(second_patch.patch_id, "reviewer", "approved")
+      low_priority = queue.enqueue(first_patch.patch_id, priority=50)
+      high_priority = queue.enqueue(second_patch.patch_id, priority=10)
+
+      processed = queue.process_all("task_queue")
+      queue_items = queue.list("task_queue")
+
+      self.assertEqual([item.queue_item_id for item in processed], [high_priority.queue_item_id, low_priority.queue_item_id])
+      self.assertEqual([patch.patch_id for patch in merge_backend.merged], [second_patch.patch_id, first_patch.patch_id])
+      self.assertEqual([item.status for item in queue_items], ["merged", "merged"])
+      self.assertTrue(all(item.merged_artifact_ref is not None for item in queue_items))
+    finally:
+      conn.close()
+
+  def test_workspace_merge_queue_records_failure_and_stops(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      merge_backend = _RecordingMergeBackend(fail_patch_id="patch_fail")
+      service = WorkspaceIsolationService(uow_factory, FakeWorkspaceBackend(), review_backend=merge_backend)
+      queue = WorkspaceMergeQueueService(uow_factory, service)
+      lease = service.allocate("task_queue_fail", "session_1")
+      patch = service.submit_patch(
+        lease.lease_id,
+        ArtifactRef("patch_fail_artifact", "artifact://patch/fail"),
+        "will fail",
+      )
+      patch = PatchArtifact(
+        patch_id="patch_fail",
+        lease_id=patch.lease_id,
+        task_id=patch.task_id,
+        author_session_id=patch.author_session_id,
+        artifact_ref=patch.artifact_ref,
+        summary=patch.summary,
+        status=patch.status,
+        created_at=patch.created_at,
+        updated_at=patch.updated_at,
+      )
+      with UnitOfWork(conn) as uow:
+        uow.interactions.save_patch_artifact(patch)
+      service.review("patch_fail", "reviewer", "approved")
+      queue.enqueue("patch_fail")
+
+      processed = queue.process_all("task_queue_fail")
+
+      self.assertEqual(len(processed), 1)
+      self.assertEqual(processed[0].status, "failed")
+      self.assertIn("synthetic merge failure", processed[0].error)
     finally:
       conn.close()
 
@@ -171,6 +242,23 @@ class WorkspaceIsolationTests(unittest.TestCase):
   def _path_from_uri(uri: str) -> Path:
     parsed = urlparse(uri)
     return Path(unquote(parsed.path))
+
+
+class _RecordingMergeBackend:
+  def __init__(self, fail_patch_id: str | None = None) -> None:
+    self.fail_patch_id = fail_patch_id
+    self.merged: list[PatchArtifact] = []
+
+  def merge(self, patch: PatchArtifact) -> ArtifactRef:
+    if patch.patch_id == self.fail_patch_id:
+      raise RuntimeError("synthetic merge failure")
+    self.merged.append(patch)
+    return ArtifactRef(
+      artifact_id=f"merged_{patch.patch_id}",
+      uri=f"artifact://merged/{patch.patch_id}",
+      media_type="application/vnd.agent-kernel.patch",
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

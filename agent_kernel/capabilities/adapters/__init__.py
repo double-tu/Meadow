@@ -9,10 +9,12 @@ from agent_kernel.capabilities.adapters.control import (
   ControlTarget,
   ControlWorkbench,
   DesktopUIDetector,
+  DriverVisionDetector,
   FakeControlBackend,
   TMWebDriverHTTPBackend,
   UIAStyleDesktopDetector,
   Win32DesktopBackend,
+  VisionDetector,
 )
 from agent_kernel.capabilities.adapters.local import LocalToolExecutor
 from agent_kernel.capabilities.adapters.mcp import (
@@ -49,6 +51,7 @@ __all__ = [
   "ControlTarget",
   "ControlWorkbench",
   "DesktopUIDetector",
+  "DriverVisionDetector",
   "FakeMCPClient",
   "FakeControlBackend",
   "FakeWorkbenchClient",
@@ -69,6 +72,7 @@ __all__ = [
   "TMWebDriverHTTPBackend",
   "UIAStyleDesktopDetector",
   "Win32DesktopBackend",
+  "VisionDetector",
   "WorkbenchClient",
   "WorkbenchCommand",
   "WorkbenchResult",

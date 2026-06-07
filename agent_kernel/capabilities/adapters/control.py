@@ -299,6 +299,62 @@ class DesktopUIDetector(Protocol):
     ...
 
 
+class VisionDetector(Protocol):
+  def detect(
+    self,
+    image_bytes: bytes,
+    target_kind: ControlTargetKind,
+    target_id: str | None = None,
+  ) -> list[dict[str, Any]]:
+    ...
+
+
+class DriverVisionDetector:
+  """Adapts a vision driver into normalized control nodes."""
+
+  def __init__(self, driver: Any) -> None:
+    self._driver = driver
+
+  def detect(
+    self,
+    image_bytes: bytes,
+    target_kind: ControlTargetKind,
+    target_id: str | None = None,
+  ) -> list[dict[str, Any]]:
+    if hasattr(self._driver, "detect"):
+      detections = self._driver.detect(image_bytes, target_kind=target_kind, target_id=target_id)
+    elif hasattr(self._driver, "detect_image"):
+      detections = self._driver.detect_image(image_bytes)
+    else:
+      raise RuntimeError("Vision driver must expose detect(image_bytes, ...) or detect_image(image_bytes).")
+    return [self._normalize_detection(detection) for detection in detections]
+
+  @classmethod
+  def _normalize_detection(cls, detection: Any) -> dict[str, Any]:
+    if isinstance(detection, dict):
+      source = detection
+    else:
+      source = {
+        "label": getattr(detection, "label", ""),
+        "text": getattr(detection, "text", ""),
+        "confidence": getattr(detection, "confidence", None),
+        "bounds": getattr(detection, "bounds", None),
+        "clickable": getattr(detection, "clickable", True),
+      }
+    bounds = UIAStyleDesktopDetector._normalize_bounds(source.get("bounds"))
+    cx, cy = UIAStyleDesktopDetector._bounds_center(bounds)
+    return {
+      "text": str(source.get("text") or source.get("label") or ""),
+      "label": str(source.get("label") or source.get("text") or ""),
+      "source": "vision",
+      "confidence": source.get("confidence"),
+      "click": bool(source.get("clickable", True)),
+      "cx": cx,
+      "cy": cy,
+      "bounds": bounds,
+    }
+
+
 class UIAStyleDesktopDetector:
   """Normalizes UIA-like desktop element trees into control nodes."""
 
@@ -369,10 +425,12 @@ class ADBMobileBackend:
     adb_path: str | None = None,
     command_timeout_seconds: float = 15.0,
     runner: CommandRunner | None = None,
+    vision_detector: VisionDetector | None = None,
   ) -> None:
     self._adb_path = adb_path or shutil.which("adb") or "adb"
     self._command_timeout_seconds = command_timeout_seconds
     self._runner = runner or self._run_subprocess
+    self._vision_detector = vision_detector
 
   def list_targets(self, kind: ControlTargetKind | None = None) -> list[ControlTarget]:
     if kind not in (None, "mobile"):
@@ -418,6 +476,7 @@ class ADBMobileBackend:
       nodes = self._parse_ui_xml(cat.output.get("stdout", ""))
     except ElementTree.ParseError as exc:
       return ControlResult(ok=False, error={"type": "invalid_android_ui_xml", "message": str(exc)})
+    nodes.extend(self._vision_nodes(command))
     return ControlResult(ok=True, output={"nodes": nodes, "raw_xml": cat.output.get("stdout", "")})
 
   def _tap(self, command: ControlCommand) -> ControlResult:
@@ -476,6 +535,21 @@ class ADBMobileBackend:
         "base64": base64.b64encode(result.stdout_bytes).decode("ascii"),
       },
     )
+
+  def _vision_nodes(self, command: ControlCommand) -> list[dict[str, Any]]:
+    if self._vision_detector is None:
+      return []
+    screenshot = self._screenshot(command)
+    if not screenshot.ok:
+      return []
+    image_base64 = screenshot.output.get("base64")
+    if not isinstance(image_base64, str):
+      return []
+    try:
+      image_bytes = base64.b64decode(image_base64)
+      return self._vision_detector.detect(image_bytes, "mobile", command.target_id)
+    except Exception:
+      return []
 
   def _run(self, argv: list[str], timeout_seconds: float | None) -> ControlResult:
     try:
@@ -599,11 +673,13 @@ class Win32DesktopBackend:
     win32gui: Any | None = None,
     clipboard: Any | None = None,
     ui_detector: DesktopUIDetector | None = None,
+    vision_detector: VisionDetector | None = None,
   ) -> None:
     self._desktop_driver = desktop_driver
     self._win32gui = win32gui
     self._clipboard = clipboard
     self._ui_detector = ui_detector
+    self._vision_detector = vision_detector
 
   def list_targets(self, kind: ControlTargetKind | None = None) -> list[ControlTarget]:
     if kind not in (None, "desktop"):
@@ -719,13 +795,31 @@ class Win32DesktopBackend:
     return ControlResult(ok=True, output={"chars": len(text), "result": self._safe_output(returned)})
 
   def _dump_ui(self, command: ControlCommand) -> ControlResult:
-    if self._ui_detector is None:
+    if self._ui_detector is None and self._vision_detector is None:
       return ControlResult(ok=False, error={"type": "desktop_ui_detector_not_configured"})
-    try:
-      nodes = self._ui_detector.dump(self._desktop_target(command.target_id))
-    except Exception as exc:
-      return ControlResult(ok=False, error={"type": "desktop_ui_dump_failed", "message": str(exc)})
+    nodes: list[dict[str, Any]] = []
+    if self._ui_detector is not None:
+      try:
+        nodes.extend(self._ui_detector.dump(self._desktop_target(command.target_id)))
+      except Exception as exc:
+        return ControlResult(ok=False, error={"type": "desktop_ui_dump_failed", "message": str(exc)})
+    nodes.extend(self._vision_nodes(command))
     return ControlResult(ok=True, output={"nodes": nodes})
+
+  def _vision_nodes(self, command: ControlCommand) -> list[dict[str, Any]]:
+    if self._vision_detector is None:
+      return []
+    screenshot = self._screenshot(command)
+    if not screenshot.ok:
+      return []
+    image_base64 = screenshot.output.get("base64")
+    if not isinstance(image_base64, str):
+      return []
+    try:
+      image_bytes = base64.b64decode(image_base64)
+      return self._vision_detector.detect(image_bytes, "desktop", command.target_id)
+    except Exception:
+      return []
 
   def _activate(self, target_id: str | None) -> None:
     desktop_driver = self._load_desktop_driver()

@@ -14,6 +14,7 @@ from agent_kernel.domain.interaction import (
   InteractionChannel,
   InteractionMessage,
   InteractionParticipant,
+  MergeQueueItem,
   ObservationFinding,
   PatchArtifact,
   ReviewRecord,
@@ -98,6 +99,17 @@ class InteractionStore:
   def list_review_records(self, patch_id: str) -> list[ReviewRecord]:
     return [ReviewRecord.from_dict(data) for data in self._list("review_record", patch_id)]
 
+  def save_merge_queue_item(self, item: MergeQueueItem) -> None:
+    self._save(item.queue_item_id, "merge_queue_item", item.task_id, item)
+
+  def get_merge_queue_item(self, queue_item_id: str) -> MergeQueueItem | None:
+    data = self._get(queue_item_id)
+    return MergeQueueItem.from_dict(data) if data is not None else None
+
+  def list_merge_queue_items(self, task_id: str | None = None) -> list[MergeQueueItem]:
+    records = self._list("merge_queue_item", task_id) if task_id is not None else self._list_all("merge_queue_item")
+    return [MergeQueueItem.from_dict(data) for data in records]
+
   def save_handoff(self, item: HandoffRecord) -> None:
     self._save(item.handoff_id, "handoff", item.task_id, item)
 
@@ -144,5 +156,17 @@ class InteractionStore:
       ORDER BY created_at ASC, record_id ASC
       """,
       (record_type, parent_id),
+    ).fetchall()
+    return [json.loads(row["record_json"]) for row in rows]
+
+  def _list_all(self, record_type: str) -> list[dict[str, Any]]:
+    rows = self._conn.execute(
+      """
+      SELECT record_json
+      FROM interaction_records
+      WHERE record_type = ?
+      ORDER BY created_at ASC, record_id ASC
+      """,
+      (record_type,),
     ).fetchall()
     return [json.loads(row["record_json"]) for row in rows]

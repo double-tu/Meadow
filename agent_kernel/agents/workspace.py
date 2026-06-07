@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from agent_kernel.domain.base import new_id, utc_now
 from agent_kernel.domain.identifiers import ArtifactRef
-from agent_kernel.domain.interaction import PatchArtifact, ReviewRecord, WorkspaceLease
+from agent_kernel.domain.interaction import MergeQueueItem, PatchArtifact, ReviewRecord, WorkspaceLease
 
 
 class WorkspaceBackend(Protocol):
@@ -266,6 +266,9 @@ class WorkspaceIsolationService:
       uow.interactions.save_patch_artifact(merged)
     return merged
 
+  def get_patch(self, patch_id: str) -> PatchArtifact:
+    return self._get_patch(patch_id)
+
   def _get_lease(self, lease_id: str) -> WorkspaceLease:
     with self._uow_factory() as uow:
       lease = uow.interactions.get_workspace_lease(lease_id)
@@ -279,3 +282,65 @@ class WorkspaceIsolationService:
     if patch is None:
       raise KeyError(f"Patch artifact not found: {patch_id}")
     return patch
+
+
+class WorkspaceMergeQueueService:
+  """Serializes approved patch merges across multiple agent workspaces."""
+
+  def __init__(self, uow_factory, workspace: WorkspaceIsolationService) -> None:
+    self._uow_factory = uow_factory
+    self._workspace = workspace
+
+  def enqueue(self, patch_id: str, priority: int = 100) -> MergeQueueItem:
+    patch = self._workspace.get_patch(patch_id)
+    if patch.status != "approved":
+      raise ValueError(f"Patch must be approved before enqueue: {patch.status}")
+    item = MergeQueueItem(
+      queue_item_id=new_id("merge_queue_item"),
+      patch_id=patch.patch_id,
+      task_id=patch.task_id,
+      priority=priority,
+    )
+    with self._uow_factory() as uow:
+      uow.interactions.save_merge_queue_item(item)
+    return item
+
+  def list(self, task_id: str | None = None) -> list[MergeQueueItem]:
+    with self._uow_factory() as uow:
+      items = uow.interactions.list_merge_queue_items(task_id)
+    return sorted(items, key=lambda item: (item.priority, item.created_at.isoformat(), item.queue_item_id))
+
+  def process_next(self, task_id: str | None = None) -> MergeQueueItem | None:
+    queued = [item for item in self.list(task_id) if item.status == "queued"]
+    if not queued:
+      return None
+    item = queued[0]
+    merging = replace(item, status="merging", updated_at=utc_now())
+    with self._uow_factory() as uow:
+      uow.interactions.save_merge_queue_item(merging)
+    try:
+      patch = self._workspace.merge(item.patch_id)
+    except Exception as exc:
+      failed = replace(merging, status="failed", error=str(exc), updated_at=utc_now())
+      with self._uow_factory() as uow:
+        uow.interactions.save_merge_queue_item(failed)
+      return failed
+    merged = replace(
+      merging,
+      status="merged",
+      merged_artifact_ref=patch.artifact_ref,
+      updated_at=utc_now(),
+    )
+    with self._uow_factory() as uow:
+      uow.interactions.save_merge_queue_item(merged)
+    return merged
+
+  def process_all(self, task_id: str | None = None) -> list[MergeQueueItem]:
+    processed: list[MergeQueueItem] = []
+    while True:
+      item = self.process_next(task_id)
+      if item is None:
+        return processed
+      processed.append(item)
+      if item.status == "failed":
+        return processed

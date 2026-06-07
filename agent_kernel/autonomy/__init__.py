@@ -1,5 +1,12 @@
 """Autonomous exploration package."""
 
+from agent_kernel.autonomy.composition import (
+  DeterministicWorkflowComposer,
+  WorkflowComposer,
+  WorkflowCompositionRequest,
+  WorkflowCompositionResult,
+  WorkflowCompositionStep,
+)
 from agent_kernel.autonomy.explorer import ExplorationExecutor
 from agent_kernel.autonomy.plan_patch import (
   PlanPatchValidationResult,
@@ -26,6 +33,7 @@ from agent_kernel.autonomy.workflow_library import WorkflowLibrary
 __all__ = [
   "ExplorationExecutor",
   "DeterministicExplorationReflector",
+  "DeterministicWorkflowComposer",
   "CompositeExplorationPlanner",
   "DirectSolutionStrategyGenerator",
   "DiscoveryFirstStrategyGenerator",
@@ -42,6 +50,10 @@ __all__ = [
   "StrategyGenerator",
   "TraceDistiller",
   "VerificationResult",
+  "WorkflowComposer",
+  "WorkflowCompositionRequest",
+  "WorkflowCompositionResult",
+  "WorkflowCompositionStep",
   "WorkflowLibrary",
   "WorkflowReuseStrategyGenerator",
 ]

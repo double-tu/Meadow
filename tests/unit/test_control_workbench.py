@@ -8,6 +8,7 @@ from agent_kernel.capabilities.adapters import (
   ControlResult,
   ControlTarget,
   ControlWorkbench,
+  DriverVisionDetector,
   FakeControlBackend,
   LocalToolExecutor,
   TMWebDriverHTTPBackend,
@@ -206,7 +207,7 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
 
   async def test_adb_mobile_backend_lists_devices_and_parses_ui_dump(self) -> None:
     runner = _ADBRunner()
-    backend = ADBMobileBackend(adb_path="adb", runner=runner.run)
+    backend = ADBMobileBackend(adb_path="adb", runner=runner.run, vision_detector=DriverVisionDetector(_VisionDriver()))
 
     targets = backend.list_targets("mobile")
     result = await backend.execute(ControlTargetCommandFactory.dump_mobile_ui("device_1"))
@@ -216,6 +217,8 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.output["nodes"][0]["text"], "Pay")
     self.assertEqual(result.output["nodes"][0]["cx"], 20)
     self.assertEqual(result.output["nodes"][0]["cy"], 30)
+    self.assertEqual(result.output["nodes"][1]["source"], "vision")
+    self.assertEqual(result.output["nodes"][1]["text"], "Checkout")
     self.assertIn(["adb", "-s", "device_1", "shell", "uiautomator", "dump", "--compressed", "/sdcard/window.xml"], runner.calls)
 
   async def test_adb_mobile_backend_tap_text_key_and_screenshot(self) -> None:
@@ -276,6 +279,8 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     backend = Win32DesktopBackend(
       win32gui=_Win32Gui(),
       ui_detector=UIAStyleDesktopDetector(_UIADriver()),
+      desktop_driver=_DesktopDriver(),
+      vision_detector=DriverVisionDetector(_VisionDriver()),
     )
 
     result = await backend.execute(ControlTargetCommandFactory.desktop_dump_ui("101"))
@@ -286,6 +291,22 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.output["nodes"][0]["automation_id"], "save")
     self.assertEqual(result.output["nodes"][0]["cx"], 15)
     self.assertEqual(result.output["nodes"][0]["cy"], 25)
+    self.assertEqual(result.output["nodes"][1]["source"], "vision")
+    self.assertEqual(result.output["nodes"][1]["label"], "Checkout")
+
+  async def test_win32_desktop_backend_can_dump_vision_nodes_without_uia_detector(self) -> None:
+    backend = Win32DesktopBackend(
+      win32gui=_Win32Gui(),
+      desktop_driver=_DesktopDriver(),
+      vision_detector=DriverVisionDetector(_VisionDriver()),
+    )
+
+    result = await backend.execute(ControlTargetCommandFactory.desktop_dump_ui("101"))
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["nodes"][0]["source"], "vision")
+    self.assertEqual(result.output["nodes"][0]["cx"], 20)
+    self.assertEqual(result.output["nodes"][0]["cy"], 30)
 
 
 class ControlTargetCommandFactory:
@@ -523,6 +544,19 @@ class _UIADriver:
         "clickable": True,
         "enabled": True,
         "bounds": [10, 20, 20, 30],
+      }
+    ]
+
+
+class _VisionDriver:
+  def detect(self, image_bytes: bytes, target_kind: str, target_id: str | None = None) -> list[dict[str, object]]:
+    return [
+      {
+        "label": "Checkout",
+        "text": "Checkout",
+        "confidence": 0.91,
+        "bounds": [10, 20, 30, 40],
+        "clickable": True,
       }
     ]
 

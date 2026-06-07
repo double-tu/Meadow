@@ -88,6 +88,7 @@
 - [x] 实现 ADB mobile backend，支持 devices、uiautomator dump 解析、tap、type_text、keyevent、screenshot。
 - [x] 实现 Win32 desktop backend，支持窗口枚举、截图、物理坐标点击、快捷键、剪贴板粘贴输入。
 - [x] 实现 DesktopUIDetector 协议与 UIA-style desktop tree detector，支持 dump_ui 节点归一化。
+- [x] 实现 VisionDetector 协议与 driver adapter，并接入 desktop/mobile dump_ui 视觉节点融合。
 - [x] 实现 CapabilityGrant、ApprovalRequest、PolicyEngine 基础能力。
 - [x] 实现 GrantStore 和 grant 过期检查。
 - [x] 实现 Approval approve/reject resolution。
@@ -154,6 +155,7 @@
 - [x] 实现子工作流 WorkflowSpec 注册、ref 解析和条件校验闭环。
 - [x] 实现 SkillCard、SkillService、PlanPatchValidator。
 - [x] 实现 WorkflowPatchApplier，支持 add_node/add_edge/set_start 的保守 workflow patch 应用。
+- [x] 实现 DeterministicWorkflowComposer，支持工具、Workbench 和子工作流的线性动态组合并可注册 WorkflowSpec。
 - [x] 实现 SkillEvolutionRecord 基础记录。
 - [x] 实现 GoldenTrace 到 draft WorkflowTemplate 的归纳流程。
 - [x] 编写测试: 成功 trace 归纳、失败探索、skill evolution 记录。
@@ -417,11 +419,11 @@
 - [ ] ToolCall 实时控制已支持 CLI/DTO 控制请求和当前进程内 active registry；进程重启后无法 cancel/kill 已运行子进程。
 - [ ] Process adapter 已实现 stdout/stderr stream 基础 async iterator、可插拔隔离策略和 POSIX process group cancel/kill；仍缺结构化终端协议、跨重启 reattach/control、Windows Job Object isolation 和 `tool.call.cancelled/killed/failed` 完整事件语义。
 - [ ] Policy/Audit 只覆盖 CapabilityRuntime 调用路径；尚未证明所有写文件、执行命令、网络访问都统一经过 policy check、grant、approval、audit 和 idempotency。
-- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector 和 ADB mobile backend；具体 UIA provider、视觉检测 adapter、产品原生深度协议 adapter 尚未实现。
+- [ ] MCP/Workbench/CLI AgentConnector 已有协议、fake、MCP stdio JSON-RPC client、MCP tool executor、通用 HTTP Workbench adapter、多 session router、structured JSONL stdio connector、product CLI connector factory、Codex/Claude/Gemini shim profile 和通用 JSONL subprocess shim；ControlWorkbench 已覆盖 browser JS、desktop click/key/screenshot/dump_ui、mobile UI/tap/text 原子能力入口，并已有 TMWebDriver-compatible HTTP browser backend、Win32 desktop backend、UIA-style desktop tree detector、VisionDetector driver adapter 和 ADB mobile backend；具体 UIA provider、具体 CV 模型/服务 adapter、产品原生深度协议 adapter 尚未实现。
 - [ ] 多 Agent 协作已有基础 channel/round-robin/free-for-all/moderator-select/taskboard/handoff/connector routing/channel + cross-channel decision artifact；Codex/Claude/Gemini 可通过通用 shim profile 接入，仍缺产品原生深度 session adapter。
-- [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行和冲突 rollback；仍缺多 agent merge queue、冲突自动修复 workflow 和更完整 review policy。
+- [ ] Workspace isolation 已有接口协议、fake backend、Git worktree 分配/release、approved patch merge 执行、冲突 rollback 和 priority merge queue；仍缺冲突自动修复 workflow 和更完整 review policy。
 - [ ] Observer request_pause 已可选驱动 Runtime pause 并持久化 event/checkpoint；仍缺上下文纠偏和当前 step 中止。
-- [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService 和 deterministic failure reflector；仍缺动态工具/工作流组合。
+- [ ] Autonomous exploration 已有可组合多策略 planner + 注入式 executor，并已补 PlanPatchValidator、SkillService、deterministic failure reflector 和 deterministic tool/workflow composition；仍缺条件分支组合、组合质量优化和 learned composition policy。
 - [x] Skill 与 Workflow 的互调规则已有基础服务、Agent 自动选择 skill、compiled workflow 注册/解析和 workflow patch 应用闭环。
 - [ ] Memory 已有 episodic memory、deterministic retrieval、高重要度 episode 到 semantic 的基础 consolidation、sparse semantic retrieval 和结构化 fact conflict detection；仍缺外部 vector store-backed retrieval、后台长期 consolidation 和复杂事实归并策略。
 - [ ] Recovery 已有 stale step scanner、event/checkpoint/artifact consistency check 和保守 metadata repair；仍缺复杂 artifact/event repair、不可恢复对象 repair workflow 和真实 worker 接管闭环。
@@ -440,7 +442,7 @@
 - [x] P1: 实现 workspace isolation 草案: allocator/review backend 协议、artifactized patch、review/merge workflow。
 - [x] P1: 实现真实 git worktree allocation、release、merge 执行和冲突 rollback。
 - [x] P1: 补 MCP adapter fake/stdio client/tool executor、Workbench protocol interface、stream DTO。
-- [ ] P1: 补 Exploration 动态组合能力；多策略探索、PlanPatchValidator、SkillService、deterministic reflector 已完成基础版。
+- [ ] P1: 补 Exploration 高级动态组合能力；多策略探索、PlanPatchValidator、SkillService、deterministic reflector 和线性 WorkflowComposer 已完成基础版。
 - [x] P2: 实现 HTTP route DTO 和 event stream DTO，为 Web/Desktop task workspace 做数据面准备。
 - [x] P2: 补 episodic memory 和 deterministic retrieval/consolidation 接口。
 - [ ] P2: 补外部 vector store-backed retrieval、background long-term consolidation、复杂事实归并策略；sparse semantic retrieval 和结构化 fact conflict detection 已完成基础版。
@@ -605,6 +607,7 @@
 - 新增 `FactConflictDetector`、`FactStatement`、`FactConflict` 和 `StructuredFactConflictDetector`。
 - `MemoryFacade` 新增 `write_semantic`、`retrieve_semantic`、`detect_fact_conflicts`，支持写入 semantic fact 时附加 conflict metadata。
 - 新增测试覆盖 semantic retrieval 排序、结构化事实冲突检测和 conflict metadata 写回。
+- 新增 `WorkflowComposer` 协议和 `DeterministicWorkflowComposer`，支持从已注册 capability/workflow refs 组合线性 `WorkflowSpec` 并可注册到 `WorkflowLibrary`。
 
 ### 2026-06-06 22:20:22 CST
 
@@ -746,7 +749,8 @@
 - 新增 `ADBMobileBackend`，兼容 GenericAgent `adb_ui.py` 的能力边界，支持设备枚举、UI dump 解析、tap、text、keyevent 和 screenshot。
 - 新增 `Win32DesktopBackend`，通过可选 desktop driver 支持窗口枚举、截图、物理坐标 click、快捷键和剪贴板粘贴输入；公共 API 不照搬个人命名。
 - 新增 `DesktopUIDetector` 协议和 `UIAStyleDesktopDetector`，将 UIA-like 控件树归一化为 control nodes 并接入 desktop `dump_ui`。
-- 后续真实平台 adapter 可继续接入具体 UIA provider 和视觉检测，不需要修改 runtime/policy/agent 层。
+- 新增 `VisionDetector` 协议和 `DriverVisionDetector`，将截图检测结果归一化为 control nodes，并接入 desktop/mobile `dump_ui`。
+- 后续真实平台 adapter 可继续接入具体 UIA provider 和 CV 模型/服务，不需要修改 runtime/policy/agent 层。
 - 新增 `AgentConnectorRouter`、`ConnectorRoute`、`RoutedConnectorTurn`，支持不同 participant 路由到不同 persistent connector/session，并把外部 session turn 写回 interaction channel。
 - 新增 `StructuredStdioAgentConnector` 和 `StdioAgentCommand`，使用 JSONL `start/message/turn/stop` 帧连接长驻 CLI shim，不依赖终端文本 marker 判断完成。
 - 新增 `ProductCLIConnectorSpec` 和 `ProductCLIConnectorFactory`，通过产品 shim 配置构建 connectors，并用多产品 JSONL shim 验证 routing。
@@ -754,6 +758,7 @@
 - 新增 `DecisionArtifactService`、`DiscussionSummarizer` 和 deterministic summarizer，将 channel 消息归纳为 decision artifact，并回写 `GroupChatSession.decision_artifact_ref`。
 - `DecisionArtifactService` 支持跨 channel 聚合，将多个 channel summary 归纳为 cross-channel decision artifact。
 - 新增 `SpeakerSelector` 协议和 round-robin/free-for-all/moderator-select selector，`GroupChatService` 通过 selector 记录 `selected_by` 和 rationale。
+- 新增 `WorkspaceMergeQueueService`，按 priority/FIFO 串行处理 approved patches，避免多 agent patch 直接抢 merge。
 - 补 host DTO: EventStreamEnvelope、TaskWorkspaceDTO、HTTPRouteSpec/default routes。
 - 补 HTTP host 写控制接口: `POST /runs/{run_id}/cancel`、`POST /runs/{run_id}/interventions`、`POST /approvals/{approval_id}/approve|reject`、`POST /tool-calls/{tool_call_id}/cancel|kill`。
 - 补 HTTP host SSE event stream: `GET /runs/{run_id}/events?format=sse` 或 `Accept: text/event-stream` 返回 `id/event/data` 帧。

@@ -4,6 +4,7 @@ from agent_kernel.domain.errors import DomainValidationError
 from agent_kernel.autonomy import (
   CompositeExplorationPlanner,
   DeterministicExplorationReflector,
+  DeterministicWorkflowComposer,
   ExplorationExecutor,
   ExplorationPlanner,
   ExplorationService,
@@ -12,6 +13,8 @@ from agent_kernel.autonomy import (
   SkillService,
   SkillEvolutionService,
   TraceDistiller,
+  WorkflowCompositionRequest,
+  WorkflowCompositionStep,
   WorkflowPatchApplier,
   WorkflowLibrary,
 )
@@ -438,6 +441,124 @@ class AutonomyTests(unittest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "Plan patch is invalid"):
       WorkflowPatchApplier().apply(patch, workflow)
+
+  def test_workflow_composer_builds_linear_tool_and_workbench_workflow(self) -> None:
+    capabilities = CapabilityRegistry()
+    capabilities.register(
+      CapabilitySpec(
+        capability_id="tool.inspect",
+        name="inspect",
+        kind="tool",
+        input_schema={},
+        output_schema={},
+        side_effect_level=SideEffectLevel.READ,
+      )
+    )
+    capabilities.register(
+      CapabilitySpec(
+        capability_id="workbench.control",
+        name="control",
+        kind="workbench",
+        input_schema={},
+        output_schema={},
+        side_effect_level=SideEffectLevel.EXTERNAL_MUTATION,
+      )
+    )
+    composer = DeterministicWorkflowComposer(capabilities=capabilities)
+
+    result = composer.compose(
+      WorkflowCompositionRequest(
+        workflow_id="wf_composed",
+        name="composed",
+        steps=[
+          WorkflowCompositionStep(step_id="inspect context", ref="tool.inspect", kind="tool"),
+          WorkflowCompositionStep(
+            step_id="browser control",
+            ref="workbench.control",
+            kind="workbench",
+            input_mapping={"url": "$.target_url"},
+          ),
+        ],
+      )
+    )
+
+    self.assertEqual(result.workflow.start_node_id, "inspect_context")
+    self.assertEqual([node.kind for node in result.workflow.nodes], ["tool", "workbench"])
+    self.assertEqual(result.workflow.nodes[1].capability_ref, "workbench.control")
+    self.assertEqual(result.workflow.edges[0].from_node, "inspect_context")
+    self.assertEqual(result.workflow.edges[0].to_node, "browser_control")
+    self.assertEqual(result.warnings, [])
+
+  def test_workflow_composer_can_reference_and_register_workflows(self) -> None:
+    conn = connect_sqlite()
+    try:
+      library = WorkflowLibrary(unit_of_work_factory(conn))
+      reusable = WorkflowSpec(
+        workflow_id="wf_reusable",
+        version="0.1.0",
+        name="reusable",
+        input_schema={},
+        output_schema={},
+        nodes=[NodeSpec(node_id="start", kind="noop")],
+        edges=[],
+        start_node_id="start",
+      )
+      library.register_workflow(reusable)
+      composer = DeterministicWorkflowComposer(workflow_library=library)
+
+      result = composer.compose(
+        WorkflowCompositionRequest(
+          workflow_id="wf_parent",
+          name="parent",
+          register=True,
+          steps=[
+            WorkflowCompositionStep(
+              step_id="reuse",
+              ref=WorkflowLibrary.workflow_ref(reusable),
+              kind="workflow",
+            )
+          ],
+        )
+      )
+
+      self.assertEqual(result.workflow_ref, "workflow://wf_parent/0.1.0")
+      self.assertIsNotNone(library.get_workflow(result.workflow_ref))
+      self.assertEqual(result.workflow.nodes[0].kind, "workflow")
+      self.assertEqual(result.workflow.nodes[0].capability_ref, "workflow://wf_reusable/0.1.0")
+    finally:
+      conn.close()
+
+  def test_workflow_composer_rejects_missing_or_mismatched_capability(self) -> None:
+    capabilities = CapabilityRegistry()
+    capabilities.register(
+      CapabilitySpec(
+        capability_id="tool.inspect",
+        name="inspect",
+        kind="tool",
+        input_schema={},
+        output_schema={},
+        side_effect_level=SideEffectLevel.READ,
+      )
+    )
+    composer = DeterministicWorkflowComposer(capabilities=capabilities)
+
+    with self.assertRaisesRegex(KeyError, "workbench.missing"):
+      composer.compose(
+        WorkflowCompositionRequest(
+          workflow_id="wf_missing_cap",
+          name="missing",
+          steps=[WorkflowCompositionStep(step_id="missing", ref="workbench.missing", kind="workbench")],
+        )
+      )
+
+    with self.assertRaisesRegex(ValueError, "expected workbench"):
+      composer.compose(
+        WorkflowCompositionRequest(
+          workflow_id="wf_mismatch",
+          name="mismatch",
+          steps=[WorkflowCompositionStep(step_id="inspect", ref="tool.inspect", kind="workbench")],
+        )
+      )
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ from agent_kernel.agents.workspace import (
   PatchReviewBackend,
   WorkspaceBackend,
   WorkspaceIsolationService,
+  WorkspaceMergeQueueService,
 )
 
 __all__ = [
@@ -94,6 +95,7 @@ __all__ = [
   "TaskBoardService",
   "WorkspaceBackend",
   "WorkspaceIsolationService",
+  "WorkspaceMergeQueueService",
   "build_mailbox_message",
   "oneshot_agent_spec",
 ]

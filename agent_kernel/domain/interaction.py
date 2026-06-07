@@ -191,6 +191,19 @@ class ReviewRecord(DomainModel):
 
 
 @dataclass(slots=True)
+class MergeQueueItem(DomainModel):
+  queue_item_id: str
+  patch_id: str
+  task_id: str
+  priority: int = 100
+  status: Literal["queued", "merging", "merged", "failed", "cancelled"] = "queued"
+  merged_artifact_ref: ArtifactRef | None = None
+  error: str | None = None
+  created_at: datetime = field(default_factory=utc_now)
+  updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class HandoffRecord(DomainModel):
   handoff_id: str
   task_id: str
