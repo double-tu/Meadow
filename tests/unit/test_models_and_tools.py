@@ -7,7 +7,15 @@ from agent_kernel.capabilities.adapters import LocalToolExecutor
 from agent_kernel.config import LLMConfig
 from agent_kernel.domain.capability import ToolResult
 from agent_kernel.domain.context import ModelContext
-from agent_kernel.models import AnthropicMessagesProvider, GeminiProvider, MockModelProvider, ModelGateway, OpenAICompatibleProvider
+from agent_kernel.models import (
+  AnthropicMessagesProvider,
+  GeminiProvider,
+  MockModelProvider,
+  ModelContextSanitizer,
+  ModelGateway,
+  ModelToolProtocolAdapter,
+  OpenAICompatibleProvider,
+)
 
 
 class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
@@ -24,6 +32,50 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(result, {"content": "ok"})
     self.assertEqual(len(provider.calls), 1)
+
+  def test_model_context_sanitizer_merges_and_drops_invalid_leading_messages(self) -> None:
+    sanitizer = ModelContextSanitizer()
+
+    context = sanitizer.sanitize(
+      ModelContext(
+        messages=[
+          {"role": "assistant", "content": "orphan"},
+          {"role": "system", "content": "rules"},
+          {"role": "weird", "content": "first user"},
+          {"role": "user", "content": "second user"},
+          {"role": "assistant", "content": "answer"},
+          {"role": "assistant", "content": "more"},
+        ]
+      )
+    )
+
+    self.assertEqual(context.messages[0], {"role": "system", "content": "rules"})
+    self.assertEqual(context.messages[1], {"role": "user", "content": "first user\nsecond user"})
+    self.assertEqual(context.messages[2], {"role": "assistant", "content": "answer\nmore"})
+
+  def test_model_tool_protocol_adapter_parses_text_tool_use_blocks(self) -> None:
+    adapter = ModelToolProtocolAdapter()
+
+    adapted = adapter.adapt(
+      {
+        "content": (
+          "<summary>准备请求网页</summary>\n"
+          '<tool_use>{"name":"http_request","arguments":{"url":"https://example.test"}}</tool_use>'
+        )
+      }
+    )
+
+    self.assertEqual(adapted.result["tool_calls"][0]["name"], "http_request")
+    self.assertEqual(adapted.result["tool_calls"][0]["input"]["url"], "https://example.test")
+    self.assertNotIn("<tool_use>", adapted.result["output"]["content"])
+
+  def test_model_tool_protocol_adapter_reports_bad_text_tool_json(self) -> None:
+    adapter = ModelToolProtocolAdapter()
+
+    adapted = adapter.adapt({"content": '<tool_use>{"name":"http_request","arguments":</tool_use>'})
+
+    self.assertEqual(adapted.result["protocol_errors"][0]["type"], "tool_json_parse_error")
+    self.assertNotIn("tool_calls", adapted.result)
 
   async def test_local_tool_executor_returns_tool_result(self) -> None:
     executor = LocalToolExecutor()

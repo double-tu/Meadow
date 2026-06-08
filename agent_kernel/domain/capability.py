@@ -19,6 +19,52 @@ class SideEffectLevel(StrEnum):
   EXTERNAL_MUTATION = "external_mutation"
 
 
+class CapabilityConcurrency(StrEnum):
+  SAFE = "safe"
+  OWNER_SCOPED = "owner_scoped"
+  EXCLUSIVE = "exclusive"
+
+
+class CapabilityInterruptBehavior(StrEnum):
+  CONTINUE = "continue"
+  CANCEL_CHILDREN = "cancel_children"
+  REQUIRE_RESUME = "require_resume"
+  TERMINAL = "terminal"
+
+
+@dataclass(slots=True)
+class CapabilityRenderHint(DomainModel):
+  display_name: str | None = None
+  progress_label: str | None = None
+  result_label: str | None = None
+  icon: str | None = None
+  collapsed_by_default: bool = True
+
+
+@dataclass(slots=True)
+class CapabilityExecutionPolicy(DomainModel):
+  read_only: bool = False
+  destructive: bool = False
+  concurrency: CapabilityConcurrency | str = CapabilityConcurrency.EXCLUSIVE
+  requires_user_interaction: bool = False
+  interrupt_behavior: CapabilityInterruptBehavior | str = CapabilityInterruptBehavior.CONTINUE
+  progress_schema: dict[str, Any] = field(default_factory=dict)
+  output_compaction_policy: dict[str, Any] = field(default_factory=dict)
+  permission_preview: dict[str, Any] = field(default_factory=dict)
+  resource_locks: list[str] = field(default_factory=list)
+  render_hint: CapabilityRenderHint = field(default_factory=CapabilityRenderHint)
+
+  def __post_init__(self) -> None:
+    if isinstance(self.concurrency, str):
+      self.concurrency = CapabilityConcurrency(self.concurrency)
+    if isinstance(self.interrupt_behavior, str):
+      self.interrupt_behavior = CapabilityInterruptBehavior(self.interrupt_behavior)
+
+  @property
+  def concurrency_safe(self) -> bool:
+    return self.concurrency is CapabilityConcurrency.SAFE
+
+
 @dataclass(slots=True)
 class CapabilitySpec(DomainModel):
   capability_id: str
@@ -31,10 +77,29 @@ class CapabilitySpec(DomainModel):
   supports_streaming: bool = False
   supports_idempotency: bool = False
   required_grant: str | None = None
+  execution_policy: CapabilityExecutionPolicy = field(default_factory=CapabilityExecutionPolicy)
 
   def __post_init__(self) -> None:
     if isinstance(self.side_effect_level, str):
       self.side_effect_level = SideEffectLevel(self.side_effect_level)
+    if isinstance(self.execution_policy, dict):
+      self.execution_policy = CapabilityExecutionPolicy(**self.execution_policy)
+    if self.side_effect_level is SideEffectLevel.NONE:
+      self.execution_policy.read_only = self.execution_policy.read_only or True
+    if self.side_effect_level in {SideEffectLevel.WRITE, SideEffectLevel.EXEC, SideEffectLevel.EXTERNAL_MUTATION}:
+      self.execution_policy.destructive = self.execution_policy.destructive or self.side_effect_level is not SideEffectLevel.WRITE
+
+  @property
+  def is_read_only(self) -> bool:
+    return self.execution_policy.read_only or self.side_effect_level in {SideEffectLevel.NONE, SideEffectLevel.READ, SideEffectLevel.NETWORK}
+
+  @property
+  def is_concurrency_safe(self) -> bool:
+    return self.execution_policy.concurrency_safe
+
+  @property
+  def requires_user_interaction(self) -> bool:
+    return self.execution_policy.requires_user_interaction
 
 
 @dataclass(slots=True)

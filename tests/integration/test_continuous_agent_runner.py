@@ -265,6 +265,14 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         second_messages = provider.calls[1][1].messages
+        anchor_messages = [
+          message
+          for message in second_messages
+          if isinstance(message.get("content"), dict) and message["content"].get("type") == "working_memory_anchor"
+        ]
+        self.assertTrue(anchor_messages)
+        self.assertEqual(anchor_messages[-1]["content"]["original_user_goal"], "打开小红书并查看推送内容")
+        self.assertIn("turn 1: workspace_read ok", anchor_messages[-1]["content"]["action_history"])
         self.assertEqual(second_messages[-2]["content"], "打开小红书并查看推送内容")
         tool_result_content = second_messages[-1]["content"]
         self.assertEqual(tool_result_content["original_user_goal"], "打开小红书并查看推送内容")
@@ -363,6 +371,140 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       retry_content = provider.calls[1][1].messages[-1]["content"]
       self.assertEqual(retry_content["type"], "model_repair")
       self.assertIn("Blank response", retry_content["instruction"])
+    finally:
+      conn.close()
+
+  async def test_runner_executes_text_tool_use_protocol_blocks(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider(http_client=_StaticHTTPClient())
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_text_tool_http",
+              capability_id="atom.http.request",
+              run_id="run_text_tool_protocol",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(
+        responses=[
+          {
+            "content": (
+              "<summary>准备请求网页</summary>\n"
+              '<tool_use>{"name":"http_request","arguments":{"url":"https://www.xiaohongshu.com/explore"}}</tool_use>'
+            )
+          },
+          {"finish": True, "output": {"content": "已根据工具结果完成。"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="用文本工具协议请求页面",
+        run_id="run_text_tool_protocol",
+        scope="scope_text_tool_protocol",
+        config=ContinuousRunnerConfig(max_turns=4),
+      )
+
+      self.assertEqual(result.status, "completed")
+      self.assertEqual(result.tool_calls[0].name, "http_request")
+      self.assertTrue(result.tool_calls[0].ok)
+      self.assertEqual(result.output["content"], "已根据工具结果完成。")
+    finally:
+      conn.close()
+
+  async def test_runner_repairs_invalid_text_tool_protocol(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(registry, PolicyEngine(grants=[]), local_tools, uow_factory=uow_factory)
+      provider = MockModelProvider(
+        responses=[
+          {"content": '<tool_use>{"name":"http_request","arguments":</tool_use>'},
+          {"finish": True, "output": {"content": "已重新生成有效回复。"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="测试坏工具协议修复",
+        run_id="run_bad_text_tool_protocol",
+        scope="scope_bad_text_tool_protocol",
+        config=ContinuousRunnerConfig(max_turns=4),
+      )
+
+      self.assertEqual(result.status, "completed")
+      retry_content = provider.calls[1][1].messages[-1]["content"]
+      self.assertEqual(retry_content["diagnostics"]["reason"], "tool_protocol_error")
+      self.assertIn("valid JSON", retry_content["instruction"])
+    finally:
+      conn.close()
+
+  async def test_runner_repairs_truncated_no_tool_result_before_finishing(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(registry, PolicyEngine(grants=[]), local_tools, uow_factory=uow_factory)
+      provider = MockModelProvider(
+        responses=[
+          {"finish": True, "output": {"content": "中间结果还没完成 max_tokens !!!]"}, "finish_reason": "max_tokens"},
+          {"finish": True, "output": {"content": "分步恢复后的结果"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="帮我执行一个不能半途截断的任务",
+        run_id="run_truncated_model_result",
+        scope="scope_truncated_model_result",
+        config=ContinuousRunnerConfig(max_turns=4),
+      )
+
+      self.assertEqual(result.status, "completed")
+      self.assertEqual(result.output["content"], "分步恢复后的结果")
+      retry_content = provider.calls[1][1].messages[-1]["content"]
+      self.assertEqual(retry_content["diagnostics"]["reason"], "max_tokens_limit")
+      self.assertIn("smaller steps", retry_content["instruction"])
     finally:
       conn.close()
 
@@ -607,7 +749,15 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
           }
         ]
       }
-      provider = MockModelProvider(responses=[repeated_response, repeated_response, repeated_response, repeated_response])
+      provider = MockModelProvider(
+        responses=[
+          repeated_response,
+          repeated_response,
+          repeated_response,
+          repeated_response,
+          {"finish": True, "output": {"content": "已停止重复读取，并说明了阻塞原因。"}},
+        ]
+      )
       gateway = ModelGateway()
       gateway.register_provider("mock", provider)
       runner = ContinuousAgentRunner(
@@ -624,8 +774,12 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         config=ContinuousRunnerConfig(max_turns=8),
       )
 
-      self.assertEqual(result.status, "max_turns_exceeded")
+      self.assertEqual(result.status, "completed")
+      self.assertEqual(result.output["content"], "已停止重复读取，并说明了阻塞原因。")
       self.assertEqual(result.tool_calls[-1].error["type"], "repeated_tool_call_guard")
+      repair_content = provider.calls[4][1].messages[-1]["content"]
+      self.assertEqual(repair_content["results"][-1]["error"]["type"], "repeated_tool_call_guard")
+      self.assertIn("Repeated identical tool call was blocked", repair_content["results"][-1]["repair_hint"])
       with UnitOfWork(conn) as uow:
         persisted_calls = uow.tool_calls.list_by_run("run_repeated_guard")
       self.assertEqual(len(persisted_calls), 3)

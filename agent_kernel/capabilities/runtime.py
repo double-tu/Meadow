@@ -17,6 +17,7 @@ from agent_kernel.capabilities.adapters.mcp import MCPToolExecutor
 from agent_kernel.capabilities.adapters.process import ProcessToolExecutor
 from agent_kernel.capabilities.adapters.workbench import WorkbenchClient, WorkbenchCommand
 from agent_kernel.capabilities.registry import CapabilityRegistry
+from agent_kernel.capabilities.control_safety import ComputerUseSafetyGate, ControlSafetyDecisionType
 from agent_kernel.domain.base import new_id, utc_now
 from agent_kernel.domain.capability import ToolResult
 from agent_kernel.domain.states import ToolCallStatus
@@ -56,6 +57,7 @@ class CapabilityRuntime:
     mcp_tools: MCPToolExecutor | None = None,
     control_workbench: ControlWorkbench | None = None,
     workbench_client: WorkbenchClient | None = None,
+    control_safety_gate: ComputerUseSafetyGate | None = None,
     audit_sink: AuditSink | None = None,
     uow_factory=None,
   ) -> None:
@@ -66,6 +68,7 @@ class CapabilityRuntime:
     self._mcp_tools = mcp_tools
     self._control_workbench = control_workbench
     self._workbench_client = workbench_client
+    self._control_safety_gate = control_safety_gate
     self._audit_sink = audit_sink
     self._uow_factory = uow_factory
 
@@ -218,6 +221,17 @@ class CapabilityRuntime:
     target_id = input.get("target_id")
     timeout_seconds = input.get("timeout_seconds")
     try:
+      if self._control_safety_gate is not None:
+        safety = self._control_safety_gate.decide(
+          action=str(action),
+          target_kind=str(target_kind),
+          payload=payload,
+          context=payload.get("safety_context") if isinstance(payload.get("safety_context"), dict) else {},
+        )
+        if safety.type is ControlSafetyDecisionType.DENY:
+          return ToolResult(ok=False, error={"type": "control_safety_denied", "message": safety.reason, "metadata": safety.metadata})
+        if safety.type is ControlSafetyDecisionType.REQUIRE_APPROVAL:
+          return ToolResult(ok=False, error={"type": "control_safety_requires_approval", "message": safety.reason, "metadata": safety.metadata})
       if action == "list_targets":
         kind = target_kind if target_kind in {"browser", "desktop", "mobile"} else None
         targets = [target.to_dict() for target in self._control_workbench.list_targets(kind)]

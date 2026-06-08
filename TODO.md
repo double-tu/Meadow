@@ -16,7 +16,7 @@
 
 - [x] 编写七层上下文与记忆架构/代码设计文档: `docs/context-memory-architecture.md`。
 - [x] 编写核心 Agent 上下文与 Skill/SOP 架构文档: `docs/core-agent-context-architecture.md`, 吸收 GenericAgent 的 L0/L1/L3 分层思想, 但映射到 Meadow 的 `ContextAssembler`、`SkillService`、`MemoryFacade` 和 `CapabilityRuntime`。
-- [ ] 实现 `CoreAgentContextProvider` MVP: 默认注入核心宪法、失败升级规则、能力导航索引、渐进式 Skill/SOP 披露规则, 并保持短上下文。
+- [x] 实现 `CoreAgentContextProvider` MVP: 默认注入核心宪法、失败升级规则、能力导航索引、渐进式 Skill/SOP 披露规则, 并保持短上下文。
 - [ ] 建立 Meadow Skill/SOP 模板契约: SkillCard 负责索引, SkillSpec 负责流程, SkillResource 负责脚本/模板/长参考；默认上下文只加载 Card 与能力导航。
 - [ ] 补齐内置 SOP Skill 集: memory_governance、browser_research、planning、delegation、review、verification；先以 SkillSpec/instructions 落地, 后续迁移为 SkillResource。
 - [x] 实现 `ContextAssembler` 与 `ContextBudgetManager`: 支持 System/Policy、Agent Profile、Skill/Tool Index、Working Memory、Conversation Window、Episodic/Event/Artifact、Long-term Semantic/Procedural 七层组装。
@@ -26,6 +26,12 @@
 - [ ] 实现 SkillResource 按需打开: 支持脚本、参考文件、模板、compiled workflow 细节分层读取。
 - [x] 实现 artifact 内容读取 adapter MVP: `artifact_read` 可读取 metadata 内联 content/body/text/payload，或经授权 `FileWorkspace` 读取 `file://`/本地路径，并支持 start/count/keyword 窗口化输出；对象存储、截图/blob、多媒体 adapter 仍待补。
 - [x] 将 `ContinuousAgentRunner` 与日常对话接入 `ContextAssembler`，保留旧 `ContextManager` 兼容路径。
+- [x] 实现 GenericAgent 风格运行时锚点 MVP: `ContinuousAgentRunner` 每轮注入 `working_memory_anchor`, 折叠历史、保留原始用户目标、action_history 和当前 turn, 避免连续对话/工具回灌后丢失任务语境。
+- [x] 实现模型协议适配/上下文清洗 MVP: 新增 `ModelContextSanitizer` 与 `ModelToolProtocolAdapter`, 支持清理非法消息序列、解析原生/JSON/text `<tool_use>` 工具调用, 并把坏工具协议作为 repair 诊断回灌模型。
+- [x] 增强 Capability 运行时协议底座: `CapabilitySpec` 新增 `CapabilityExecutionPolicy`、并发安全、只读/破坏性、用户交互、中断行为、进度/压缩/UI render hint/resource locks 元数据; 新增 `CapabilityProtocolDescriber` 与 `CapabilityBatchPlanner`, 为后续 streaming tool executor、UI 折叠过程和并发调度提供接口。
+- [x] 实现模型健康与 fallback router MVP: 新增 `ModelHealthRouter`/`ModelRoute`/failure classifier, `ModelGateway` 支持可选健康路由, 记录空回复、协议错误、截断、超时和 provider error, 不传 router 时保持旧行为。
+- [x] 实现压缩后状态重注入协议: 新增 `PostCompactStateReinjector` 与 `ReinjectableState`, 可在 compact/resume 后重新注入 objective、plan、active skill/task/run/workbench、browser target、approval、question、failure、action_history 和 artifact refs。
+- [x] 实现 append-only transcript/sidechain 基础: 新增 `FileTranscriptStore`、`TranscriptEntry`、`TranscriptResumeService`, 支持主 transcript、agent sidechain、tail metadata refresh 和 resume 读取。
 - [x] 实现会话历史压缩与摘要 memory MVP: `ConversationHistoryCompactor` 将旧 user/assistant 消息写入 episodic memory，DesktopChatService 在模型调用前自动触发并记录 compacted message ids。
 - [x] 实现后台 MemoryCurator MVP: `MemoryCurator.curate_run` 从工具/Agent/Workbench/候选事件写 run episodic summary，并复用 `MemoryEvolutionSettlementService` 结算 semantic/procedural memory。
 - [ ] 实现 MemoryCurator 调度 worker/API: 当前为可调用服务，尚未接入后台定时/队列/HTTP 控制入口。
@@ -47,7 +53,18 @@
 - [ ] 深化浏览器页面观察与 artifact handoff: 增强主内容抽取、动态页面滚动/分页、Feed/card 结构化抽取、搜索结果候选去噪、来源页正文窗口化读取, 并把大页面内容保存为 artifact ref 而不是直接塞入 event/context。
 - [ ] 增强 Web Research SOP 执行闭环验收: 日常对话中模型能先 scan tabs, 再搜索/打开候选结果页, 至少核验多个公开来源后回答; 工具失败时能基于 SOP 自动换链接、换搜索入口或退回 HTTP。
 - [x] 增加 ContinuousAgentRunner 重复工具调用保护 MVP: 对同一 capability + 稳定输入连续重复超过阈值时返回 guard 结果, 防止模型在浏览器/HTTP 失败或标签漂移时无限循环。
-- [x] 对齐 GenericAgent `no_tool` 空回复处理: 模型未调用工具且空/不可展示时不再直接完成, 而是把 `[System] Blank response` 修复提示回灌重试; 连续 3 次仍空才失败退出并带 run/turn/模型结果键诊断。
+- [x] 对齐 GenericAgent 重复工具调用修复流: repeated_tool_call_guard 不再立即结束整次任务, 而是作为失败观察回灌给模型, 要求探测真实状态、换输入/工具/来源、打开 Skill/SOP 或请求用户; 轮次耗尽时再输出诊断兜底。
+- [x] 对齐 GenericAgent `no_tool` 修复处理: 模型未调用工具且空/不可展示时不再直接完成, 而是把 `[System] Blank response` 修复提示回灌重试; 流中断、max_tokens 截断、大代码块未调用工具也进入修复回灌; 连续 3 次仍空才失败退出并带 run/turn/模型结果键诊断。
+- [x] 实现 AgentMailbox/InterventionChannel 协议 MVP: 新增 `AgentProtocolMessage`、`AgentInterventionChannel`, 将 message/keyinfo/intervention/stop/pause/resume/status/permission request-response 泛化为结构化 mailbox payload。
+- [x] 实现 Coordinator/Worker 协议 MVP: 新增 `CoordinatorProfile` 和 `WorkerTaskNotification`, 支持主 Agent 以 coordinator 身份调度 worker, worker 完成/失败/被杀以结构化 task notification 回灌模型。
+- [x] 实现子 Agent 权限桥协议 MVP: 新增 `LeaderPermissionBridge` 和 `DelegatedPermissionRequest`, 支持子 Agent 权限请求冒泡到 parent/leader 并形成结构化响应。
+- [x] 实现 MCP 治理基础: 新增 `MCPToolDescriptionLimiter`、`MCPAuthFailureCache`、`MCPConnectionBatchPolicy`、MCP 工具命名和 session expired 检测, 为生产级 MCP 连接治理提供接口。
+- [x] 实现 Computer Use 安全门 MVP: 新增 `ComputerUseSafetyGate` 与 `ControlSafetyPolicy`, 支持 enable/deny app、app permission tier、危险快捷键拦截、输入前 fresh screenshot 要求, 并轻量接入 `CapabilityRuntime` control path。
+- [x] 实现过程可观测 DTO MVP: 新增 `ProcessVisibilityProjector`, 将 tool call、agent delegation、workbench、approval、context events 投影为 UI 可折叠 activity rows。
+- [ ] 深化模型健康路由: provider fallback 需要接入真实配置中心、per-agent binding、成本/延迟健康指标、自动 escalated max_tokens retry 和用户可视化。
+- [ ] 实现 side-question/旁路询问能力: 用户可在长任务运行中询问进展或旁路问题, 基于快照上下文单轮回答, 不写入主线历史、不打断任务。
+- [ ] 深化 AgentMailbox/InterventionChannel: 接入持久化投递、未读轮询、agent loop 消费、run pause/resume/cancel、工作台 channel 和 UI 操作。
+- [ ] 实现 Plan/Verify SOP Skill: 复杂任务支持探索 subagent、用户确认、执行计划、独立验证 subagent 和修复循环, 不在 runner 硬编码流程。
 - [x] 对齐 GenericAgent 周期性无效重试提醒: 工具结果回灌中加入 action_history, 每 7/75 轮注入换策略/探测真实状态/请求用户输入提示, 不让模型无新信息循环。
 - [x] 增强浏览器工具结果兜底摘要: `browser_execute_js` 返回 `result.data`、`result.js_return` 或卡片数组时, runner 可抽取 title/text/url/author/time/metrics 生成可展示推荐/页面观察, 避免“工具做了事但最终无内容”。
 - [x] 实现 Skill-aware 模型可见工具面收敛 MVP: `SkillAwareToolSurfacePolicy` 基于用户目标和 SkillCard/recommended_tools 每轮裁剪 tool schemas, 少量显式自定义 Skill 保留, 无匹配时保守回退全量工具。

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any, Literal
 
 from agent_kernel.capabilities.atomic import AtomicToolCatalog
@@ -20,8 +21,10 @@ from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
 from agent_kernel.domain.serialization import to_json
 from agent_kernel.domain.skill import SkillCard
 from agent_kernel.agents.goal_evidence import GoalEvidenceVerifier
+from agent_kernel.agents.run_anchor import RunAnchor
 from agent_kernel.agents.tool_surface import SkillAwareToolSurfacePolicy, ToolSurfacePolicy, ToolSurfaceSelection
 from agent_kernel.models.gateway import ModelGateway
+from agent_kernel.models.protocol import ModelContextSanitizer, ModelToolProtocolAdapter
 from agent_kernel.policy.engine import PolicyDecisionType
 
 
@@ -71,6 +74,8 @@ class ContinuousAgentRunner:
     skills: list[SkillCard] | None = None,
     tool_surface_policy: ToolSurfacePolicy | None = None,
     goal_evidence_verifier: GoalEvidenceVerifier | None = None,
+    context_sanitizer: ModelContextSanitizer | None = None,
+    tool_protocol_adapter: ModelToolProtocolAdapter | None = None,
     system_instructions: str | None = None,
   ) -> None:
     self._uow_factory = uow_factory
@@ -82,6 +87,8 @@ class ContinuousAgentRunner:
     self._skills = skills or []
     self._tool_surface_policy = tool_surface_policy or SkillAwareToolSurfacePolicy()
     self._goal_evidence_verifier = goal_evidence_verifier or GoalEvidenceVerifier()
+    self._context_sanitizer = context_sanitizer or ModelContextSanitizer()
+    self._tool_protocol_adapter = tool_protocol_adapter or ModelToolProtocolAdapter()
     self._system_instructions = system_instructions or _DEFAULT_SYSTEM_INSTRUCTIONS
 
   async def run(
@@ -99,6 +106,10 @@ class ContinuousAgentRunner:
     run_id = run_id or new_id("conv_run")
     scope = scope or run_id
     messages: list[dict[str, Any]] = self._initial_messages(user_message, history_messages or [])
+    run_anchor = RunAnchor.from_messages(
+      original_user_goal=user_message,
+      history_messages=history_messages or [],
+    )
     all_tool_calls: list[ContinuousToolCallRecord] = []
     action_history: list[str] = []
     finalization_instruction: str | None = None
@@ -124,12 +135,28 @@ class ContinuousAgentRunner:
           allowed_tool_names=[],
           rationale="goal_evidence_satisfied",
         )
-      context = self._build_context(run_id, scope, config.model_ref, messages, tool_surface)
-      model_result = await self._model_gateway.complete(config.provider_name, config.model_ref, context)
-      model_result = self._normalize_model_result(model_result)
-      tool_calls = self._extract_tool_calls(model_result)
+      context = self._build_context(
+        run_id,
+        scope,
+        config.model_ref,
+        messages,
+        tool_surface,
+        run_anchor=run_anchor,
+        turn=turn,
+        action_history=action_history,
+      )
+      context = self._context_sanitizer.sanitize(context)
+      adaptation = self._tool_protocol_adapter.adapt(
+        await self._model_gateway.complete(config.provider_name, config.model_ref, context)
+      )
+      model_result = adaptation.result
+      tool_calls = self._tool_protocol_adapter.extract_tool_calls(model_result)
       if not tool_calls:
-        output = self._finish_output(model_result, all_tool_calls, turn=turn)
+        repair_output = _protocol_error_output(model_result, turn=turn) or _repairable_no_tool_output(model_result, turn=turn)
+        if all_tool_calls and _is_blank_no_tool_diagnostic(repair_output):
+          output = self._finish_output(model_result, all_tool_calls, turn=turn)
+        else:
+          output = repair_output or self._finish_output(model_result, all_tool_calls, turn=turn)
         if _is_empty_model_diagnostic(output):
           empty_model_result_count += 1
           self._append_turn_event(run_id, agent_id, task_id, turn, output, [])
@@ -153,15 +180,18 @@ class ContinuousAgentRunner:
                 "empty_response_count": empty_model_result_count,
                 "diagnostics": output.get("diagnostics", {}),
                 "instruction": (
-                  "[System] Blank response. Regenerate and continue the original task. "
+                  str((output.get("diagnostics") or {}).get("instruction") or "[System] Blank response. Regenerate and continue the original task.")
+                  + " "
                   "If tools are needed, call the next appropriate tool. If the task is impossible, "
-                  "return a concise final answer explaining the concrete blocker and evidence."
+                  "return a concise final answer explaining the concrete blocker and evidence. "
+                  "Use working_memory_anchor to preserve continuity."
                 ),
               },
             },
           ]
           continue
         self._append_turn_event(run_id, agent_id, task_id, turn, output, [])
+        run_anchor.record_turn(model_result=model_result, records=[])
         return ContinuousRunnerResult(
           run_id=run_id,
           status="completed",
@@ -198,16 +228,20 @@ class ContinuousAgentRunner:
             },
           )
           turn_records.append(warning_record)
-          all_tool_calls.extend(turn_records)
-          output = _fallback_output_from_tool_calls(all_tool_calls)
-          self._append_turn_event(run_id, agent_id, task_id, turn, output, turn_records)
-          return ContinuousRunnerResult(
-            run_id=run_id,
-            status="max_turns_exceeded",
-            turns=turn,
-            output=output,
-            tool_calls=all_tool_calls,
+          tool_messages.append(
+            {
+              "tool_name": call.display_name,
+              "capability_id": call.capability_id,
+              "ok": False,
+              "output": {},
+              "error": warning_record.error,
+              "repair_hint": (
+                "Repeated identical tool call was blocked. Inspect the actual state, change inputs, "
+                "switch tool/source, open the relevant Skill/SOP, or ask the user with the concrete blocker."
+              ),
+            }
           )
+          continue
         outcome = await self._capability_runtime.call(
           call.capability_id,
           call.input,
@@ -267,6 +301,7 @@ class ContinuousAgentRunner:
         )
       all_tool_calls.extend(turn_records)
       action_history.extend(_summarize_turn_records(turn_records, turn=turn))
+      run_anchor.record_turn(model_result=model_result, records=turn_records)
       evidence = self._goal_evidence_verifier.evaluate(user_message, all_tool_calls)
       finalization_instruction = evidence.instruction if evidence.satisfied else None
       self._append_turn_event(
@@ -292,6 +327,7 @@ class ContinuousAgentRunner:
               "Continue working on original_user_goal. If the goal is not completed yet, call the next required tool. "
               "Do not finish by only summarizing intermediate inspection results unless they fully satisfy the original goal. "
               "Use action_history to avoid repeating failed or already-completed steps. "
+              "Use working_memory_anchor to preserve continuity across user replies and tool-result turns. "
               "Follow the relevant Skill/SOP instructions when a selected or active Skill applies. "
               + (
                 finalization_instruction
@@ -382,15 +418,23 @@ class ContinuousAgentRunner:
     model_ref: str,
     messages: list[dict[str, Any]],
     tool_surface: ToolSurfaceSelection,
+    *,
+    run_anchor: RunAnchor,
+    turn: int,
+    action_history: list[str],
   ) -> ModelContext:
     tool_schemas = tool_surface.tool_schemas
+    anchored_messages = [
+      run_anchor.render_message(current_turn=turn, action_history=action_history),
+      *messages,
+    ]
     if self._context_assembler is not None:
       return self._context_assembler.assemble(
         ContextAssemblyRequest(
           run_id=run_id,
           scope=scope,
           model_ref=model_ref,
-          messages=messages,
+          messages=anchored_messages,
           system_instructions=self._system_instructions,
           skills=tool_surface.skills,
           tool_schemas=tool_schemas,
@@ -401,7 +445,7 @@ class ContinuousAgentRunner:
       {"role": "system", "content": self._system_instructions},
       *self._tool_surface_messages(tool_surface),
       *self._skill_messages(tool_surface.skills),
-      *messages,
+      *anchored_messages,
     ]
     if self._context_manager is None:
       return ModelContext(messages=model_messages, tool_schemas=tool_schemas)
@@ -414,56 +458,6 @@ class ContinuousAgentRunner:
     )
     context.tool_schemas = tool_schemas
     return context
-
-  @staticmethod
-  def _normalize_model_result(result: dict[str, object]) -> dict[str, Any]:
-    if any(key in result for key in ("finish", "output", "tool_calls", "command")):
-      return dict(result)
-    content = result.get("content")
-    if not isinstance(content, str):
-      return dict(result)
-    try:
-      parsed = json.loads(content)
-    except json.JSONDecodeError:
-      return {"finish": True, "output": {"content": content}}
-    return parsed if isinstance(parsed, dict) else {"finish": True, "output": {"content": content}}
-
-  @classmethod
-  def _extract_tool_calls(cls, result: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_calls = result.get("tool_calls")
-    if isinstance(raw_calls, list):
-      calls = []
-      for raw in raw_calls:
-        parsed = cls._parse_tool_call(raw)
-        if parsed is not None:
-          calls.append(parsed)
-      return calls
-    command = result.get("command")
-    if isinstance(command, dict) and command.get("type") == "tool":
-      name = command.get("name") or command.get("target")
-      payload = command.get("input") or command.get("payload") or {}
-      if isinstance(name, str) and isinstance(payload, dict):
-        return [{"name": name, "input": payload}]
-    return []
-
-  @staticmethod
-  def _parse_tool_call(raw: object) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
-      return None
-    name = raw.get("name")
-    payload = raw.get("input", raw.get("arguments", {}))
-    function = raw.get("function")
-    if isinstance(function, dict):
-      name = function.get("name", name)
-      payload = function.get("arguments", payload)
-    if isinstance(payload, str):
-      try:
-        payload = json.loads(payload)
-      except json.JSONDecodeError:
-        payload = {"value": payload}
-    if not isinstance(name, str) or not isinstance(payload, dict):
-      return None
-    return {"name": name, "input": payload}
 
   @staticmethod
   def _finish_output(
@@ -784,9 +778,112 @@ def _diagnostic_output_for_empty_model_result(result: dict[str, Any], *, turn: i
   }
 
 
+def _protocol_error_output(result: dict[str, Any], *, turn: int | None = None) -> dict[str, Any] | None:
+  errors = result.get("protocol_errors")
+  if not isinstance(errors, list) or not errors:
+    return None
+  turn_text = f"第 {turn} 轮" if turn is not None else "当前轮"
+  return {
+    "content": (
+      f"日常 Agent 在{turn_text}输出了无法解析的工具调用协议。\n"
+      "系统已把协议错误回灌给模型重新生成合法工具调用或给出明确阻塞原因。"
+    ),
+    "diagnostics": {
+      "type": "empty_model_result",
+      "reason": "tool_protocol_error",
+      "turn": turn,
+      "protocol_errors": errors[:3],
+      "instruction": (
+        "[System] The previous tool call protocol was invalid. Regenerate the tool call using valid JSON "
+        "arguments for one of the exposed tools, or provide a concise final answer with the concrete blocker."
+      ),
+      "model_result_keys": sorted(str(key) for key in result.keys()),
+    },
+  }
+
+
+def _repairable_no_tool_output(result: dict[str, Any], *, turn: int | None = None) -> dict[str, Any] | None:
+  content = _model_result_text(result)
+  reason: str | None = None
+  instruction = "[System] Blank response. Regenerate and continue the original task."
+  if not content.strip():
+    return _diagnostic_output_for_empty_model_result(result, turn=turn)
+  tail = content[-160:]
+  finish_reason = str(result.get("finish_reason") or result.get("stop_reason") or "")
+  if "[!!! 流异常中断" in tail or "!!!Error:" in tail:
+    reason = "stream_interrupted"
+    instruction = "[System] Incomplete response. Regenerate and continue with tool use or a concrete blocker."
+  elif "max_tokens !!!]" in tail or finish_reason in {"length", "max_tokens"}:
+    reason = "max_tokens_limit"
+    instruction = "[System] max_tokens limit reached. Continue in smaller steps and use tools/artifacts for large content."
+  elif _looks_like_unexecuted_large_code(content):
+    reason = "large_code_without_tool"
+    instruction = (
+      "[System] The previous response mainly contained a large code block but did not call a tool. "
+      "If code must be executed or written, call the appropriate tool. If it is only an explanation, "
+      "answer with concise natural language and a clear final result."
+    )
+  if reason is None:
+    return None
+  turn_text = f"第 {turn} 轮" if turn is not None else "当前轮"
+  return {
+    "content": (
+      f"日常 Agent 在{turn_text}没有发起工具调用，且输出需要修复。\n"
+      f"诊断：{reason}。\n"
+      "系统已把修复指令回灌给模型继续执行。"
+    ),
+    "diagnostics": {
+      "type": "empty_model_result",
+      "reason": reason,
+      "turn": turn,
+      "instruction": instruction,
+      "model_result_keys": sorted(str(key) for key in result.keys()),
+    },
+  }
+
+
 def _is_empty_model_diagnostic(output: dict[str, Any]) -> bool:
   diagnostics = output.get("diagnostics")
   return isinstance(diagnostics, dict) and diagnostics.get("type") == "empty_model_result"
+
+
+def _is_blank_no_tool_diagnostic(output: dict[str, Any] | None) -> bool:
+  if output is None:
+    return False
+  diagnostics = output.get("diagnostics")
+  return (
+    isinstance(diagnostics, dict)
+    and diagnostics.get("type") == "empty_model_result"
+    and "reason" not in diagnostics
+  )
+
+
+def _model_result_text(result: dict[str, Any]) -> str:
+  output = result.get("output", result.get("content"))
+  if isinstance(output, str):
+    return output
+  if isinstance(output, dict):
+    parts = []
+    for key in ("content", "summary", "value", "text"):
+      value = output.get(key)
+      if isinstance(value, str):
+        parts.append(value)
+    return "\n".join(parts)
+  return ""
+
+
+def _looks_like_unexecuted_large_code(content: str) -> bool:
+  code_block_pattern = r"```[a-zA-Z0-9_+-]*\n[\s\S]{50,}?```"
+  blocks = re.findall(code_block_pattern, content)
+  if len(blocks) != 1:
+    return False
+  match = re.search(code_block_pattern, content)
+  if match is None or content[match.end() :].strip():
+    return False
+  residual = content.replace(match.group(0), "")
+  residual = re.sub(r"<thinking>[\s\S]*?</thinking>", "", residual, flags=re.IGNORECASE)
+  residual = re.sub(r"<summary>[\s\S]*?</summary>", "", residual, flags=re.IGNORECASE)
+  return len(re.sub(r"\s+", "", residual)) <= 30
 
 
 def _progress_guard_instruction(turn: int) -> str:

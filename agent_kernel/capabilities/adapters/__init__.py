@@ -33,6 +33,13 @@ from agent_kernel.capabilities.adapters.mcp import (
   MCPToolExecutor,
   StdioMCPClient,
 )
+from agent_kernel.capabilities.adapters.mcp_governance import (
+  MCPAuthFailureCache,
+  MCPConnectionBatchPolicy,
+  MCPToolDescriptionLimiter,
+  build_mcp_tool_name,
+  is_mcp_session_expired_error,
+)
 from agent_kernel.capabilities.adapters.process import (
   PosixProcessGroupIsolationStrategy,
   ProcessCommand,
@@ -86,7 +93,10 @@ __all__ = [
   "FileWorkspace",
   "LocalFileWorkspace",
   "MCPClient",
+  "MCPAuthFailureCache",
+  "MCPConnectionBatchPolicy",
   "MCPServerCommand",
+  "MCPToolDescriptionLimiter",
   "MCPToolBinding",
   "MCPToolExecutor",
   "PosixProcessGroupIsolationStrategy",
@@ -106,4 +116,6 @@ __all__ = [
   "WorkbenchClient",
   "WorkbenchCommand",
   "WorkbenchResult",
+  "build_mcp_tool_name",
+  "is_mcp_session_expired_error",
 ]

@@ -22,6 +22,7 @@ from agent_kernel.agents.conversation_runner import (
   ContinuousRunnerResult,
   ContinuousToolCallRecord,
 )
+from agent_kernel.agents.coordinator import CoordinatorProfile, WorkerStatus, WorkerTaskNotification
 from agent_kernel.agents.delegation import AgentDelegationBroker, AgentDelegationBrokerOptions
 from agent_kernel.agents.delegation_mcp import (
   DelegationMCPServer,
@@ -49,14 +50,17 @@ from agent_kernel.agents.handoff import (
   HandoffService,
 )
 from agent_kernel.agents.goal_evidence import GoalEvidenceDecision, GoalEvidenceVerifier
+from agent_kernel.agents.intervention_channel import AgentInterventionChannel, AgentMessageKind, AgentProtocolMessage
 from agent_kernel.agents.interaction_fabric import InteractionFabric
 from agent_kernel.agents.observer import ObserverService, RunPauseController
+from agent_kernel.agents.permission_bridge import DelegatedPermissionRequest, LeaderPermissionBridge, PermissionBridgeStatus
 from agent_kernel.agents.session import AgentSessionService, oneshot_agent_spec
 from agent_kernel.agents.skills import SkillContextProvider, SkillSelector
 from agent_kernel.agents.supervisor import SupervisorService
 from agent_kernel.agents.taskboard import TaskBoardService
 from agent_kernel.agents.team import AgentPoolScheduler
 from agent_kernel.agents.tool_surface import SkillAwareToolSurfacePolicy, ToolSurfacePolicy, ToolSurfaceSelection
+from agent_kernel.agents.transcript import FileTranscriptStore, TranscriptChain, TranscriptEntry, TranscriptResumeService
 from agent_kernel.agents.workspace import (
   ArtifactMergeBackend,
   FakeWorkspaceBackend,
@@ -73,7 +77,10 @@ __all__ = [
   "AgentConnectorRouter",
   "AgentDelegationBroker",
   "AgentDelegationBrokerOptions",
+  "AgentInterventionChannel",
   "AgentLoop",
+  "AgentMessageKind",
+  "AgentProtocolMessage",
   "AgentTurnResult",
   "AgentPoolScheduler",
   "AgentSessionService",
@@ -81,11 +88,13 @@ __all__ = [
   "ContinuousRunnerConfig",
   "ContinuousRunnerResult",
   "ContinuousToolCallRecord",
+  "CoordinatorProfile",
   "ConnectorMessage",
   "ConnectorRoute",
   "ConnectorTurn",
   "DelegationMCPServer",
   "DelegationMCPToolNames",
+  "DelegatedPermissionRequest",
   "FakeAgentConnector",
   "FakeWorkspaceBackend",
   "GitPatchReviewBackend",
@@ -97,17 +106,20 @@ __all__ = [
   "FreeForAllSpeakerSelector",
   "GoalEvidenceDecision",
   "GoalEvidenceVerifier",
+  "FileTranscriptStore",
   "GroupChatService",
   "ChannelMembershipHandoffPolicy",
   "HandoffPolicy",
   "HandoffService",
   "InteractionFabric",
+  "LeaderPermissionBridge",
   "ObserverService",
   "RunPauseController",
   "ProductCLIConnectorFactory",
   "ProductCLIConnectorSpec",
   "ProductCLIShimProfile",
   "RoutedConnectorTurn",
+  "PermissionBridgeStatus",
   "ArtifactMergeBackend",
   "PatchReviewBackend",
   "ModeratorSpeakerSelector",
@@ -121,11 +133,16 @@ __all__ = [
   "StructuredStdioAgentConnector",
   "SupervisorService",
   "TaskBoardService",
+  "TranscriptChain",
+  "TranscriptEntry",
+  "TranscriptResumeService",
   "ToolSurfacePolicy",
   "ToolSurfaceSelection",
   "WorkspaceBackend",
   "WorkspaceIsolationService",
   "WorkspaceMergeQueueService",
+  "WorkerStatus",
+  "WorkerTaskNotification",
   "build_mailbox_message",
   "delegation_mcp_tool_schemas",
   "load_product_cli_connector_specs",
