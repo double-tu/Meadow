@@ -4,23 +4,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-import os
 from typing import Any, Protocol
 
 from agent_kernel.app.conversation_task_hub import ConversationTaskHub
-from agent_kernel.agents import ContinuousAgentRunner, ContinuousRunnerConfig
-from agent_kernel.autonomy.builtin_skills import ensure_builtin_atomic_skills
+from agent_kernel.app.daily_agent import (
+  DAILY_AGENT_ID,
+  ContinuousDailyAgentExecutor,
+  DailyAgentExecutor,
+  DailyAgentRequest,
+)
+from agent_kernel.app.model_binding import (
+  ConfigModelBindingProvider,
+  ModelBindingProvider,
+  StaticModelBindingProvider,
+)
 from agent_kernel.autonomy.skill_service import SkillService
 from agent_kernel.capabilities.atomic import AtomicCapabilityProvider
 from agent_kernel.capabilities.runtime import CapabilityRuntime
 from agent_kernel.config import LLMConfig
-from agent_kernel.context import ContextAssembler
 from agent_kernel.app.conversation_history import ConversationHistoryCompactor
 from agent_kernel.domain.base import DomainModel, new_id, utc_now
 from agent_kernel.domain.context import ModelContext
 from agent_kernel.domain.states import RunStatus
 from agent_kernel.memory import MemoryFacade
-from agent_kernel.models import AnthropicMessagesProvider, GeminiProvider, ModelGateway, OpenAICompatibleProvider
+from agent_kernel.models import ModelGateway
 
 
 class DesktopChatTaskLauncher(Protocol):
@@ -69,6 +76,8 @@ class DesktopChatService:
     atomic_capabilities: AtomicCapabilityProvider | None = None,
     conversation_task_hub: ConversationTaskHub | None = None,
     default_llm_config: LLMConfig | None = None,
+    model_binding_provider: ModelBindingProvider | None = None,
+    daily_agent_executor: DailyAgentExecutor | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._launcher = launcher
@@ -83,6 +92,21 @@ class DesktopChatService:
     self._default_llm_config = default_llm_config
     self._memory = MemoryFacade(self._uow_factory)
     self._history_compactor = ConversationHistoryCompactor(self._memory)
+    if model_binding_provider is not None:
+      self._model_binding_provider = model_binding_provider
+    elif model_gateway is not None and model_provider_name and model_ref:
+      self._model_binding_provider = StaticModelBindingProvider(model_gateway, model_provider_name, model_ref)
+    else:
+      self._model_binding_provider = ConfigModelBindingProvider(uow_factory, default_llm_config)
+    self._daily_agent_executor = daily_agent_executor
+    if self._daily_agent_executor is None and skill_service is not None and capability_runtime is not None and atomic_capabilities is not None:
+      self._daily_agent_executor = ContinuousDailyAgentExecutor(
+        uow_factory=uow_factory,
+        skill_service=skill_service,
+        capability_runtime=capability_runtime,
+        tool_catalog=atomic_capabilities,
+        memory=self._memory,
+      )
 
   def create_session(self, data: dict[str, Any] | None = None) -> DesktopChatSession:
     raw = data or {}
@@ -279,7 +303,7 @@ class DesktopChatService:
     current_message_id: str | None = None,
   ) -> dict[str, Any]:
     try:
-      gateway, provider_name, model_ref = self._resolve_model_gateway()
+      binding = self._model_binding_provider.resolve(DAILY_AGENT_ID)
     except ValueError as exc:
       return {
         "content": (
@@ -290,18 +314,27 @@ class DesktopChatService:
         ),
         "error": {"type": "llm_not_configured", "message": str(exc)},
       }
-    continuous_result = await self._complete_with_continuous_agent(
-      session_id=session_id,
-      user_content=user_content,
-      selected_skill_ids=selected_skill_ids,
-      run_id=run_id,
-      gateway=gateway,
-      provider_name=provider_name,
-      model_ref=model_ref,
-      current_message_id=current_message_id,
-    )
-    if continuous_result is not None:
-      return continuous_result
+    if self._daily_agent_executor is not None:
+      try:
+        response = await self._daily_agent_executor.execute(
+          DailyAgentRequest(
+            session_id=session_id,
+            run_id=run_id,
+            user_content=user_content,
+            history_messages=self._recent_runner_history(session_id, exclude_message_id=current_message_id),
+            selected_skill_ids=selected_skill_ids,
+            provider_name=binding.provider_name,
+            model_ref=binding.model_ref,
+            agent_id=DAILY_AGENT_ID,
+          ),
+          binding.gateway,
+        )
+      except Exception as exc:
+        return {
+          "content": f"日常 Agent 执行失败：{exc}",
+          "error": {"type": "daily_agent_execution_failed", "message": str(exc)},
+        }
+      return {"content": response.content, **response.raw}
     messages = self._build_llm_messages(
       session_id,
       user_content,
@@ -309,7 +342,7 @@ class DesktopChatService:
       exclude_message_id=current_message_id,
     )
     try:
-      result = await gateway.complete(provider_name, model_ref, ModelContext(messages=messages))
+      result = await binding.gateway.complete(binding.provider_name, binding.model_ref, ModelContext(messages=messages))
     except Exception as exc:
       return {
         "content": f"LLM 调用失败：{exc}",
@@ -323,147 +356,13 @@ class DesktopChatService:
       }
     return {"content": content, **{key: value for key, value in result.items() if key != "content"}}
 
-  async def _complete_with_continuous_agent(
-    self,
-    *,
-    session_id: str,
-    user_content: str,
-    selected_skill_ids: list[str],
-    run_id: str,
-    gateway: ModelGateway,
-    provider_name: str,
-    model_ref: str,
-    current_message_id: str | None = None,
-  ) -> dict[str, Any] | None:
-    if self._skill_service is None or self._capability_runtime is None or self._atomic_capabilities is None:
-      return None
-    ensure_builtin_atomic_skills(self._skill_service)
-    active_skills = self._skill_service.list_active()
-    if selected_skill_ids:
-      selected_id_set = set(selected_skill_ids)
-      selected = [skill for skill in active_skills if skill.skill_id in selected_id_set]
-      active_skills = selected or active_skills
-    runner = ContinuousAgentRunner(
-      uow_factory=self._uow_factory,
-      model_gateway=gateway,
-      capability_runtime=self._capability_runtime,
-      tool_catalog=self._atomic_capabilities,
-      context_assembler=ContextAssembler(
-        uow_factory=self._uow_factory,
-        memory=self._memory,
-      ),
-      skills=active_skills,
-    )
-    try:
-      outcome = await runner.run(
-        run_id=run_id,
-        user_message=user_content,
-        history_messages=self._recent_runner_history(session_id, exclude_message_id=current_message_id),
-        task_id=session_id,
-        agent_id="desktop_daily_agent",
-        scope=session_id,
-        config=ContinuousRunnerConfig(provider_name=provider_name, model_ref=model_ref, max_turns=8),
-      )
-    except Exception as exc:
-      return {
-        "content": f"日常 Agent 执行失败：{exc}",
-        "error": {"type": "daily_agent_execution_failed", "message": str(exc)},
-      }
-    content = _assistant_content_from_runner_result(outcome)
-    return {
-      "content": content,
-      "daily_agent": {
-        "run_id": outcome.run_id,
-        "status": outcome.status,
-        "turns": outcome.turns,
-        "output": outcome.output,
-        "pending": outcome.pending,
-        "tool_calls": [
-          {
-            "name": call.name,
-            "capability_id": call.capability_id,
-            "input": call.input,
-            "ok": call.ok,
-            "output": call.output,
-            "error": call.error,
-            "requires_approval": call.requires_approval,
-          }
-          for call in outcome.tool_calls
-        ],
-      },
-    }
-
-  def _resolve_model_gateway(self) -> tuple[ModelGateway, str, str]:
-    if self._model_gateway is not None and self._model_provider_name and self._model_ref:
-      return self._model_gateway, self._model_provider_name, self._model_ref
-    config = self._load_llm_config()
-    gateway = ModelGateway()
-    gateway.register_provider(config.provider, _provider_from_config(config))
-    return gateway, config.provider, config.model
-
   def _load_llm_config(self) -> LLMConfig:
-    with self._uow_factory() as uow:
-      record = uow.interactions.get_record("config_section", "llm")
-    data = record.get("data", {}) if isinstance(record, dict) and isinstance(record.get("data"), dict) else {}
-    profile = _llm_profile_from_config(data, agent_id="desktop_daily_agent")
-    defaults = self._default_llm_config
-    provider = str(
-      profile.get("provider")
-      or data.get("provider")
-      or (defaults.provider if defaults is not None else None)
-      or os.getenv("AGENT_KERNEL_LLM_PROVIDER")
-      or "openai-compatible"
-    )
-    model = (
-      _string_or_none(profile.get("model"))
-      or _string_or_none(data.get("model"))
-      or (defaults.model if defaults is not None else None)
-      or os.getenv("AGENT_KERNEL_LLM_MODEL")
-      or os.getenv("OPENAI_MODEL")
-    )
-    api_key_env = _string_or_none(profile.get("api_key_env")) or _string_or_none(data.get("api_key_env"))
-    api_key = (
-      os.getenv(api_key_env) if api_key_env else None
-    )
-    api_key = (
-      api_key
-      or _string_or_none(profile.get("api_key"))
-      or _string_or_none(data.get("api_key"))
-      or (defaults.api_key if defaults is not None else None)
-      or os.getenv("AGENT_KERNEL_LLM_API_KEY")
-      or os.getenv("OPENAI_API_KEY")
-      or os.getenv("GEMINI_API_KEY")
-      or os.getenv("ANTHROPIC_API_KEY")
-    )
-    base_url = (
-      _string_or_none(profile.get("base_url"))
-      or _string_or_none(data.get("base_url"))
-      or (defaults.base_url if defaults is not None else None)
-      or os.getenv("AGENT_KERNEL_LLM_BASE_URL")
-      or os.getenv("OPENAI_BASE_URL")
-      or _default_base_url(provider)
-    )
-    timeout = data.get(
-      "timeout_seconds",
-      profile.get(
-        "timeout_seconds",
-        defaults.timeout_seconds if defaults is not None else os.getenv("AGENT_KERNEL_LLM_TIMEOUT_SECONDS", 60),
-      ),
-    )
-    missing = []
-    if not model:
-      missing.append("llm.model")
-    if not api_key:
-      missing.append("llm.api_key 或 llm.api_key_env")
-    if missing:
-      raise ValueError("缺少 " + "、".join(missing))
-    return LLMConfig(
-      provider=provider,
-      model=model,
-      api_key=api_key,
-      base_url=str(base_url).rstrip("/"),
-      timeout_seconds=float(timeout),
-    )
+    if isinstance(self._model_binding_provider, ConfigModelBindingProvider):
+      return self._model_binding_provider.load_config(DAILY_AGENT_ID)
+    binding = self._model_binding_provider.resolve(DAILY_AGENT_ID)
+    if binding.config is None:
+      raise RuntimeError("Current model binding does not expose an LLMConfig.")
+    return binding.config
 
   def _build_llm_messages(
     self,
@@ -553,116 +452,6 @@ def _capability_hints(selected_skill_ids: list[str]) -> list[dict[str, Any]]:
   if selected_skill_ids:
     hints.insert(0, {"kind": "skill", "label": f"已选择 {len(selected_skill_ids)} 个 Skill", "available": True})
   return hints
-
-
-def _string_or_none(value: object) -> str | None:
-  if value is None:
-    return None
-  text = str(value).strip()
-  return text or None
-
-
-def _llm_profile_from_config(data: dict[str, Any], *, agent_id: str) -> dict[str, Any]:
-  providers = data.get("providers")
-  if not isinstance(providers, list) or not providers:
-    return {}
-  bindings = data.get("agent_bindings")
-  binding = _find_mapping(bindings, "agent_id", agent_id) if isinstance(bindings, list) else None
-  provider_id = (
-    _string_or_none(binding.get("provider_id")) if binding else None
-  ) or _string_or_none(data.get("active_provider_id"))
-  provider = _find_mapping(providers, "provider_id", provider_id) if provider_id else None
-  provider = provider or next((item for item in providers if isinstance(item, dict) and item.get("enabled", True)), None)
-  if not isinstance(provider, dict):
-    return {}
-  models = provider.get("models")
-  model_id = (
-    _string_or_none(binding.get("model_id")) if binding else None
-  ) or _string_or_none(data.get("active_model_id"))
-  if not model_id and isinstance(models, list):
-    for candidate in models:
-      if isinstance(candidate, dict) and candidate.get("enabled", True):
-        model_id = _string_or_none(candidate.get("model_id"))
-        break
-  return {
-    "provider": provider.get("kind") or provider.get("provider") or provider.get("platform"),
-    "model": model_id,
-    "api_key": provider.get("api_key"),
-    "api_key_env": provider.get("api_key_env"),
-    "base_url": provider.get("base_url"),
-    "timeout_seconds": provider.get("timeout_seconds"),
-  }
-
-
-def _find_mapping(items: object, key: str, value: str | None) -> dict[str, Any] | None:
-  if not value or not isinstance(items, list):
-    return None
-  for item in items:
-    if isinstance(item, dict) and item.get(key) == value:
-      return item
-  return None
-
-
-def _provider_from_config(config: LLMConfig):
-  provider_kind = config.provider.lower()
-  if provider_kind in {"openai-compatible", "openai", "deepseek", "new-api"}:
-    return OpenAICompatibleProvider(
-      api_key=config.api_key,
-      base_url=config.base_url,
-      timeout_seconds=config.timeout_seconds,
-    )
-  if provider_kind in {"gemini", "google-gemini"}:
-    return GeminiProvider(
-      api_key=config.api_key,
-      base_url=config.base_url,
-      timeout_seconds=config.timeout_seconds,
-    )
-  if provider_kind in {"anthropic", "claude"}:
-    return AnthropicMessagesProvider(
-      api_key=config.api_key,
-      base_url=config.base_url,
-      timeout_seconds=config.timeout_seconds,
-    )
-  raise ValueError(f"暂不支持的模型 provider 类型: {config.provider}")
-
-
-def _default_base_url(provider: str) -> str:
-  provider_kind = provider.lower()
-  if provider_kind in {"gemini", "google-gemini"}:
-    return "https://generativelanguage.googleapis.com/v1beta"
-  if provider_kind in {"anthropic", "claude"}:
-    return "https://api.anthropic.com/v1"
-  return "https://api.openai.com/v1"
-
-
-def _assistant_content_from_runner_output(output: dict[str, Any]) -> str:
-  content = output.get("content")
-  if isinstance(content, str) and content.strip():
-    return content.strip()
-  summary = output.get("summary")
-  if isinstance(summary, str) and summary.strip():
-    return summary.strip()
-  value = output.get("value")
-  if isinstance(value, str) and value.strip():
-    return value.strip()
-  if output:
-    return str(output)
-  return "日常 Agent 已完成运行，但没有返回可展示内容。"
-
-
-def _assistant_content_from_runner_result(outcome: ContinuousRunnerResult) -> str:
-  if outcome.status == "waiting_for_user" and isinstance(outcome.pending, dict):
-    question = outcome.pending.get("question")
-    candidates = outcome.pending.get("candidates")
-    text = str(question) if isinstance(question, str) and question.strip() else "我需要你补充一个信息才能继续。"
-    if isinstance(candidates, list) and candidates:
-      text += "\n\n可选项：" + "、".join(str(item) for item in candidates)
-    return text
-  if outcome.status == "awaiting_approval" and isinstance(outcome.pending, dict):
-    capability_id = outcome.pending.get("capability_id")
-    reason = outcome.pending.get("reason")
-    return f"需要审批后才能继续执行：{capability_id or '工具调用'}。\n原因：{reason or '策略要求审批'}"
-  return _assistant_content_from_runner_output(outcome.output)
 
 
 def _daily_agent_pending(llm_result: dict[str, Any]) -> dict[str, Any] | None:

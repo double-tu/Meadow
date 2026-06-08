@@ -15,14 +15,30 @@ BUILTIN_ATOMIC_SKILLS: tuple[SkillCard, ...] = (
     description="通过 HTTP 或浏览器控制获取网页、搜索结果、天气、新闻、文档等实时信息。",
     when_to_use="用户要求搜索、查询最新信息、打开网页、浏览网页、获取今天/当前/最近的信息时使用。",
     instructions=(
-      "先判断是否可以用 http_request 直接获取公开网页或 API；"
-      "如果用户明确要求操作浏览器，或需要查看当前浏览器页面，再使用 browser_scan/browser_navigate/"
-      "browser_execute_js。执行后基于工具结果回答，不要只说明自己可以做。"
+      "INDEX_HINT: 先 scan tabs；导航/搜索后持续携带 target_id；搜索结果页不是最终答案；动态推荐/最新帖子/Feed 页面用 "
+      "browser_execute_js 刷新、滚动、抽取可见卡片短 JSON（title/text/url/author/time/metrics），不要反复全页 browser_scan。\n"
+      "SOP: 1) 感知：先用 browser_scan(tabs_only=true) 查看可用标签页；用户明确要求浏览器时优先复用真实浏览器。"
+      "2) 导航/搜索：用 browser_navigate 或 browser_execute_js(location.href=...) 打开搜索页或目标页。"
+      "导航工具返回 target_id 时，后续 browser_scan/browser_execute_js 必须继续携带同一 target_id，避免读到其他标签页。"
+      "3) 读取：用 browser_scan 读取当前页；该工具会返回 page.text、links、search_results 等结构。"
+      "4) 深挖：如果当前页是搜索结果页，不能把搜索页当最终答案；从 search_results 中选择与目标最相关的结果，"
+      "继续打开至少 2 个结果页（只有 1 个可用结果时除外），分别读取正文。"
+      "5) 动态信息流：用户要求打开、刷新、查看推荐/最新帖子/Feed 时，不要反复全页 browser_scan；"
+      "应在目标 target_id 上用 browser_execute_js 执行 refresh/scroll/click/read DOM 小脚本，"
+      "从可见 article/card/link/img/time/like/comment 节点抽取短 JSON 数组，字段至少包含 title/text/url/author/time/metrics。"
+      "一次抽取为空时先滚动或等待再抽取，仍为空才说明页面登录、反爬或结构不可读。"
+      "6) 核验：记录每个来源的 title/url/关键事实；多个来源互相印证后总结，不确定处明确说明。"
+      "7) 控制：需要点击、滚动、提取特定 DOM 或处理动态页面时，用 browser_execute_js；优先小脚本精准读取，少做全页扫描。"
+      "失败时尝试下一个候选链接或换用 http_request。执行后基于工具结果回答，不要只说明自己可以做。"
     ),
     status=SkillStatus.ACTIVE,
     execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
     recommended_tools=["http_request", "browser_scan", "browser_navigate", "browser_execute_js"],
-    constraints=["只请求与用户目标相关的 URL。", "不要访问需要用户授权的私密页面，除非用户明确要求并已授权。"],
+    constraints=[
+      "只请求与用户目标相关的 URL。",
+      "不要访问需要用户授权的私密页面，除非用户明确要求并已授权。",
+      "涉及具体个人时，只总结公开网页中的职业/公开活动/公开来源，不推断隐私信息。",
+    ],
     failure_modes=["网络不可用", "浏览器控制后端未连接", "目标网页拒绝访问或返回空内容"],
   ),
   SkillCard(

@@ -20,6 +20,20 @@ export type ChatMessage = {
   metadata?: Record<string, unknown>;
 };
 
+export type ToolCallRecord = {
+  tool_call_id?: string;
+  run_id?: string;
+  capability_id?: string;
+  status?: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  error?: Record<string, unknown> | string | null;
+  created_at?: string;
+  updated_at?: string;
+  started_at?: string;
+  completed_at?: string;
+};
+
 export type ConfigSection = {
   section: string;
   data: Record<string, unknown>;

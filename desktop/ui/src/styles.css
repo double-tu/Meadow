@@ -417,6 +417,10 @@ button {
   align-self: flex-start;
 }
 
+.message.pending {
+  opacity: 0.72;
+}
+
 .message small {
   display: block;
   margin-bottom: 5px;
@@ -426,6 +430,133 @@ button {
 .message p {
   margin: 0;
   white-space: pre-wrap;
+}
+
+.run-details {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.run-details summary,
+.tool-call-row summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.run-details summary::-webkit-details-marker,
+.tool-call-row summary::-webkit-details-marker {
+  display: none;
+}
+
+.run-details summary > span,
+.tool-call-row summary > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-details .summary-open {
+  display: none;
+}
+
+.run-details[open] .summary-open {
+  display: inline;
+}
+
+.run-details[open] .summary-closed {
+  display: none;
+}
+
+.run-activity {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 9px;
+}
+
+.run-activity.compact {
+  margin-top: 0;
+  background: #fff;
+}
+
+.run-activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tool-call-timeline {
+  display: grid;
+  gap: 6px;
+}
+
+.tool-call-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+}
+
+.tool-call-row strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-call-body {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.json-mini {
+  display: grid;
+  gap: 4px;
+}
+
+.json-mini span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.json-mini pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #111827;
+  color: #f8fafc;
+  padding: 8px;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.run-event-mini-list {
+  display: grid;
+  gap: 5px;
+}
+
+.run-event-mini {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .composer {

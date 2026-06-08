@@ -9,10 +9,11 @@ import type {
   RuntimeEvent,
   ScheduledTask,
   SkillCard,
+  ToolCallRecord,
   Workspace,
 } from "./types";
 
-const DEFAULT_API_URL = "http://127.0.0.1:8080";
+const DEFAULT_API_URL = import.meta.env.VITE_MEADOW_API_URL || "http://127.0.0.1:8080";
 const API_URL_KEY = "meadow.apiUrl";
 
 export function getStoredApiUrl(): string {
@@ -48,11 +49,12 @@ export class MeadowApiClient {
     return (await this.get<{ messages: ChatMessage[] }>(`/chat/sessions/${encodeURIComponent(sessionId)}/messages`)).messages || [];
   }
 
-  async sendChatMessage(sessionId: string, content: string): Promise<ChatMessage[]> {
+  async sendChatMessage(sessionId: string, content: string, runId?: string): Promise<ChatMessage[]> {
     return (
       await this.post<{ messages: ChatMessage[] }>(`/chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
         content,
         mode: "agent",
+        run_id: runId,
       })
     ).messages || [];
   }
@@ -105,6 +107,21 @@ export class MeadowApiClient {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as RuntimeEvent);
+  }
+
+  async listEventsByRun(runId: string): Promise<RuntimeEvent[]> {
+    const response = await fetch(`${this.baseUrl}/events?run_id=${encodeURIComponent(runId)}`);
+    if (!response.ok) throw new Error(`GET /events failed: ${response.status}`);
+    const text = await response.text();
+    return text
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as RuntimeEvent);
+  }
+
+  async listToolCalls(runId?: string): Promise<ToolCallRecord[]> {
+    const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    return (await this.get<{ tool_calls: ToolCallRecord[] }>(`/tool-calls${suffix}`)).tool_calls || [];
   }
 
   private async get<T>(path: string): Promise<T> {

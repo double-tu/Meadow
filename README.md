@@ -164,20 +164,26 @@ python3 -m agent_kernel.hosts.cli --config agent-kernel.toml control-health
 python3 -m agent_kernel.hosts.cli --config agent-kernel.toml control-health --targets --kind browser
 ```
 
-Start the HTTP API host used by the desktop shell:
+Start, stop, restart, or inspect the desktop API + UI dev services:
 
 ```bash
-python3 -m agent_kernel.hosts.cli --db /tmp/meadow-desktop.sqlite http --host 127.0.0.1 --port 8080
+python3 scripts/meadow_desktop.py start
+python3 scripts/meadow_desktop.py status
+python3 scripts/meadow_desktop.py restart
+python3 scripts/meadow_desktop.py stop
 ```
 
-Install and open the API-first desktop shell:
+By default this starts the API at `http://127.0.0.1:8083` and the React/Vite desktop shell at `http://127.0.0.1:4180`, with browser-link control configured for `http://127.0.0.1:18766/link`. Override ports or DB path when needed:
+
+```bash
+python3 scripts/meadow_desktop.py start --api-port 8080 --ui-port 4173 --db /tmp/meadow-desktop.sqlite
+```
+
+Install frontend dependencies once before starting the UI:
 
 ```bash
 npm --prefix desktop install
-npm --prefix desktop run dev:web
 ```
-
-Then visit `http://127.0.0.1:4173` and connect it to `http://127.0.0.1:8080`.
 
 The shell opens to the Chinese daily chat workspace by default. It also includes Skill 管理, 配置中心, 工作区, 审批, MCP, 计划任务, 控制台, and 事件流 views.
 

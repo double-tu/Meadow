@@ -167,6 +167,25 @@ def _unique_preserve_order(values) -> list[str]:
   return result
 
 
+def _detect_anti_bot(url: str, body: str, body_summary: dict[str, Any]) -> dict[str, Any] | None:
+  haystack = f"{url}\n{body_summary.get('page_title') or ''}\n{body[:2000]}".lower()
+  markers = {
+    "antispider": "anti_spider_challenge",
+    "captcha": "captcha_or_challenge",
+    "验证码": "captcha_or_challenge",
+    "安全验证": "captcha_or_challenge",
+    "verify you are human": "captcha_or_challenge",
+    "unusual traffic": "anti_bot_rate_limit",
+  }
+  for marker, issue_type in markers.items():
+    if marker.lower() in haystack:
+      return {
+        "type": issue_type,
+        "message": "The HTTP response appears to be an anti-bot or verification page, not usable search content.",
+      }
+  return None
+
+
 def _positive_int(value: object, *, default: int, maximum: int) -> int:
   try:
     parsed = int(value) if value is not None else default
@@ -545,12 +564,26 @@ class AtomicCapabilityProvider:
       ),
       self._schema(
         "browser_scan",
-        "Inspect browser targets and the current/latest page summary through a control workbench. Use tabs_only=true to only list tabs.",
+        (
+          "Inspect browser targets and a bounded page summary through a control workbench. "
+          "Use tabs_only=true to only list tabs. After navigate returns target_id, keep passing the same target_id. "
+          "For dynamic feed/card pages, avoid repeated full scans; use browser_execute_js to refresh, scroll, click, "
+          "or extract structured visible cards."
+        ),
         [],
-        {"tabs_only": {"type": "boolean"}},
+        {"tabs_only": {"type": "boolean"}, "target_id": {"type": "string"}},
       ),
-      self._schema("browser_execute_js", "Execute JavaScript in a browser target.", ["code"]),
-      self._schema("browser_navigate", "Navigate a browser target to a URL.", ["url"]),
+      self._schema(
+        "browser_execute_js",
+        (
+          "Execute JavaScript in a browser target for precise browser control and DOM extraction. "
+          "Prefer this over repeated browser_scan when reading dynamic pages. Return compact JSON for extracted data; "
+          "for feed/latest-post tasks extract visible cards with title/text/url/author/time/metrics after refresh or scroll."
+        ),
+        ["code"],
+        {"target_id": {"type": "string"}},
+      ),
+      self._schema("browser_navigate", "Navigate a browser target to a URL.", ["url"], {"target_id": {"type": "string"}}),
       self._schema("desktop_screenshot", "Capture a desktop target screenshot.", []),
       self._schema("desktop_click", "Click desktop coordinates.", ["x", "y"]),
       self._schema("desktop_key", "Send a desktop key or shortcut.", ["key"]),
@@ -1271,14 +1304,19 @@ class AtomicCapabilityProvider:
 
   @staticmethod
   def _http_response_result(response: HTTPResponse) -> ToolResult:
+    body_summary = _summarize_http_body(response.body)
+    anti_bot = _detect_anti_bot(response.url, response.body, body_summary)
+    output = {
+      "status": response.status,
+      "headers": response.headers,
+      "body": response.body,
+      "body_summary": body_summary,
+      "url": response.url,
+    }
+    if anti_bot is not None:
+      output["access_issue"] = anti_bot
     return ToolResult.success(
-      {
-        "status": response.status,
-        "headers": response.headers,
-        "body": response.body,
-        "body_summary": _summarize_http_body(response.body),
-        "url": response.url,
-      }
+      output
     )
 
   @staticmethod

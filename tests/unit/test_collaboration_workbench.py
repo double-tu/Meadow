@@ -3,6 +3,7 @@ import unittest
 
 from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
 from agent_kernel.app.collaboration_workbench import CollaborationWorkbenchService
+from agent_kernel.app.orchestration_tools import OrchestrationCapabilityProvider
 from agent_kernel.autonomy import SkillService
 from agent_kernel.autonomy.builtin_skills import ensure_builtin_atomic_skills
 from agent_kernel.domain import CollaborationWorkbenchKind, CollaborationWorkbenchStatus, ParticipantKind
@@ -25,6 +26,26 @@ class CollaborationWorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
       self.assertIn("workbench_message", workbench_skill.recommended_tools)
       self.assertIn("user_input_request", workbench_skill.recommended_tools)
       self.assertIn("持续任务", workbench_skill.when_to_use)
+    finally:
+      conn.close()
+
+  async def test_builtin_web_research_skill_is_sop_driven_over_browser_atoms(self) -> None:
+    conn = connect_sqlite()
+    try:
+      skill_service = SkillService(unit_of_work_factory(conn))
+
+      skills = ensure_builtin_atomic_skills(skill_service)
+      web_skill = next(skill for skill in skills if skill.skill_id == "builtin.atomic.web_research")
+
+      self.assertIn("SOP", web_skill.instructions)
+      self.assertIn("search_results", web_skill.instructions)
+      self.assertIn("打开至少 2 个结果页", web_skill.instructions)
+      self.assertIn("动态信息流", web_skill.instructions)
+      self.assertIn("短 JSON 数组", web_skill.instructions)
+      self.assertIn("browser_execute_js", web_skill.instructions)
+      self.assertIn("browser_scan", web_skill.recommended_tools)
+      self.assertIn("browser_navigate", web_skill.recommended_tools)
+      self.assertIn("browser_execute_js", web_skill.recommended_tools)
     finally:
       conn.close()
 
@@ -135,6 +156,72 @@ class CollaborationWorkbenchServiceTests(unittest.IsolatedAsyncioTestCase):
     finally:
       conn.close()
 
+  async def test_model_tool_degrades_auto_start_when_delegation_broker_missing(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      workbench_service = CollaborationWorkbenchService(uow_factory)
+      provider = OrchestrationCapabilityProvider(
+        uow_factory=uow_factory,
+        task_launcher=_FakeTaskLauncher(),
+        workbench_control=workbench_service,
+      )
+
+      result = await provider.create_workbench(
+        {
+          "kind": "parallel_delegation",
+          "title": "并行搜索调研",
+          "objective": "调研 Agent 上下文和记忆管理",
+          "auto_start": True,
+          "members": [
+            {"participant_id": "researcher", "kind": "remote_agent", "role": "researcher", "connector_id": "codex"},
+          ],
+          "slices": [{"title": "论文搜索", "objective": "搜索论文"}],
+        }
+      )
+
+      self.assertTrue(result.ok)
+      self.assertTrue(result.output["workbench"]["auto_start_degraded"])
+      self.assertIn("delegation broker", result.output["workbench"]["auto_start_degraded_reason"])
+      self.assertEqual(result.output["workbench"]["workbench"]["kind"], "parallel_delegation")
+      self.assertEqual(result.output["workbench"]["workbench"]["delegation_task_ids"], [])
+    finally:
+      conn.close()
+
+  async def test_parallel_delegate_degrades_to_workbench_when_broker_missing(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      workbench_service = CollaborationWorkbenchService(uow_factory)
+      provider = OrchestrationCapabilityProvider(
+        uow_factory=uow_factory,
+        task_launcher=_FakeTaskLauncher(),
+        workbench_control=workbench_service,
+      )
+
+      result = await provider.parallel_delegate(
+        {
+          "parent_run_id": "run_parallel_missing_broker",
+          "title": "4 个 Agent 并行搜索",
+          "objective": "搜索深圳小学英语老师相关公开信息",
+          "tasks": [
+            {"connector_id": "codex-a", "agent_type": "codex", "task": "搜索公开网页"},
+            {"connector_id": "codex-b", "agent_type": "codex", "task": "搜索学校公告"},
+            {"connector_id": "codex-c", "agent_type": "codex", "task": "搜索新闻和社交平台"},
+            {"connector_id": "codex-d", "agent_type": "codex", "task": "交叉验证来源"},
+          ],
+        }
+      )
+
+      self.assertTrue(result.ok)
+      self.assertTrue(result.output["workbench"]["delegation_degraded"])
+      self.assertFalse(result.output["delegation_status"]["started"])
+      self.assertEqual(result.output["workbench"]["workbench"]["kind"], "parallel_delegation")
+      self.assertEqual(len(result.output["workbench"]["task_slices"]), 4)
+      self.assertEqual(result.output["workbench"]["workbench"]["delegation_task_ids"], [])
+    finally:
+      conn.close()
+
 
 class CollaborationWorkbenchHTTPTests(unittest.TestCase):
   def test_http_creates_and_inspects_group_chat_workbench(self) -> None:
@@ -208,6 +295,11 @@ class CollaborationWorkbenchHTTPTests(unittest.TestCase):
       self.assertIn("delegation broker", payload["error"])
     finally:
       conn.close()
+
+
+class _FakeTaskLauncher:
+  async def create_task(self, payload):
+    return {"task": {"run_id": payload.get("run_id"), "title": payload.get("title")}}
 
 
 if __name__ == "__main__":

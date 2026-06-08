@@ -426,7 +426,29 @@ class OrchestrationCapabilityProvider:
 
   async def parallel_delegate(self, input: dict[str, Any]) -> ToolResult:
     if self._delegation_control is None:
-      return ToolResult.failure("adapter_not_configured", "Agent delegation broker is not configured.")
+      if self._workbench_control is None:
+        return ToolResult.failure("adapter_not_configured", "Agent delegation broker is not configured.")
+      degraded = self._parallel_delegate_workbench_payload(input)
+      if isinstance(degraded, ToolResult):
+        return degraded
+      try:
+        snapshot = await self._workbench_control.create_parallel_delegation(degraded)
+      except (KeyError, ValueError) as exc:
+        return ToolResult.failure("workbench_error", str(exc))
+      view = _workbench_view(snapshot)
+      view["delegation_degraded"] = True
+      view["delegation_degraded_reason"] = "Agent delegation broker is not configured."
+      return ToolResult.success(
+        {
+          "workbench": view,
+          "delegation_status": {
+            "started": False,
+            "reason": "agent_delegation_broker_not_configured",
+            "next_step": "Configure agent connectors or continue this workbench with human/agent participants.",
+          },
+        },
+        metadata={"degraded": True, "reason": "agent_delegation_broker_not_configured"},
+      )
     parent_run_id = input.get("parent_run_id")
     if not isinstance(parent_run_id, str) or not parent_run_id:
       return ToolResult.failure("invalid_input", "parent_run_id must be a non-empty string.")
@@ -456,6 +478,61 @@ class OrchestrationCapabilityProvider:
     reports = await asyncio.gather(*coroutines)
     return ToolResult.success({"delegations": [report.to_dict() for report in reports]})
 
+  def _parallel_delegate_workbench_payload(self, input: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    parent_run_id = input.get("parent_run_id")
+    if not isinstance(parent_run_id, str) or not parent_run_id:
+      return ToolResult.failure("invalid_input", "parent_run_id must be a non-empty string.")
+    tasks = input.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+      return ToolResult.failure("invalid_input", "tasks must be a non-empty array.")
+    members: list[dict[str, Any]] = []
+    slices: list[dict[str, Any]] = []
+    workbench_id = str(input.get("workbench_id") or "")
+    for index, item in enumerate(tasks, start=1):
+      if not isinstance(item, dict):
+        return ToolResult.failure("invalid_input", "each task must be an object.")
+      task = item.get("task")
+      if not isinstance(task, str) or not task.strip():
+        return ToolResult.failure("invalid_input", "each task requires task.")
+      connector_id = item.get("connector_id")
+      role = str(item.get("role") or f"worker_{index}")
+      participant_id = str(item.get("participant_id") or f"pending_agent_{index}")
+      member: dict[str, Any] = {
+        "participant_id": participant_id,
+        "kind": "remote_agent" if isinstance(connector_id, str) and connector_id else "agent",
+        "role": role,
+      }
+      if isinstance(connector_id, str) and connector_id:
+        member["connector_id"] = connector_id
+      if isinstance(item.get("agent_type"), str):
+        member["agent_type"] = item["agent_type"]
+      members.append(member)
+      metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+      slice_payload = {
+        "title": str(item.get("title") or role),
+        "objective": task,
+        "role": role,
+        "metadata": metadata,
+      }
+      if workbench_id:
+        slice_payload["assignee_member_id"] = f"{workbench_id}_member_{index}"
+      slices.append(slice_payload)
+    objective = input.get("objective")
+    return {
+      "kind": "parallel_delegation",
+      "title": str(input.get("title") or "并行子 Agent 任务"),
+      "objective": objective if isinstance(objective, str) and objective.strip() else "并行执行多个子任务。",
+      "parent_run_id": parent_run_id,
+      "auto_start": False,
+      "members": members,
+      "slices": slices,
+      "metadata": {
+        **(input.get("metadata") if isinstance(input.get("metadata"), dict) else {}),
+        "degraded_from": "agent_parallel_delegate",
+        "degraded_reason": "agent_delegation_broker_not_configured",
+      },
+    }
+
   async def create_workbench(self, input: dict[str, Any]) -> ToolResult:
     if self._workbench_control is None:
       return ToolResult.failure("adapter_not_configured", "Collaboration workbench service is not configured.")
@@ -483,6 +560,27 @@ class OrchestrationCapabilityProvider:
       else:
         snapshot = await self._workbench_control.create_parallel_delegation(input)
     except (KeyError, ValueError) as exc:
+      if input.get("auto_start") is True and "delegation broker" in str(exc):
+        degraded = {**input, "auto_start": False}
+        degraded.setdefault("metadata", {})
+        if isinstance(degraded["metadata"], dict):
+          degraded["metadata"]["auto_start_degraded"] = True
+          degraded["metadata"]["auto_start_degraded_reason"] = str(exc)
+        try:
+          if kind == "cli_collaboration":
+            snapshot = await self._workbench_control.create_cli_collaboration(degraded)
+          elif kind == "technical_review":
+            snapshot = await self._workbench_control.create_technical_review(degraded)
+          elif kind == "parallel_delegation":
+            snapshot = await self._workbench_control.create_parallel_delegation(degraded)
+          else:
+            snapshot = self._workbench_control.create_group_chat(degraded)
+        except (KeyError, ValueError) as degraded_exc:
+          return ToolResult.failure("workbench_error", str(degraded_exc))
+        view = _workbench_view(snapshot)
+        view["auto_start_degraded"] = True
+        view["auto_start_degraded_reason"] = str(exc)
+        return ToolResult.success({"workbench": view})
       return ToolResult.failure("workbench_error", str(exc))
     return ToolResult.success({"workbench": _workbench_view(snapshot)})
 

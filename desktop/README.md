@@ -10,29 +10,35 @@ This shell deliberately keeps UI and kernel logic separate:
 
 ## Run Locally
 
-Start the Meadow HTTP host in another terminal:
-
-```bash
-python3 -m agent_kernel.hosts.cli --db /tmp/meadow-desktop.sqlite http --host 127.0.0.1 --port 8080
-```
-
 Install frontend dependencies once:
 
 ```bash
 npm --prefix desktop install
 ```
 
-Serve the shell:
+Start both the Meadow HTTP API and the Vite UI:
 
 ```bash
-npm --prefix desktop run dev:web
+python3 scripts/meadow_desktop.py start
 ```
 
-Then set the API URL in the top-right field if needed. The default is:
+Common service commands:
+
+```bash
+python3 scripts/meadow_desktop.py status
+python3 scripts/meadow_desktop.py restart
+python3 scripts/meadow_desktop.py stop
+python3 scripts/meadow_desktop.py logs
+```
+
+The script defaults to:
 
 ```text
-http://127.0.0.1:8080
+API: http://127.0.0.1:8083
+UI:  http://127.0.0.1:4180
 ```
+
+Override ports when needed with `--api-port` and `--ui-port`. The script also passes `VITE_MEADOW_API_URL` to the UI so the shell connects to the managed API by default.
 
 ## Current Views
 

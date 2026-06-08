@@ -851,6 +851,93 @@ class HTTPHostTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_default_chat_daily_agent_summarizes_workbench_when_model_finishes_empty(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      gateway = ModelGateway()
+      provider = MockModelProvider(
+        responses=[
+          {
+            "tool_calls": [
+              {
+                "name": "workbench_create",
+                "input": {
+                  "kind": "parallel_delegation",
+                  "title": "并行搜索调研",
+                  "objective": "起多个 Agent 进行搜索调研",
+                  "members": [
+                    {"participant_id": "daily_agent", "kind": "agent", "role": "moderator"},
+                    {"participant_id": "researcher_a", "kind": "agent", "role": "searcher"},
+                    {"participant_id": "researcher_b", "kind": "agent", "role": "searcher"},
+                  ],
+                  "slices": [
+                    {"title": "搜索方向 A", "objective": "搜索资料 A"},
+                    {"title": "搜索方向 B", "objective": "搜索资料 B"},
+                  ],
+                },
+              }
+            ]
+          },
+          {"content": ""},
+        ]
+      )
+      gateway.register_provider("mock", provider)
+      launcher = SampleWorkflowTaskLauncher(uow_factory)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      workbench_service = CollaborationWorkbenchService(uow_factory)
+      orchestration = OrchestrationCapabilityProvider(
+        uow_factory=uow_factory,
+        task_launcher=launcher,
+        run_control=RuntimeEngine(uow_factory, NodeExecutorRegistry()),
+        workbench_control=workbench_service,
+      )
+      orchestration.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_workbench_empty_finish",
+              capability_id=OrchestrationCapabilityIds.WORKBENCH_CREATE,
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        uow_factory=uow_factory,
+      )
+      chat_service = DesktopChatService(
+        uow_factory,
+        launcher,
+        model_gateway=gateway,
+        model_provider_name="mock",
+        model_ref="mock-model",
+        skill_service=SkillService(uow_factory),
+        capability_runtime=runtime,
+        atomic_capabilities=CompositeToolCatalog([orchestration]),
+        conversation_task_hub=ConversationTaskHub(uow_factory, launcher),
+      )
+      handler = make_handler(HTTPHost(uow_factory, desktop_chat_service=chat_service))
+
+      created_session = self._request_json(handler, "POST", "/chat/sessions", {"title": "日常对话"})
+      session_id = created_session["chat_session"]["session_id"]
+      sent = self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "我想执行一个搜索任务，你可以起多个 agent 帮我进行搜索调研吗？", "run_id": "chat_empty_workbench_run"},
+      )
+
+      self.assertIn("已创建/推进协作工作台", sent["messages"][1]["content"])
+      self.assertIn("并行搜索调研", sent["messages"][1]["content"])
+      daily_agent = sent["messages"][1]["metadata"]["llm_result"]["daily_agent"]
+      self.assertEqual(daily_agent["tool_calls"][0]["name"], "workbench_create")
+      self.assertTrue(daily_agent["tool_calls"][0]["ok"])
+    finally:
+      conn.close()
+
   def test_default_chat_daily_agent_persists_waiting_for_user_state(self) -> None:
     conn = connect_sqlite()
     try:

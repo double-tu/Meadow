@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_kernel.capabilities import CapabilityCallContext, CapabilityRegistry, CapabilityRuntime
 from agent_kernel.capabilities.adapters import (
@@ -11,6 +12,7 @@ from agent_kernel.capabilities.adapters import (
   LocalToolExecutor,
   ProcessToolExecutor,
   SideEffectToolProvider,
+  UrllibHTTPClient,
 )
 from agent_kernel.domain.base import utc_now
 from agent_kernel.domain.capability import CapabilityGrant, CapabilitySpec, SideEffectLevel
@@ -157,6 +159,22 @@ class SideEffectToolTests(unittest.IsolatedAsyncioTestCase):
     self.assertFalse(denied.result.ok)
     self.assertEqual(len(client.requests), 1)
 
+  async def test_urllib_http_client_encodes_non_ascii_urls(self) -> None:
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+      captured["url"] = request.full_url
+      return _FakeUrlopenResponse()
+
+    with mock.patch("agent_kernel.capabilities.adapters.side_effect.urlopen", fake_urlopen):
+      response = UrllibHTTPClient().request("GET", "https://example.test/search?q=大模型 agent 记忆")
+
+    self.assertEqual(
+      captured["url"],
+      "https://example.test/search?q=%E5%A4%A7%E6%A8%A1%E5%9E%8B%20agent%20%E8%AE%B0%E5%BF%86",
+    )
+    self.assertEqual(response.body, "ok")
+
   async def test_process_command_execution_runs_through_policy_audit_and_tool_call(self) -> None:
     conn = connect_sqlite()
     try:
@@ -216,6 +234,32 @@ class _FakeHTTPClient:
   ) -> HTTPResponse:
     self.requests.append((method, url))
     return HTTPResponse(status=200, headers={"content-type": "text/plain"}, body="ok", url=url)
+
+
+class _FakeUrlopenResponse:
+  status = 200
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, exc_type, exc, traceback) -> None:
+    return None
+
+  def read(self) -> bytes:
+    return b"ok"
+
+  def geturl(self) -> str:
+    return "https://example.test/search"
+
+  @property
+  def headers(self):
+    return self
+
+  def get_content_charset(self) -> str:
+    return "utf-8"
+
+  def items(self):
+    return [("content-type", "text/plain")]
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from agent_kernel.context.budget import ContextBudgetManager
+from agent_kernel.context.core import CoreAgentContextProvider
 from agent_kernel.context.token_counter import estimate_tokens
 from agent_kernel.domain.base import new_id
 from agent_kernel.domain.context import (
@@ -108,6 +109,7 @@ class ContextAssembler:
   def _default_providers(self) -> list[ContextLayerProvider]:
     return [
       SystemPolicyLayerProvider(),
+      CoreAgentContextProvider(),
       AgentProfileLayerProvider(),
       SkillToolIndexLayerProvider(),
       WorkingMemoryLayerProvider(self._memory),
@@ -491,6 +493,7 @@ def _skill_index(skill: SkillCard) -> dict[str, Any]:
     "name": skill.name,
     "description": skill.description,
     "when_to_use": skill.when_to_use,
+    "procedure_hint": _skill_procedure_hint(skill),
     "execution_mode": str(skill.execution_mode),
     "recommended_tools": skill.recommended_tools,
     "recommended_workflows": skill.recommended_workflows,
@@ -500,6 +503,33 @@ def _skill_index(skill: SkillCard) -> dict[str, Any]:
     "procedure_memory_ref": skill.procedure_memory_ref.to_dict() if skill.procedure_memory_ref else None,
     "compiled_workflow_ref": skill.compiled_workflow_ref,
   }
+
+
+def _skill_procedure_hint(skill: SkillCard, *, max_chars: int = 420) -> str | None:
+  instructions = skill.instructions
+  if not isinstance(instructions, str):
+    return None
+  compact = " ".join(instructions.split())
+  if not compact:
+    return None
+  explicit_hint = _extract_index_hint(instructions)
+  if explicit_hint is not None:
+    return explicit_hint if len(explicit_hint) <= max_chars else explicit_hint[: max_chars - 16].rstrip() + "...[open skill]"
+  if not skill.skill_id.startswith("builtin.") and not compact.startswith("SOP:"):
+    return None
+  if len(compact) <= max_chars:
+    return compact
+  return compact[: max_chars - 16].rstrip() + "...[open skill]"
+
+
+def _extract_index_hint(instructions: str) -> str | None:
+  marker = "INDEX_HINT:"
+  for line in instructions.splitlines():
+    stripped = line.strip()
+    if stripped.startswith(marker):
+      hint = stripped[len(marker) :].strip()
+      return hint or None
+  return None
 
 
 def _unique_memory_refs(refs: Any) -> list[MemoryRef]:

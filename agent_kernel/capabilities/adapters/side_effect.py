@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -81,7 +82,7 @@ class UrllibHTTPClient:
     timeout_seconds: float | None = None,
   ) -> HTTPResponse:
     data = body.encode("utf-8") if body is not None else None
-    request = Request(url, data=data, headers=headers or {}, method=method.upper())
+    request = Request(_encode_url(url), data=data, headers=headers or {}, method=method.upper())
     with urlopen(request, timeout=timeout_seconds) as response:
       raw_body = response.read()
       charset = response.headers.get_content_charset() or "utf-8"
@@ -91,6 +92,10 @@ class UrllibHTTPClient:
         body=raw_body.decode(charset, errors="replace"),
         url=response.geturl(),
       )
+
+
+def _encode_url(url: str) -> str:
+  return quote(url, safe=":/?#[]@!$&'()*+,;=%")
 
 
 class SideEffectToolProvider:

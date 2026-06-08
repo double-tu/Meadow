@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any, cast
 
-from agent_kernel.capabilities.adapters.control import ControlResult, ControlTargetKind, ControlWorkbench
+from agent_kernel.capabilities.adapters.control import (
+  ControlOwnerContext,
+  ControlResult,
+  ControlTargetKind,
+  ControlWorkbench,
+)
 from agent_kernel.capabilities.adapters.local import LocalToolExecutor
 from agent_kernel.capabilities.adapters.mcp import MCPToolExecutor
 from agent_kernel.capabilities.adapters.process import ProcessToolExecutor
@@ -26,6 +31,8 @@ class CapabilityCallContext:
   run_id: str
   agent_id: str | None = None
   task_id: str | None = None
+  scope: str | None = None
+  workbench_id: str | None = None
   idempotency_key: str | None = None
 
 
@@ -109,7 +116,7 @@ class CapabilityRuntime:
     self._update_tool_call(tool_call, status=ToolCallStatus.RUNNING)
     started_at = utc_now()
     if spec.kind == "workbench":
-      raw_result = await self._call_workbench_adapter(input)
+      raw_result = await self._call_workbench_adapter(input, ctx)
     else:
       raw_result = await self._call_tool_adapter(capability_id, input, tool_call.tool_call_id)
     result = ToolResult.from_value(raw_result).with_context(
@@ -170,9 +177,9 @@ class CapabilityRuntime:
         pass
     return await self._local_tools.call(capability_id, input)
 
-  async def _call_workbench_adapter(self, input: dict[str, Any]) -> ToolResult:
+  async def _call_workbench_adapter(self, input: dict[str, Any], ctx: CapabilityCallContext) -> ToolResult:
     if self._is_control_workbench_input(input):
-      return await self._call_control_workbench_adapter(input)
+      return await self._call_control_workbench_adapter(input, ctx)
     if self._workbench_client is None:
       return ToolResult(
         ok=False,
@@ -200,7 +207,7 @@ class CapabilityRuntime:
     )
     return ToolResult(ok=result.ok, output=result.output, error=result.error)
 
-  async def _call_control_workbench_adapter(self, input: dict[str, Any]) -> ToolResult:
+  async def _call_control_workbench_adapter(self, input: dict[str, Any], ctx: CapabilityCallContext) -> ToolResult:
     if self._control_workbench is None:
       return ToolResult(
         ok=False,
@@ -221,6 +228,7 @@ class CapabilityRuntime:
         target_id=target_id if isinstance(target_id, str) else None,
         payload=input.get("payload", {}),
         timeout_seconds=timeout_seconds if isinstance(timeout_seconds, (int, float)) else None,
+        owner=self._control_owner_context(ctx) if target_kind == "browser" or action in {"inspect_browser", "execute_js", "navigate"} else None,
       )
     except (TypeError, ValueError) as exc:
       return ToolResult(ok=False, error={"type": "invalid_control_command", "message": str(exc)})
@@ -237,6 +245,7 @@ class CapabilityRuntime:
     target_id: str | None,
     payload: Any,
     timeout_seconds: float | None,
+    owner: ControlOwnerContext | None = None,
   ) -> ControlResult:
     workbench = self._control_workbench
     if workbench is None:
@@ -244,17 +253,17 @@ class CapabilityRuntime:
     if not isinstance(payload, dict):
       raise TypeError("payload must be a dictionary.")
     if action == "inspect_browser":
-      return await workbench.inspect_browser(target_id, payload=payload)
+      return await workbench.inspect_browser(target_id, payload=payload, owner=owner)
     if action == "execute_js":
       code = payload.get("code")
       if not isinstance(code, str):
         raise ValueError("payload.code is required for execute_js.")
-      return await workbench.execute_js(code, target_id, timeout_seconds)
+      return await workbench.execute_js(code, target_id, timeout_seconds, owner=owner)
     if action == "navigate":
       url = payload.get("url")
       if not isinstance(url, str):
         raise ValueError("payload.url is required for navigate.")
-      return await workbench.navigate(url, target_id, timeout_seconds)
+      return await workbench.navigate(url, target_id, timeout_seconds, owner=owner)
     if action == "screenshot":
       return await workbench.screenshot(self._require_target_kind(target_kind), target_id)
     if action == "click":
@@ -276,6 +285,16 @@ class CapabilityRuntime:
       x, y = self._require_xy(payload)
       return await workbench.tap(x, y, target_id)
     raise ValueError(f"Unsupported control action: {action}")
+
+  @staticmethod
+  def _control_owner_context(ctx: CapabilityCallContext) -> ControlOwnerContext:
+    return ControlOwnerContext(
+      run_id=ctx.run_id,
+      agent_id=ctx.agent_id,
+      task_id=ctx.task_id,
+      scope=ctx.scope,
+      workbench_id=ctx.workbench_id,
+    )
 
   @staticmethod
   def _require_target_kind(value: Any) -> ControlTargetKind:

@@ -4,6 +4,7 @@ from agent_kernel.agents import ContinuousAgentRunner, ContinuousRunnerConfig
 from datetime import timedelta
 
 from agent_kernel.autonomy import SkillService
+from agent_kernel.autonomy.builtin_skills import ensure_builtin_atomic_skills
 from agent_kernel.capabilities import AtomicCapabilityIds, AtomicCapabilityProvider, CapabilityRegistry, CapabilityRuntime
 from agent_kernel.capabilities.adapters import LocalToolExecutor
 from agent_kernel.context import ContextAssembler
@@ -66,6 +67,7 @@ class ContextAssemblerTests(unittest.TestCase):
 
       self.assertEqual([layer.kind.value for layer in pack.layers], [
         "system_policy",
+        "system_policy",
         "agent_profile",
         "skill_tool_index",
         "working_memory",
@@ -74,6 +76,10 @@ class ContextAssemblerTests(unittest.TestCase):
         "long_term_memory",
       ])
       rendered = str(pack.model_context.messages)
+      self.assertIn("core_agent_context", rendered)
+      self.assertIn("capability_navigation", rendered)
+      self.assertIn("builtin.atomic.web_research", rendered)
+      self.assertIn("No execution, no memory", rendered)
       self.assertIn("skill_browser", rendered)
       self.assertIn("compact_index_only", rendered)
       self.assertNotIn("SECRET_FULL_BROWSER_PROCEDURE", rendered)
@@ -110,6 +116,61 @@ class ContextAssemblerTests(unittest.TestCase):
       self.assertTrue(pack.model_context.messages)
       self.assertIn("new question", str(pack.model_context.messages))
       self.assertIn("context_layer_budget_omitted_items", pack.quality_warnings)
+    finally:
+      conn.close()
+
+  def test_builtin_sop_skill_index_includes_compact_procedure_hint(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      skill_service = SkillService(uow_factory)
+      skills = ensure_builtin_atomic_skills(skill_service)
+      browser_skill = next(skill for skill in skills if skill.skill_id == "builtin.atomic.web_research")
+      assembler = ContextAssembler(uow_factory=uow_factory, memory=MemoryFacade(uow_factory))
+
+      pack = assembler.assemble(
+        request=_request(
+          run_id="run_ctx_builtin_sop_hint",
+          scope="chat_builtin_sop_hint",
+          skills=[browser_skill],
+        )
+      )
+
+      rendered = str(pack.model_context.messages)
+      self.assertIn("procedure_hint", rendered)
+      self.assertIn("动态推荐", rendered)
+      self.assertIn("title/text/url/author/time/metrics", rendered)
+    finally:
+      conn.close()
+
+  def test_custom_skill_can_expose_editable_index_hint_without_full_instructions(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      skill = SkillCard(
+        skill_id="custom.web_feed",
+        name="Custom feed reader",
+        description="Read feed cards.",
+        when_to_use="When the user asks for feed cards.",
+        instructions=(
+          "INDEX_HINT: use browser_execute_js to extract visible feed cards.\n"
+          "SECRET_FULL_FEED_PROCEDURE_SHOULD_NOT_BE_IN_INDEX"
+        ),
+        recommended_tools=["browser_execute_js"],
+      )
+      assembler = ContextAssembler(uow_factory=uow_factory, memory=MemoryFacade(uow_factory))
+
+      pack = assembler.assemble(
+        request=_request(
+          run_id="run_ctx_custom_index_hint",
+          scope="chat_custom_index_hint",
+          skills=[skill],
+        )
+      )
+
+      rendered = str(pack.model_context.messages)
+      self.assertIn("use browser_execute_js to extract visible feed cards", rendered)
+      self.assertNotIn("SECRET_FULL_FEED_PROCEDURE", rendered)
     finally:
       conn.close()
 
@@ -153,6 +214,9 @@ class ContextAssemblerRunnerTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(result.status, "completed")
       context = provider.calls[0][1]
       rendered = str(context.messages)
+      self.assertIn("core_agent_context", rendered)
+      self.assertIn("skill_open", rendered)
+      self.assertIn("failure_escalation", rendered)
       self.assertIn("skill_review", rendered)
       self.assertIn("compact_index_only", rendered)
       self.assertNotIn("FULL_REVIEW_PROCEDURE", rendered)

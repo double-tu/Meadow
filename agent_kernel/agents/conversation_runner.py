@@ -94,6 +94,8 @@ class ContinuousAgentRunner:
     scope = scope or run_id
     messages: list[dict[str, Any]] = self._initial_messages(user_message, history_messages or [])
     all_tool_calls: list[ContinuousToolCallRecord] = []
+    last_repetition_key: str | None = None
+    consecutive_repeated_tool_calls = 0
     self._append_event(
       RuntimeEvent(
         event_type=RuntimeEventType.RUN_CREATED,
@@ -110,7 +112,7 @@ class ContinuousAgentRunner:
       model_result = self._normalize_model_result(model_result)
       tool_calls = self._extract_tool_calls(model_result)
       if not tool_calls:
-        output = self._finish_output(model_result)
+        output = self._finish_output(model_result, all_tool_calls)
         self._append_turn_event(run_id, agent_id, task_id, turn, output, [])
         return ContinuousRunnerResult(
           run_id=run_id,
@@ -129,6 +131,34 @@ class ContinuousAgentRunner:
           run_id=run_id,
           scope=scope,
         )
+        repetition_key = self._tool_repetition_key(call.capability_id, call.input)
+        if repetition_key == last_repetition_key:
+          consecutive_repeated_tool_calls += 1
+        else:
+          last_repetition_key = repetition_key
+          consecutive_repeated_tool_calls = 1
+        if consecutive_repeated_tool_calls > 3:
+          warning_record = ContinuousToolCallRecord(
+            name=call.display_name,
+            capability_id=call.capability_id,
+            input=call.input,
+            ok=False,
+            error={
+              "type": "repeated_tool_call_guard",
+              "message": "The same tool call was repeated too many times without changing input.",
+            },
+          )
+          turn_records.append(warning_record)
+          all_tool_calls.extend(turn_records)
+          output = _fallback_output_from_tool_calls(all_tool_calls)
+          self._append_turn_event(run_id, agent_id, task_id, turn, output, turn_records)
+          return ContinuousRunnerResult(
+            run_id=run_id,
+            status="max_turns_exceeded",
+            turns=turn,
+            output=output,
+            tool_calls=all_tool_calls,
+          )
         outcome = await self._capability_runtime.call(
           call.capability_id,
           call.input,
@@ -136,6 +166,7 @@ class ContinuousAgentRunner:
             run_id=run_id,
             agent_id=agent_id,
             task_id=task_id,
+            scope=scope,
             idempotency_key=f"{run_id}:{turn}:{len(all_tool_calls) + len(turn_records)}:{call.capability_id}",
           ),
         )
@@ -206,7 +237,8 @@ class ContinuousAgentRunner:
             "results": tool_messages,
             "instruction": (
               "Continue working on original_user_goal. If the goal is not completed yet, call the next required tool. "
-              "Do not finish by only summarizing intermediate inspection results unless they fully satisfy the original goal."
+              "Do not finish by only summarizing intermediate inspection results unless they fully satisfy the original goal. "
+              "Follow the relevant Skill/SOP instructions when a selected or active Skill applies."
             ),
           },
         }
@@ -353,9 +385,14 @@ class ContinuousAgentRunner:
     return {"name": name, "input": payload}
 
   @staticmethod
-  def _finish_output(result: dict[str, Any]) -> dict[str, Any]:
+  def _finish_output(result: dict[str, Any], tool_calls: list[ContinuousToolCallRecord] | None = None) -> dict[str, Any]:
     output = result.get("output", result.get("content", result))
-    return output if isinstance(output, dict) else {"value": output}
+    normalized = output if isinstance(output, dict) else {"value": output}
+    if _has_displayable_output(normalized):
+      return normalized
+    if tool_calls:
+      return _fallback_output_from_tool_calls(tool_calls)
+    return normalized
 
   def _append_turn_event(
     self,
@@ -393,6 +430,10 @@ class ContinuousAgentRunner:
     with self._uow_factory() as uow:
       uow.events.append(event)
 
+  @staticmethod
+  def _tool_repetition_key(capability_id: str, input: dict[str, Any]) -> str:
+    return to_json({"capability_id": capability_id, "input": _stable_tool_input(input)})
+
 
 _DEFAULT_SYSTEM_INSTRUCTIONS = (
   "你是 Meadow 日常 Agent。你必须基于用户目标、上下文、记忆和 Skills 自主决定下一步。"
@@ -414,6 +455,18 @@ def _normalize_history_messages(messages: list[dict[str, Any]]) -> list[dict[str
       continue
     normalized.append({"role": role, "content": content})
   return normalized
+
+
+def _stable_tool_input(value: Any) -> Any:
+  if isinstance(value, dict):
+    return {
+      key: _stable_tool_input(item)
+      for key, item in sorted(value.items())
+      if key not in {"run_id", "scope"}
+    }
+  if isinstance(value, list):
+    return [_stable_tool_input(item) for item in value]
+  return value
 
 
 def _compact_for_json(value: Any, *, max_bytes: int) -> Any:
@@ -480,27 +533,115 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
       "content": "日常 Agent 达到最大执行轮次，但没有完成任何工具调用。请重试或把目标拆得更具体。",
     }
   feed_titles: list[str] = []
+  browser_observations: list[dict[str, Any]] = []
   successful_urls: list[str] = []
   failed_tools: list[str] = []
+  access_issues: list[str] = []
+  created_workbenches: list[dict[str, Any]] = []
+  delegations: list[dict[str, Any]] = []
   for call in tool_calls:
     if call.ok:
+      workbench = _extract_workbench_summary(call.output)
+      if workbench is not None:
+        created_workbenches.append(workbench)
+      delegations.extend(_extract_delegation_summaries(call.output))
       url = call.output.get("url")
       if isinstance(url, str) and url:
         successful_urls.append(url)
+      access_issue = _describe_access_issue(call)
+      if access_issue is not None:
+        access_issues.append(access_issue)
       body_summary = call.output.get("body_summary")
       if isinstance(body_summary, dict):
         titles = body_summary.get("feed_titles")
         if isinstance(titles, list):
           feed_titles.extend(str(title) for title in titles if title)
+      browser_observation = _extract_browser_observation(call.output)
+      if browser_observation is not None:
+        browser_observations.append(browser_observation)
     elif call.error:
       error_type = call.error.get("type", "unknown_error")
       failed_tools.append(f"{call.name}: {error_type}")
+  if created_workbenches:
+    lines = ["已创建/推进协作工作台，后续可以在工作台继续查看、暂停、重试或追加消息："]
+    for item in created_workbenches[-5:]:
+      label = item.get("title") or item.get("workbench_id") or "未命名工作台"
+      kind = item.get("kind") or "workbench"
+      status = item.get("status") or "unknown"
+      lines.append(f"- {label}（{kind}，状态：{status}，ID：{item.get('workbench_id') or 'unknown'}）")
+    if delegations:
+      lines.append("")
+      lines.append(f"已关联 {len(delegations)} 个子 Agent/CLI 委派任务。")
+    if access_issues:
+      lines.append("")
+      lines.append("访问受限：" + "；".join(_unique_strings(access_issues)[-3:]))
+    if failed_tools:
+      lines.append("")
+      lines.append("部分操作失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
+    return {"content": "\n".join(lines)}
+  if delegations:
+    lines = [f"已启动/查询 {len(delegations)} 个子 Agent 委派任务："]
+    for item in delegations[-8:]:
+      label = item.get("task") or item.get("task_id") or "子任务"
+      status = item.get("status") or "unknown"
+      lines.append(f"- {label}（状态：{status}，ID：{item.get('task_id') or 'unknown'}）")
+    if failed_tools:
+      lines.append("")
+      lines.append("部分操作失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
+    return {"content": "\n".join(lines)}
   if feed_titles:
     lines = ["已获取到页面数据，但执行轮次已用完。根据已返回的数据，看到的推荐内容包括："]
     lines.extend(f"- {title}" for title in _unique_strings(feed_titles)[:12])
+    if access_issues:
+      lines.append("")
+      lines.append("访问受限：" + "；".join(_unique_strings(access_issues)[-3:]))
     if failed_tools:
       lines.append("")
-      lines.append("部分浏览器操作失败：" + "；".join(failed_tools[-3:]))
+      lines.append("部分浏览器操作失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
+    return {"content": "\n".join(lines)}
+  if browser_observations:
+    lines = ["已通过浏览器读取到页面内容，但执行轮次已用完。根据已返回的页面观察："]
+    for item in browser_observations[-3:]:
+      title = item.get("title")
+      url = item.get("url")
+      if title or url:
+        lines.append(f"- 页面：{title or url}")
+      cards = item.get("visible_cards")
+      if isinstance(cards, list) and cards:
+        lines.extend(f"  - {card}" for card in _unique_strings([str(card) for card in cards])[:6])
+      search_results = item.get("search_results")
+      if isinstance(search_results, list) and search_results:
+        lines.append("  - 搜索结果候选（尚需继续打开结果页核验）：")
+        for result in search_results[:5]:
+          if not isinstance(result, dict):
+            continue
+          title = str(result.get("title") or "").strip()
+          href = str(result.get("href") or "").strip()
+          snippet = str(result.get("snippet") or "").strip()
+          if title and href:
+            line = f"    - {title}: {href}"
+            if snippet:
+              line += f"；摘要：{_compact_browser_text(snippet)[:240]}"
+            lines.append(line)
+      links = item.get("links")
+      if not search_results and isinstance(links, list) and links:
+        lines.append("  - 候选链接：")
+        for link in links[:5]:
+          if not isinstance(link, dict):
+            continue
+          text = str(link.get("text") or "").strip()
+          href = str(link.get("href") or "").strip()
+          if text and href:
+            lines.append(f"    - {text}: {href}")
+      text = item.get("text")
+      if isinstance(text, str) and text.strip():
+        lines.append("  - 摘要：" + _compact_browser_text(text))
+    if access_issues:
+      lines.append("")
+      lines.append("访问受限：" + "；".join(_unique_strings(access_issues)[-3:]))
+    if failed_tools:
+      lines.append("")
+      lines.append("部分操作失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
     return {"content": "\n".join(lines)}
   summary = [
     f"日常 Agent 达到最大执行轮次，已执行 {len(tool_calls)} 次工具调用。",
@@ -508,9 +649,114 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
   ]
   if successful_urls:
     summary.append("已成功请求：" + "、".join(_unique_strings(successful_urls)[-3:]))
+  if access_issues:
+    summary.append("访问受限：" + "；".join(_unique_strings(access_issues)[-3:]))
   if failed_tools:
-    summary.append("最近失败：" + "；".join(failed_tools[-3:]))
+    summary.append("最近失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
   return {"content": "\n".join(summary)}
+
+
+def _has_displayable_output(output: dict[str, Any]) -> bool:
+  for key in ("content", "summary", "value"):
+    value = output.get(key)
+    if isinstance(value, str) and value.strip():
+      return True
+  return bool(output) and output != {"content": ""} and output != {"value": ""} and output != {"output": ""}
+
+
+def _extract_workbench_summary(output: dict[str, Any]) -> dict[str, Any] | None:
+  workbench_wrapper = output.get("workbench")
+  if not isinstance(workbench_wrapper, dict):
+    return None
+  workbench = workbench_wrapper.get("workbench")
+  if not isinstance(workbench, dict):
+    return None
+  return {
+    "workbench_id": workbench.get("workbench_id"),
+    "title": workbench.get("title"),
+    "kind": workbench.get("kind"),
+    "status": workbench.get("status"),
+  }
+
+
+def _extract_delegation_summaries(output: dict[str, Any]) -> list[dict[str, Any]]:
+  raw_items: list[Any] = []
+  delegation = output.get("delegation")
+  if isinstance(delegation, dict):
+    raw_items.append(delegation)
+  delegations = output.get("delegations")
+  if isinstance(delegations, list):
+    raw_items.extend(delegations)
+  workbench_wrapper = output.get("workbench")
+  if isinstance(workbench_wrapper, dict):
+    workbench_delegations = workbench_wrapper.get("delegations")
+    if isinstance(workbench_delegations, list):
+      raw_items.extend(workbench_delegations)
+  summaries: list[dict[str, Any]] = []
+  for item in raw_items:
+    if not isinstance(item, dict):
+      continue
+    summaries.append(
+      {
+        "task_id": item.get("task_id"),
+        "task": item.get("task"),
+        "status": item.get("status"),
+      }
+    )
+  return summaries
+
+
+def _extract_browser_observation(output: dict[str, Any]) -> dict[str, Any] | None:
+  page = output.get("page")
+  if not isinstance(page, dict):
+    return None
+  observation: dict[str, Any] = {}
+  for key in ("title", "url", "text"):
+    value = page.get(key)
+    if isinstance(value, str) and value.strip():
+      observation[key] = value.strip()
+  for key in ("feed_titles", "visible_cards"):
+    value = page.get(key)
+    if isinstance(value, list):
+      items = [str(item).strip() for item in value if str(item).strip()]
+      if items:
+        observation[key] = items
+  links = page.get("links")
+  if isinstance(links, list):
+    normalized_links = []
+    for item in links:
+      if not isinstance(item, dict):
+        continue
+      text = item.get("text")
+      href = item.get("href")
+      if isinstance(text, str) and text.strip() and isinstance(href, str) and href.strip():
+        normalized_links.append({"text": text.strip(), "href": href.strip()})
+    if normalized_links:
+      observation["links"] = normalized_links[:10]
+  search_results = page.get("search_results")
+  if isinstance(search_results, list):
+    normalized_results = []
+    for item in search_results:
+      if not isinstance(item, dict):
+        continue
+      title = item.get("title")
+      href = item.get("href")
+      snippet = item.get("snippet")
+      if isinstance(title, str) and title.strip() and isinstance(href, str) and href.strip():
+        result = {"title": title.strip(), "href": href.strip()}
+        if isinstance(snippet, str) and snippet.strip():
+          result["snippet"] = snippet.strip()
+        normalized_results.append(result)
+    if normalized_results:
+      observation["search_results"] = normalized_results[:8]
+  return observation or None
+
+
+def _compact_browser_text(text: str) -> str:
+  compact = " ".join(text.split())
+  if len(compact) <= 600:
+    return compact
+  return compact[:600] + "...[truncated]"
 
 
 def _unique_strings(values: list[str]) -> list[str]:
@@ -522,3 +768,35 @@ def _unique_strings(values: list[str]) -> list[str]:
     seen.add(value)
     result.append(value)
   return result
+
+
+def _describe_access_issue(call: ContinuousToolCallRecord) -> str | None:
+  issue = call.output.get("access_issue")
+  if not isinstance(issue, dict):
+    return None
+  issue_type = issue.get("type")
+  url = call.output.get("url")
+  label = str(url) if isinstance(url, str) and url else call.name
+  if issue_type in {"anti_spider_challenge", "captcha_or_challenge", "anti_bot_rate_limit"}:
+    return f"{label} 返回反爬/验证码页面，HTTP 结果不能当作有效搜索内容"
+  message = issue.get("message")
+  return f"{label} 访问受限：{message}" if isinstance(message, str) and message else f"{label} 访问受限"
+
+
+def _humanize_tool_failures(failures: list[str]) -> list[str]:
+  return [_humanize_tool_failure(item) for item in failures]
+
+
+def _humanize_tool_failure(value: str) -> str:
+  translations = {
+    "adapter_not_configured": "适配器未配置",
+    "network_error": "网络请求失败",
+    "http_error": "HTTP 请求失败",
+    "workbench_error": "工作台操作失败",
+    "delegation_error": "子 Agent 委派失败",
+    "invalid_input": "工具参数无效",
+  }
+  if ": " not in value:
+    return translations.get(value, value)
+  name, error_type = value.split(": ", 1)
+  return f"{name}: {translations.get(error_type, error_type)}"

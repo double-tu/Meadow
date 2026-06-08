@@ -7,6 +7,7 @@ from agent_kernel.capabilities.adapters import (
   ADBMobileBackend,
   BrowserLinkHTTPBackend,
   ControlCommand,
+  ControlOwnerContext,
   CommandResult,
   ControlResult,
   ControlTarget,
@@ -236,6 +237,9 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.output["active_target_id"], "tab_1")
     self.assertEqual(result.output["page"]["title"], "Example Page")
     self.assertEqual(result.output["page"]["feed_titles"], ["推荐 A", "推荐 B"])
+    self.assertEqual(result.output["page"]["links"][0]["text"], "结果 A")
+    self.assertEqual(result.output["page"]["links"][0]["href"], "https://source.example/a")
+    self.assertEqual(result.output["page"]["search_results"][0]["title"], "结果 A")
 
   async def test_browser_link_http_backend_inspect_tabs_only_skips_page_summary(self) -> None:
     transport = _BrowserLinkTransport()
@@ -247,6 +251,58 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertIn("targets", result.output)
     self.assertNotIn("page", result.output)
     self.assertEqual([request["cmd"] for request in transport.requests], ["get_all_sessions"])
+
+  async def test_control_workbench_browser_scope_can_see_all_tabs_without_claiming(self) -> None:
+    backend = _ScopedBrowserBackend()
+    workbench = ControlWorkbench(backend)
+
+    result = await workbench.inspect_browser(payload={"tabs_only": True}, owner=ControlOwnerContext(run_id="run_daily", scope="chat"))
+
+    self.assertTrue(result.ok)
+    self.assertEqual([target["target_id"] for target in result.output["targets"]], ["tab_a", "tab_b"])
+    self.assertNotIn("ownership", result.output["targets"][0])
+
+  async def test_control_workbench_browser_scope_reuses_created_target_for_later_scan(self) -> None:
+    backend = _ScopedBrowserBackend()
+    owner = ControlOwnerContext(run_id="run_daily", scope="chat")
+    workbench = ControlWorkbench(backend)
+
+    navigated = await workbench.navigate("https://search.example", owner=owner)
+    scanned = await workbench.inspect_browser(owner=owner)
+
+    self.assertTrue(navigated.ok)
+    self.assertEqual(navigated.output["target_id"], "tab_new")
+    self.assertTrue(scanned.ok)
+    self.assertEqual(backend.commands[-1].target_id, "tab_new")
+    self.assertEqual(scanned.output["active_target_id"], "tab_new")
+    self.assertEqual(scanned.output["browser_scope"]["active_target_id"], "tab_new")
+
+  async def test_control_workbench_browser_scope_rejects_other_owner_mutation(self) -> None:
+    backend = _ScopedBrowserBackend()
+    workbench = ControlWorkbench(backend)
+    first_owner = ControlOwnerContext(run_id="run_a", scope="chat_a")
+    second_owner = ControlOwnerContext(run_id="run_b", scope="chat_b")
+
+    claimed = await workbench.navigate("https://owned.example", target_id="tab_a", owner=first_owner)
+    rejected = await workbench.execute_js("document.title", target_id="tab_a", owner=second_owner)
+
+    self.assertTrue(claimed.ok)
+    self.assertFalse(rejected.ok)
+    self.assertEqual(rejected.error["type"], "browser_target_owned_by_other_scope")
+
+  async def test_control_workbench_subagent_scan_does_not_read_other_owner_page_by_default(self) -> None:
+    backend = _ScopedBrowserBackend()
+    workbench = ControlWorkbench(backend)
+    first_owner = ControlOwnerContext(run_id="run_a", agent_id="agent_a", scope="chat_a")
+    second_owner = ControlOwnerContext(run_id="run_b", agent_id="agent_b", scope="chat_b")
+
+    await workbench.navigate("https://owned.example", target_id="tab_a", owner=first_owner)
+    scanned = await workbench.inspect_browser(owner=second_owner)
+
+    self.assertTrue(scanned.ok)
+    self.assertIn("targets", scanned.output)
+    self.assertNotIn("page", scanned.output)
+    self.assertEqual(scanned.output["page_error"]["type"], "browser_target_owned_by_other_scope")
 
   async def test_adb_mobile_backend_lists_devices_and_parses_ui_dump(self) -> None:
     runner = _ADBRunner()
@@ -535,6 +591,44 @@ class ControlTargetCommandFactory:
     return ControlCommand.create("desktop", "dump_ui", target_id=target_id, timeout_seconds=2)
 
 
+class _ScopedBrowserBackend:
+  def __init__(self) -> None:
+    self.commands: list[ControlCommand] = []
+    self.targets = {
+      "tab_a": ControlTarget(target_id="tab_a", kind="browser", label="A", metadata={"url": "https://a.example"}),
+      "tab_b": ControlTarget(target_id="tab_b", kind="browser", label="B", metadata={"url": "https://b.example"}),
+    }
+
+  def list_targets(self, kind=None):
+    if kind not in (None, "browser"):
+      return []
+    return list(self.targets.values())
+
+  async def execute(self, command):
+    self.commands.append(command)
+    if command.action == "navigate":
+      url = command.payload.get("url")
+      target_id = command.target_id or "tab_new"
+      self.targets[target_id] = ControlTarget(
+        target_id=target_id,
+        kind="browser",
+        label="New",
+        metadata={"url": url},
+      )
+      return ControlResult(ok=True, output={"target_id": target_id, "active_target_id": target_id, "url": url})
+    if command.action == "inspect":
+      output = {"targets": [target.to_dict() for target in self.list_targets("browser")]}
+      if command.payload.get("tabs_only"):
+        return ControlResult(ok=True, output=output)
+      target_id = command.target_id or "tab_a"
+      output["active_target_id"] = target_id
+      output["page"] = {"title": target_id, "url": self.targets[target_id].metadata.get("url")}
+      return ControlResult(ok=True, output=output)
+    if command.action == "execute_js":
+      return ControlResult(ok=True, output={"target_id": command.target_id, "result": {"data": "ok"}})
+    return ControlResult(ok=False, error={"type": "unsupported"})
+
+
 class _BrowserLinkTransport:
   def __init__(self) -> None:
     self.requests: list[dict[str, object]] = []
@@ -582,6 +676,10 @@ class _BrowserLinkTransport:
                 "title": "Example Page",
                 "feed_titles": ["推荐 A", "推荐 B"],
                 "visible_cards": [],
+                "links": [{"text": "结果 A", "href": "https://source.example/a"}],
+                "search_results": [
+                  {"title": "结果 A", "href": "https://source.example/a", "snippet": "来源 A 摘要"}
+                ],
                 "text": "推荐 A 推荐 B",
               }
             }

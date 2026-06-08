@@ -37,12 +37,20 @@ Host / Desktop Chat
 - 接收用户消息。
 - 展示对话、任务、工具调用、审批、事件和 artifact。
 - 发送 pause/retry/clear/resume 等用户控制。
+- 通过应用层接口委托模型绑定解析和 Daily Agent 执行。
 
 不负责:
 
 - 选择工具。
 - 直接调用模型。
 - 直接执行浏览器、文件、代码、MCP、Workflow、子 Agent。
+- 直接构造具体模型 Provider 或具体 Agent Runner。
+
+当前代码边界:
+
+- `ModelBindingProvider` 负责根据 Agent ID 解析 provider/model/API 配置, 默认实现为 `ConfigModelBindingProvider`, 测试或嵌入式宿主可使用静态 binding。
+- `DailyAgentExecutor` 是日常 Agent 执行接口, 当前默认实现 `ContinuousDailyAgentExecutor` 适配现有连续工具循环。
+- 后续 `Default Daily Agent Workflow` 落地时, 应新增 workflow-backed executor 替换默认实现, 而不是继续扩大 `DesktopChatService` 或让 UI 参与意图路由。
 
 ### Conversation & Task Hub
 
@@ -117,6 +125,45 @@ Skill 可以引用:
 - examples / artifacts
 
 Skill 不能直接修改 workflow graph; 如需沉淀可复用流程, 应通过 autonomy/workflow induction 生成 draft `WorkflowSpec`。
+
+Skill 可以在 `instructions` 中声明一行 `INDEX_HINT: ...`。ContextAssembler 只把这条用户可编辑的短提示放入 compact Skill index, 用于首轮行动决策；完整 SOP 仍需通过 `skill_open` 渐进式读取。框架不能按具体网站、具体任务或具体 Skill ID 写特殊执行流程。
+
+### Browser Atomic Capability 与 SOP
+
+GenericAgent 的可取之处不是把“浏览器搜索”写成固定业务流, 而是把浏览器拆成少量稳定原子能力, 再用 SOP 约束模型如何组合。Meadow 对齐这个边界:
+
+- `browser_scan`: 读取浏览器 targets 和当前页面观察结果, 包括 `page.title`、`page.url`、`page.text`、`page.links`、`page.search_results`、`page.visible_cards`。
+- `browser_navigate`: 打开 URL 或在真实浏览器标签页导航。
+- `browser_execute_js`: 精确执行 JS, 用于点击、滚动、DOM 提取、动态页面处理和扩展桥能力。
+- `builtin.atomic.web_research`: SOP/Skill, 说明何时扫描标签页、何时导航/搜索、如何从搜索结果页继续打开候选来源、如何核验 title/url/facts, 以及失败时如何切换 HTTP 或下一个候选链接。
+
+动态信息流页面（推荐、最新帖子、Feed、社交媒体卡片流）不应依赖反复全页 `browser_scan`。模型应在绑定的 `target_id` 上用 `browser_execute_js` 完成 refresh、scroll、click 和 DOM 结构化抽取, 返回紧凑 JSON, 例如 `title/text/url/author/time/metrics`。如果一次抽取为空, 先等待或滚动再抽取；仍为空再报告登录、反爬或页面结构不可读。
+
+应用层 runner 只能负责模型调用、工具调用、结果回灌、事件记录和预算控制; 不能内置“搜索必须打开第几个页面”“小红书用某个固定脚本”等任务策略。任务策略必须来自 Skill/SOP、记忆、上下文或后续编译出的 Workflow。
+
+### Browser Target Ownership / Lease / Scope
+
+日常对话和多 Agent 浏览器任务必须同时满足两个目标:
+
+- 全局感知: 日常 Agent 可以通过 `browser_scan(tabs_only=true)` 或普通 `browser_scan` 看到所有真实浏览器标签页, 用于判断当前环境、选择目标页、向用户说明可操作对象。
+- 受控操作: 一旦要导航、执行 JS、点击、滚动、持续读取某个页面, 必须绑定到明确的 `target_id` 或当前 run/agent/scope 已拥有的 active target, 不能依赖“当前激活标签页”。
+
+为此 `ControlWorkbench` 增加浏览器目标协调层:
+
+- `ControlOwnerContext`: 由 `CapabilityRuntime` 从 `run_id`、`agent_id`、`task_id`、`scope`、`workbench_id` 生成, 表示一次控制动作的逻辑所有者。
+- `BrowserTargetOwnership`: 记录 `target_id` 属于哪个 run/agent/scope, 以及最近用途和动作。
+- `BrowserTargetLease`: 执行控制动作时的短租约。读取使用 read lease, 导航/JS 使用 mutation lease, 关闭/重载等未来动作使用 exclusive lease。
+- `BrowserTargetCoordinator`: 不依赖 BrowserLink/Playwright 具体实现, 只负责目标解析、归属校验、租约冲突和结果注解。
+
+默认规则:
+
+- `browser_scan(tabs_only=true)` 只列出 tabs, 不抢占目标。
+- 无 `target_id` 的 `browser_scan` 可以读取当前后端选择的页面, 但只有当该目标未被其他 scope 拥有时才绑定到当前 scope。
+- `browser_navigate` 无 `target_id` 时创建新标签页并绑定当前 scope; 有 `target_id` 时绑定/导航该目标。
+- `browser_execute_js` 必须有明确 `target_id` 或当前 scope 已有 active target; 如果目标属于其他 scope, 返回 `browser_target_owned_by_other_scope`。
+- 子 Agent 并发浏览器任务应优先创建或领取自己的 target/lane, 后续工具调用必须携带或继承该 target, 避免跨 agent 误读、误点、误关闭。
+
+UI 层应该展示 target 的 `ownership`、`owned_by_current_scope`、`active_lease` 和 `browser_scope.active_target_id`, 让用户能看到哪个 Agent 正在使用哪个标签页, 并能在后续实现里进行释放、转交、强制接管或关闭。
 
 ### Capability / Workflow / Agent / MCP Catalog
 

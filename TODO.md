@@ -15,6 +15,10 @@
 目标: 以 `docs/context-memory-architecture.md` 为阶段性蓝图，把 Meadow 的上下文从“消息 + memory”推进到七层可预算、可解释、可扩展的上下文操作系统。日常对话、工作台、多 Agent、CLI、浏览器、Workflow 后续统一通过该机制获得上下文，而不是在各服务里硬拼 prompt。
 
 - [x] 编写七层上下文与记忆架构/代码设计文档: `docs/context-memory-architecture.md`。
+- [x] 编写核心 Agent 上下文与 Skill/SOP 架构文档: `docs/core-agent-context-architecture.md`, 吸收 GenericAgent 的 L0/L1/L3 分层思想, 但映射到 Meadow 的 `ContextAssembler`、`SkillService`、`MemoryFacade` 和 `CapabilityRuntime`。
+- [ ] 实现 `CoreAgentContextProvider` MVP: 默认注入核心宪法、失败升级规则、能力导航索引、渐进式 Skill/SOP 披露规则, 并保持短上下文。
+- [ ] 建立 Meadow Skill/SOP 模板契约: SkillCard 负责索引, SkillSpec 负责流程, SkillResource 负责脚本/模板/长参考；默认上下文只加载 Card 与能力导航。
+- [ ] 补齐内置 SOP Skill 集: memory_governance、browser_research、planning、delegation、review、verification；先以 SkillSpec/instructions 落地, 后续迁移为 SkillResource。
 - [x] 实现 `ContextAssembler` 与 `ContextBudgetManager`: 支持 System/Policy、Agent Profile、Skill/Tool Index、Working Memory、Conversation Window、Episodic/Event/Artifact、Long-term Semantic/Procedural 七层组装。
 - [x] 实现渐进式 Skill 披露 MVP: 默认只注入 SkillCard/Tool Index，不再把完整 Skill instructions 直接放入日常 Agent 默认上下文。
 - [x] 实现 SkillSpec 按需打开 MVP: 模型可通过 `skill_open` 读取完整 Skill instructions、约束、失败模式、推荐工具/工作流；SkillResource/脚本/参考文件细粒度加载仍待补。
@@ -34,7 +38,15 @@
 - [x] 梳理日常对话 Agent 流转: `docs/daily-agent-flow.md` 明确 Desktop Chat -> Conversation & Task Hub -> Default Daily Agent Workflow -> Agent Runtime Loop -> Capability/Workflow/Agent/MCP/Workbench -> Event/Artifact/Memory -> UI 的边界。
 - [ ] 实现 Conversation & Task Hub MVP: 将日常对话消息映射为 Thread/Turn/Objective/Task/Run 关联, DesktopChatService 不直接承担 Agent Loop。
 - [ ] 实现 Default Daily Agent Workflow: 日常对话默认启动可恢复、可审计、可暂停/取消的 Agent Run, 而不是单次 chat completion。
+- [x] 收敛日常对话应用层边界: 新增 `ModelBindingProvider` 与 `DailyAgentExecutor` 接口, `DesktopChatService` 只委托模型绑定和 Agent 执行, 不再直接构造 provider/runner；当前默认实现仍是 `ContinuousDailyAgentExecutor`, 后续替换为 workflow-backed executor。
 - [ ] 增强 Agent Runtime 多轮行动循环: 模型基于 Context/Memory/Skills 自主选择 final response、capability call、workflow call、agent delegation、MCP/tool、user input request, 并把真实结果回灌继续推理。
+- [x] 对齐 GenericAgent 的浏览器/SOP 分层: 浏览器原子能力提供 `browser_scan`/`browser_navigate`/`browser_execute_js` 和结构化页面观察, `builtin.atomic.web_research` 以 SOP 指导模型组合工具, runner 不硬编码浏览器搜索流程。
+- [x] 强化动态信息流浏览器 SOP: compact Skill index 和工具 schema 均提示模型在推荐/最新帖子/Feed 页面优先用 `browser_execute_js` 做 refresh/scroll/DOM 卡片抽取, 减少重复全页 `browser_scan`。
+- [x] 建立浏览器目标所有权/租约/作用域 MVP: `ControlWorkbench` 通过 `BrowserTargetCoordinator` 支持全量 tabs 可见、run/agent/scope active target 绑定、跨 scope 操作拒绝和短租约注解, 避免日常对话/子 Agent 并发浏览器任务互相误读或误操作。
+- [ ] 深化浏览器目标治理: 持久化 BrowserTargetOwnership/lease 事件、支持 target release/transfer/force-claim API、浏览器 lane/pool、关闭/重载 exclusive lease、UI 展示 target owner/status/action。
+- [ ] 深化浏览器页面观察与 artifact handoff: 增强主内容抽取、动态页面滚动/分页、Feed/card 结构化抽取、搜索结果候选去噪、来源页正文窗口化读取, 并把大页面内容保存为 artifact ref 而不是直接塞入 event/context。
+- [ ] 增强 Web Research SOP 执行闭环验收: 日常对话中模型能先 scan tabs, 再搜索/打开候选结果页, 至少核验多个公开来源后回答; 工具失败时能基于 SOP 自动换链接、换搜索入口或退回 HTTP。
+- [x] 增加 ContinuousAgentRunner 重复工具调用保护 MVP: 对同一 capability + 稳定输入连续重复超过阈值时返回 guard 结果, 防止模型在浏览器/HTTP 失败或标签漂移时无限循环。
 - [ ] 实现模型可见能力目录裁剪: 内置原子能力、Workflow catalog、Agent delegation catalog、MCP catalog、Workbench/control catalog、Policy/grant context 通过 Skills/Context 注入, 由模型自主决策使用。
 - [ ] 将日常对话控制对齐真实 runtime: pause/retry/clear/resume/cancel 映射到 run/task/tool-call/session 控制, 而不是只改 UI 或 chat session 状态。
 - [x] 完成桌面端基础 API: workspace 聚合、全局审批队列、tool-call 列表、live event stream 游标、scheduled task 更新/删除/触发历史、control command 执行。

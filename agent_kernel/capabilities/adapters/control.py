@@ -36,6 +36,7 @@ ControlActionKind = Literal[
   "dump_ui",
   "tap",
 ]
+BrowserLeaseMode = Literal["read", "mutation", "exclusive"]
 
 
 _BROWSER_PAGE_SUMMARY_JS = r"""
@@ -63,12 +64,89 @@ _BROWSER_PAGE_SUMMARY_JS = r"""
       .map((el) => clean(el.innerText || el.textContent || ''))
       .filter((text) => text.length >= 2 && text.length <= 160)
   ).slice(0, 30);
+  const normalizeUrl = (href) => {
+    try { return new URL(href, location.href).href; } catch (_) { return ''; }
+  };
+  const isBlockedHref = (href) => (
+    !href ||
+    href.startsWith('javascript:') ||
+    href.startsWith('mailto:') ||
+    href.startsWith('tel:') ||
+    href.includes('127.0.0.1') ||
+    href.includes('localhost')
+  );
+  const isNoiseTitle = (text) => /^(百度首页|每天充电学习|抗击肺炎|hao123|更多产品|图片|视频|资讯|地图|贴吧|文库|知道|学术|更多|设置|登录|首页|上一页|下一页)$/.test(text);
+  const mainRoots = Array.from(new Set([
+    ...Array.from(document.querySelectorAll('#content_left, #b_results, #search, #rso, #center_col, main')),
+    document.body
+  ].filter(Boolean)));
+  const links = mainRoots.flatMap((root) => Array.from(root.querySelectorAll('a[href]'))).map((el) => {
+    const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+    const href = normalizeUrl(el.getAttribute('href') || '');
+    return { text, href };
+  }).filter((item) => item.text && !isBlockedHref(item.href));
+  const resultLinks = unique(
+    links
+      .filter((item) => item.text.length >= 4 && item.text.length <= 180)
+      .filter((item) => !isNoiseTitle(item.text))
+      .map((item) => JSON.stringify(item))
+  ).map((item) => JSON.parse(item)).slice(0, 20);
+  const searchResultSelectors = [
+    '#content_left .result',
+    '#content_left .c-container',
+    '#b_results .b_algo',
+    '#search .g',
+    '#rso .g',
+    '#center_col .g',
+    '[data-sokoban-container]',
+    '.result',
+    '.c-container',
+    '[class*="result"]',
+    '[tpl]',
+    'article',
+    '.g',
+    '.b_algo'
+  ];
+  const searchResultNodes = Array.from(new Set(
+    searchResultSelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+  ));
+  const titleFromNode = (node) => {
+    const anchors = Array.from(node.querySelectorAll('h1 a[href], h2 a[href], h3 a[href], [role="heading"] a[href], a[href]'));
+    return anchors.map((anchor) => {
+      const title = clean(anchor.innerText || anchor.textContent || anchor.getAttribute('aria-label') || '');
+      const href = normalizeUrl(anchor.getAttribute('href') || '');
+      return { title, href };
+    }).find((item) => item.title.length >= 4 && item.title.length <= 220 && !isBlockedHref(item.href) && !isNoiseTitle(item.title));
+  };
+  const snippetFromNode = (node, title) => {
+    const parts = unique(
+      Array.from(node.querySelectorAll('[class*="abstract"], [class*="summary"], [class*="content"], .c-abstract, .c-span-last, p, span, div'))
+        .map((el) => clean(el.innerText || el.textContent || ''))
+        .filter((text) => text && text !== title && text.length >= 8 && text.length <= 600)
+    );
+    const explicit = parts.find((text) => !text.includes('百度快照') && !isNoiseTitle(text));
+    const full = clean(node.innerText || node.textContent || '');
+    return clean(explicit || full.replace(title, '')).slice(0, 500);
+  };
+  const searchResults = unique(
+    searchResultNodes.map((node) => {
+      const candidate = titleFromNode(node);
+      if (!candidate) return null;
+      const title = candidate.title;
+      const href = candidate.href;
+      const snippet = snippetFromNode(node, title);
+      if (!snippet && clean(node.innerText || node.textContent || '').length < title.length + 12) return null;
+      return JSON.stringify({ title, href, snippet });
+    }).filter(Boolean)
+  ).map((item) => JSON.parse(item)).slice(0, 12);
   const text = clean(document.body ? document.body.innerText : '').slice(0, 12000);
   return {
     url: location.href,
     title: document.title,
     feed_titles: feedTitles,
     visible_cards: visibleCards,
+    links: resultLinks,
+    search_results: searchResults,
     text,
   };
 })()
@@ -116,6 +194,301 @@ class ControlResult(DomainModel):
   ok: bool
   output: dict[str, Any] = field(default_factory=dict)
   error: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ControlOwnerContext:
+  """Logical owner of a control action.
+
+  The backend still deals in physical targets. This context lets the
+  workbench bind browser tabs to the run/agent scope that created or claimed
+  them without coupling browser governance to a concrete adapter.
+  """
+
+  run_id: str
+  agent_id: str | None = None
+  task_id: str | None = None
+  scope: str | None = None
+  workbench_id: str | None = None
+
+  @property
+  def owner_key(self) -> tuple[str, str | None, str | None, str | None]:
+    return (self.scope or self.run_id, self.run_id, self.agent_id, self.task_id)
+
+
+@dataclass(slots=True)
+class BrowserTargetOwnership(DomainModel):
+  target_id: str
+  owner_run_id: str
+  owner_agent_id: str | None = None
+  owner_task_id: str | None = None
+  scope: str | None = None
+  workbench_id: str | None = None
+  purpose: str | None = None
+  last_action: str | None = None
+
+  def owner_key(self) -> tuple[str, str | None, str | None, str | None]:
+    return (self.scope or self.owner_run_id, self.owner_run_id, self.owner_agent_id, self.owner_task_id)
+
+
+@dataclass(slots=True)
+class BrowserTargetLease(DomainModel):
+  lease_id: str
+  target_id: str
+  mode: BrowserLeaseMode
+  owner_run_id: str
+  owner_agent_id: str | None = None
+  owner_task_id: str | None = None
+  scope: str | None = None
+
+  def owner_key(self) -> tuple[str, str | None, str | None, str | None]:
+    return (self.scope or self.owner_run_id, self.owner_run_id, self.owner_agent_id, self.owner_task_id)
+
+
+@dataclass(slots=True)
+class BrowserTargetResolution:
+  target_id: str | None
+  lease: BrowserTargetLease | None = None
+  error: dict[str, Any] | None = None
+
+
+class BrowserTargetCoordinator:
+  """In-process browser target ownership and lease coordinator.
+
+  This is deliberately a small interface-facing service. It does not know how
+  BrowserLink, Playwright, or another bridge controls tabs; it only decides
+  which physical target a logical run/agent scope may read or mutate.
+  """
+
+  def __init__(self) -> None:
+    self._ownership_by_target: dict[str, BrowserTargetOwnership] = {}
+    self._active_target_by_owner: dict[tuple[str, str | None, str | None, str | None], str] = {}
+    self._active_lease_by_target: dict[str, BrowserTargetLease] = {}
+
+  def resolve(
+    self,
+    *,
+    action: ControlActionKind,
+    target_id: str | None,
+    targets: list[ControlTarget],
+    owner: ControlOwnerContext | None,
+    payload: dict[str, Any] | None = None,
+  ) -> BrowserTargetResolution:
+    if owner is None:
+      return BrowserTargetResolution(target_id=target_id)
+    if action == "inspect" and bool((payload or {}).get("tabs_only", False)):
+      return BrowserTargetResolution(target_id=target_id)
+    resolved_target_id = target_id or self._active_target_by_owner.get(owner.owner_key)
+    if resolved_target_id is None:
+      if action == "navigate":
+        return BrowserTargetResolution(target_id=None)
+      if action == "inspect":
+        return BrowserTargetResolution(target_id=None)
+      else:
+        return BrowserTargetResolution(
+          target_id=None,
+          error={
+            "type": "browser_target_scope_required",
+            "message": "Browser mutation/read action requires an explicit target_id or a target already owned by this run scope.",
+          },
+        )
+    if resolved_target_id is None:
+      return BrowserTargetResolution(target_id=None)
+    ownership = self._ownership_by_target.get(resolved_target_id)
+    if ownership is not None and ownership.owner_key() != owner.owner_key:
+      return BrowserTargetResolution(
+        target_id=resolved_target_id,
+        error={
+          "type": "browser_target_owned_by_other_scope",
+          "target_id": resolved_target_id,
+          "owner": self._ownership_dict(ownership),
+        },
+      )
+    lease_mode = self._lease_mode_for_action(action)
+    lease = self._acquire_lease(resolved_target_id, lease_mode, owner)
+    if lease is None:
+      active = self._active_lease_by_target.get(resolved_target_id)
+      return BrowserTargetResolution(
+        target_id=resolved_target_id,
+        error={
+          "type": "browser_target_lease_conflict",
+          "target_id": resolved_target_id,
+          "active_lease": active.to_dict() if active is not None else None,
+        },
+      )
+    return BrowserTargetResolution(target_id=resolved_target_id, lease=lease)
+
+  def bind_result(
+    self,
+    *,
+    action: ControlActionKind,
+    requested_target_id: str | None,
+    result: ControlResult,
+    owner: ControlOwnerContext | None,
+    lease: BrowserTargetLease | None,
+    purpose: str | None = None,
+  ) -> ControlResult:
+    try:
+      if owner is not None and result.ok:
+        target_id = self._result_target_id(result.output) or requested_target_id
+        ownership = self._ownership_by_target.get(target_id) if target_id else None
+        if (
+          action == "inspect"
+          and requested_target_id is None
+          and target_id
+          and ownership is not None
+          and ownership.owner_key() != owner.owner_key
+          and not self._can_globally_observe(owner)
+        ):
+          result.output.pop("page", None)
+          result.output["page_error"] = {
+            "type": "browser_target_owned_by_other_scope",
+            "target_id": target_id,
+            "owner": self._ownership_dict(ownership),
+            "message": "This target is visible in the tab list but page content is scoped to another owner.",
+          }
+        if target_id and (ownership is None or ownership.owner_key() == owner.owner_key):
+          self.claim(target_id, owner, purpose=purpose, last_action=action)
+      if owner is not None:
+        self._annotate_result_output(result.output, owner, lease)
+      return result
+    finally:
+      if lease is not None:
+        self.release(lease)
+
+  def claim(
+    self,
+    target_id: str,
+    owner: ControlOwnerContext,
+    *,
+    purpose: str | None = None,
+    last_action: str | None = None,
+  ) -> BrowserTargetOwnership:
+    ownership = BrowserTargetOwnership(
+      target_id=target_id,
+      owner_run_id=owner.run_id,
+      owner_agent_id=owner.agent_id,
+      owner_task_id=owner.task_id,
+      scope=owner.scope,
+      workbench_id=owner.workbench_id,
+      purpose=purpose,
+      last_action=last_action,
+    )
+    self._ownership_by_target[target_id] = ownership
+    self._active_target_by_owner[owner.owner_key] = target_id
+    return ownership
+
+  def release(self, lease: BrowserTargetLease) -> None:
+    active = self._active_lease_by_target.get(lease.target_id)
+    if active is not None and active.lease_id == lease.lease_id:
+      self._active_lease_by_target.pop(lease.target_id, None)
+
+  def ownerships(self) -> list[BrowserTargetOwnership]:
+    return list(self._ownership_by_target.values())
+
+  def annotate_targets(self, targets: list[dict[str, Any]], owner: ControlOwnerContext | None = None) -> None:
+    for target in targets:
+      target_id = target.get("target_id")
+      if not isinstance(target_id, str):
+        continue
+      ownership = self._ownership_by_target.get(target_id)
+      if ownership is not None:
+        target["ownership"] = self._ownership_dict(ownership)
+        if owner is not None:
+          target["owned_by_current_scope"] = ownership.owner_key() == owner.owner_key
+      active_lease = self._active_lease_by_target.get(target_id)
+      if active_lease is not None:
+        target["active_lease"] = active_lease.to_dict()
+
+  def _select_claimable_target(self, targets: list[ControlTarget], owner: ControlOwnerContext) -> str | None:
+    candidates = [
+      target
+      for target in targets
+      if not _is_browser_extension_or_local_target(target)
+      and (
+        target.target_id not in self._ownership_by_target
+        or self._ownership_by_target[target.target_id].owner_key() == owner.owner_key
+      )
+    ]
+    return candidates[-1].target_id if candidates else None
+
+  def _acquire_lease(
+    self,
+    target_id: str,
+    mode: BrowserLeaseMode,
+    owner: ControlOwnerContext,
+  ) -> BrowserTargetLease | None:
+    active = self._active_lease_by_target.get(target_id)
+    if active is not None and active.owner_key() != owner.owner_key:
+      return None
+    lease = BrowserTargetLease(
+      lease_id=new_id("browser_lease"),
+      target_id=target_id,
+      mode=mode,
+      owner_run_id=owner.run_id,
+      owner_agent_id=owner.agent_id,
+      owner_task_id=owner.task_id,
+      scope=owner.scope,
+    )
+    self._active_lease_by_target[target_id] = lease
+    return lease
+
+  @staticmethod
+  def _lease_mode_for_action(action: ControlActionKind) -> BrowserLeaseMode:
+    if action == "inspect":
+      return "read"
+    if action in {"navigate", "execute_js"}:
+      return "mutation"
+    return "exclusive"
+
+  @staticmethod
+  def _result_target_id(output: dict[str, Any]) -> str | None:
+    for key in ("target_id", "active_target_id"):
+      value = output.get(key)
+      if isinstance(value, str) and value:
+        return value
+    target = output.get("target")
+    if isinstance(target, dict):
+      value = target.get("target_id")
+      if isinstance(value, str) and value:
+        return value
+    return None
+
+  def _annotate_result_output(
+    self,
+    output: dict[str, Any],
+    owner: ControlOwnerContext,
+    lease: BrowserTargetLease | None,
+  ) -> None:
+    targets = output.get("targets")
+    if isinstance(targets, list):
+      self.annotate_targets([target for target in targets if isinstance(target, dict)], owner)
+    active_target_id = self._active_target_by_owner.get(owner.owner_key)
+    output["browser_scope"] = {
+      "scope": owner.scope or owner.run_id,
+      "run_id": owner.run_id,
+      "agent_id": owner.agent_id,
+      "task_id": owner.task_id,
+      "active_target_id": active_target_id,
+      "lease": lease.to_dict() if lease is not None else None,
+    }
+
+  @staticmethod
+  def _can_globally_observe(owner: ControlOwnerContext) -> bool:
+    return owner.agent_id is None and owner.task_id is None
+
+  @staticmethod
+  def _ownership_dict(ownership: BrowserTargetOwnership) -> dict[str, Any]:
+    return {
+      "target_id": ownership.target_id,
+      "run_id": ownership.owner_run_id,
+      "agent_id": ownership.owner_agent_id,
+      "task_id": ownership.owner_task_id,
+      "scope": ownership.scope,
+      "workbench_id": ownership.workbench_id,
+      "purpose": ownership.purpose,
+      "last_action": ownership.last_action,
+    }
 
 
 class ControlBackend(Protocol):
@@ -234,19 +607,21 @@ class BrowserLinkHTTPBackend:
     return ControlResult(ok=True, output=output)
 
   def _resolve_scan_session_id(self, target_id: str | None) -> str | None:
-    if target_id is None:
-      response = self._post_json({"cmd": "find_session", "url_pattern": ""})
-    else:
+    if target_id is not None:
       response = self._post_json({"cmd": "find_session", "url_pattern": target_id})
-    matched = response.get("r", [])
-    if isinstance(matched, list) and matched:
-      item = matched[0]
-      if self._is_match(item):
-        return str(item[0])
-    if target_id:
+      matched = response.get("r", [])
+      if isinstance(matched, list) and matched:
+        item = matched[0]
+        if self._is_match(item):
+          return str(item[0])
       return target_id
     targets = self.list_targets("browser")
-    return targets[-1].target_id if targets else None
+    active_like = [
+      target
+      for target in targets
+      if not _is_browser_extension_or_local_target(target)
+    ]
+    return active_like[-1].target_id if active_like else (targets[-1].target_id if targets else None)
 
   def _inspect_page(self, session_id: str, timeout_seconds: float | None = None) -> ControlResult:
     result = self._execute_js(
@@ -307,6 +682,8 @@ class BrowserLinkHTTPBackend:
       return result
     output = dict(result.output)
     output["url"] = url
+    output["target_id"] = command.target_id
+    output["active_target_id"] = command.target_id
     return ControlResult(ok=True, output=output)
 
   def _create_tab(self, url: str, timeout_seconds: float | None = None) -> ControlResult:
@@ -396,6 +773,19 @@ class BrowserLinkHTTPBackend:
 
 
 TMWebDriverHTTPBackend = BrowserLinkHTTPBackend
+
+
+def _is_browser_extension_or_local_target(target: ControlTarget) -> bool:
+  url = str(target.metadata.get("url") or "")
+  if not url:
+    return False
+  return (
+    url.startswith("chrome://")
+    or url.startswith("chrome-extension://")
+    or url.startswith("devtools://")
+    or url.startswith("http://127.0.0.1:")
+    or url.startswith("http://localhost:")
+  )
 
 
 @dataclass(slots=True)
@@ -1150,32 +1540,51 @@ class Win32DesktopBackend:
 class ControlWorkbench:
   """High-level control API used by capability runtime workbench calls."""
 
-  def __init__(self, backend: ControlBackend) -> None:
+  def __init__(self, backend: ControlBackend, browser_coordinator: BrowserTargetCoordinator | None = None) -> None:
     self._backend = backend
+    self._browser_coordinator = browser_coordinator or BrowserTargetCoordinator()
 
   def list_targets(self, kind: ControlTargetKind | None = None) -> list[ControlTarget]:
     return self._backend.list_targets(kind)
 
-  async def execute_command(self, command: ControlCommand) -> ControlResult:
+  @property
+  def browser_coordinator(self) -> BrowserTargetCoordinator:
+    return self._browser_coordinator
+
+  async def execute_command(
+    self,
+    command: ControlCommand,
+    owner: ControlOwnerContext | None = None,
+  ) -> ControlResult:
+    if command.target_kind == "browser":
+      return await self._execute_browser_command(command, owner)
     return await self._backend.execute(command)
 
-  async def inspect_browser(self, target_id: str | None = None, payload: dict[str, Any] | None = None) -> ControlResult:
-    return await self._backend.execute(ControlCommand.create("browser", "inspect", target_id, payload or {}))
+  async def inspect_browser(
+    self,
+    target_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    owner: ControlOwnerContext | None = None,
+  ) -> ControlResult:
+    return await self._execute_browser_command(ControlCommand.create("browser", "inspect", target_id, payload or {}), owner)
 
   async def execute_js(
     self,
     code: str,
     target_id: str | None = None,
     timeout_seconds: float | None = None,
+    owner: ControlOwnerContext | None = None,
   ) -> ControlResult:
-    return await self._backend.execute(
-      ControlCommand.create(
-        "browser",
-        "execute_js",
-        target_id,
-        {"code": code},
-        timeout_seconds=timeout_seconds,
-      )
+    command = ControlCommand.create(
+      "browser",
+      "execute_js",
+      target_id,
+      {"code": code},
+      timeout_seconds=timeout_seconds,
+    )
+    return await self._execute_browser_command(
+      command,
+      owner,
     )
 
   async def navigate(
@@ -1183,15 +1592,18 @@ class ControlWorkbench:
     url: str,
     target_id: str | None = None,
     timeout_seconds: float | None = None,
+    owner: ControlOwnerContext | None = None,
   ) -> ControlResult:
-    return await self._backend.execute(
-      ControlCommand.create(
-        "browser",
-        "navigate",
-        target_id,
-        {"url": url},
-        timeout_seconds=timeout_seconds,
-      )
+    command = ControlCommand.create(
+      "browser",
+      "navigate",
+      target_id,
+      {"url": url},
+      timeout_seconds=timeout_seconds,
+    )
+    return await self._execute_browser_command(
+      command,
+      owner,
     )
 
   async def screenshot(self, target_kind: ControlTargetKind, target_id: str | None = None) -> ControlResult:
@@ -1234,4 +1646,40 @@ class ControlWorkbench:
   async def tap(self, x: int, y: int, target_id: str | None = None) -> ControlResult:
     return await self._backend.execute(
       ControlCommand.create("mobile", "tap", target_id, {"x": x, "y": y})
+    )
+
+  async def _execute_browser_command(
+    self,
+    command: ControlCommand,
+    owner: ControlOwnerContext | None,
+  ) -> ControlResult:
+    if owner is None:
+      return await self._backend.execute(command)
+    targets = self._backend.list_targets("browser")
+    resolution = self._browser_coordinator.resolve(
+      action=command.action,
+      target_id=command.target_id,
+      targets=targets,
+      owner=owner,
+      payload=command.payload,
+    )
+    if resolution.error is not None:
+      return ControlResult(ok=False, error=resolution.error)
+    scoped_command = ControlCommand(
+      command_id=command.command_id,
+      target_kind=command.target_kind,
+      action=command.action,
+      target_id=resolution.target_id,
+      payload=command.payload,
+      timeout_seconds=command.timeout_seconds,
+    )
+    result = await self._backend.execute(scoped_command)
+    purpose = scoped_command.payload.get("url") if isinstance(scoped_command.payload.get("url"), str) else None
+    return self._browser_coordinator.bind_result(
+      action=scoped_command.action,
+      requested_target_id=scoped_command.target_id,
+      result=result,
+      owner=owner,
+      lease=resolution.lease,
+      purpose=purpose,
     )

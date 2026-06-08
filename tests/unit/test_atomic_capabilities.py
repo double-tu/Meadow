@@ -30,6 +30,15 @@ from agent_kernel.policy import PolicyEngine
 
 
 class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
+  async def test_browser_tool_schemas_guide_dynamic_page_extraction(self) -> None:
+    provider = AtomicCapabilityProvider()
+    schemas = {schema["function"]["name"]: schema["function"] for schema in provider.tool_schemas()}
+
+    self.assertIn("dynamic feed/card pages", schemas["browser_scan"]["description"])
+    self.assertIn("structured visible cards", schemas["browser_scan"]["description"])
+    self.assertIn("visible cards", schemas["browser_execute_js"]["description"])
+    self.assertIn("title/text/url/author/time/metrics", schemas["browser_execute_js"]["description"])
+
   async def test_workspace_read_supports_keyword_context_and_line_numbers(self) -> None:
     with tempfile.TemporaryDirectory() as tmp:
       path = Path(tmp) / "notes.txt"
@@ -107,6 +116,17 @@ class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
       result.output["body_summary"]["feed_titles"],
       ["云南大理避暑很舒服", "当了三十年的班主任"],
     )
+
+  async def test_http_request_marks_anti_spider_page(self) -> None:
+    client = _RecordingHTTPClient(
+      body="<html><head><title>Sogou Antispider</title></head><body>antispider verify</body></html>"
+    )
+    provider = AtomicCapabilityProvider(http_client=client)
+
+    result = provider.http_request({"url": "http://www.sogou.com/antispider/?m=1"})
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["access_issue"]["type"], "anti_spider_challenge")
 
   async def test_atomic_desktop_and_mobile_actions_route_to_control_workbench(self) -> None:
     registry = CapabilityRegistry()
