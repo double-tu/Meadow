@@ -18,6 +18,11 @@ class OrchestrationCapabilityIds:
   TASK_STATUS = "meadow.task.status"
   TASK_CANCEL = "meadow.task.cancel"
   AGENT_PARALLEL_DELEGATE = "meadow.agent.parallel_delegate"
+  WORKBENCH_CREATE = "meadow.workbench.create"
+  WORKBENCH_STATUS = "meadow.workbench.status"
+  WORKBENCH_MESSAGE = "meadow.workbench.message"
+  WORKBENCH_DECISION = "meadow.workbench.decision"
+  WORKBENCH_CANCEL = "meadow.workbench.cancel"
 
 
 class TaskLauncher(Protocol):
@@ -50,6 +55,32 @@ class AgentDelegationControl(Protocol):
     ...
 
 
+class CollaborationWorkbenchControl(Protocol):
+  def create_group_chat(self, payload: dict[str, Any]):
+    ...
+
+  async def create_cli_collaboration(self, payload: dict[str, Any]):
+    ...
+
+  async def create_parallel_delegation(self, payload: dict[str, Any]):
+    ...
+
+  async def create_technical_review(self, payload: dict[str, Any]):
+    ...
+
+  def snapshot(self, workbench_id: str):
+    ...
+
+  def send_message(self, workbench_id: str, payload: dict[str, Any]):
+    ...
+
+  def create_decision_artifact(self, workbench_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    ...
+
+  async def cancel(self, workbench_id: str, reason: str = "workbench cancelled"):
+    ...
+
+
 @dataclass(slots=True)
 class CompositeToolCatalog:
   catalogs: list[Any]
@@ -76,17 +107,24 @@ class OrchestrationCapabilityProvider:
     task_launcher: TaskLauncher,
     run_control: RunControl | None = None,
     delegation_control: AgentDelegationControl | None = None,
+    workbench_control: CollaborationWorkbenchControl | None = None,
   ) -> None:
     self._uow_factory = uow_factory
     self._task_launcher = task_launcher
     self._run_control = run_control
     self._delegation_control = delegation_control
+    self._workbench_control = workbench_control
     self._aliases = {
       "task_create": OrchestrationCapabilityIds.TASK_CREATE,
       "workflow_run": OrchestrationCapabilityIds.WORKFLOW_RUN,
       "task_status": OrchestrationCapabilityIds.TASK_STATUS,
       "task_cancel": OrchestrationCapabilityIds.TASK_CANCEL,
       "agent_parallel_delegate": OrchestrationCapabilityIds.AGENT_PARALLEL_DELEGATE,
+      "workbench_create": OrchestrationCapabilityIds.WORKBENCH_CREATE,
+      "workbench_status": OrchestrationCapabilityIds.WORKBENCH_STATUS,
+      "workbench_message": OrchestrationCapabilityIds.WORKBENCH_MESSAGE,
+      "workbench_decision": OrchestrationCapabilityIds.WORKBENCH_DECISION,
+      "workbench_cancel": OrchestrationCapabilityIds.WORKBENCH_CANCEL,
     }
 
   def can_handle(self, name: str) -> bool:
@@ -100,6 +138,11 @@ class OrchestrationCapabilityProvider:
     local_tools.register(OrchestrationCapabilityIds.TASK_STATUS, self.task_status)
     local_tools.register(OrchestrationCapabilityIds.TASK_CANCEL, self.cancel_task)
     local_tools.register(OrchestrationCapabilityIds.AGENT_PARALLEL_DELEGATE, self.parallel_delegate)
+    local_tools.register(OrchestrationCapabilityIds.WORKBENCH_CREATE, self.create_workbench)
+    local_tools.register(OrchestrationCapabilityIds.WORKBENCH_STATUS, self.workbench_status)
+    local_tools.register(OrchestrationCapabilityIds.WORKBENCH_MESSAGE, self.workbench_message)
+    local_tools.register(OrchestrationCapabilityIds.WORKBENCH_DECISION, self.workbench_decision)
+    local_tools.register(OrchestrationCapabilityIds.WORKBENCH_CANCEL, self.workbench_cancel)
 
   def capability_specs(self) -> list[CapabilitySpec]:
     return [
@@ -138,6 +181,46 @@ class OrchestrationCapabilityProvider:
       CapabilitySpec(
         capability_id=OrchestrationCapabilityIds.AGENT_PARALLEL_DELEGATE,
         name="Parallel agent delegation",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.EXTERNAL_MUTATION,
+      ),
+      CapabilitySpec(
+        capability_id=OrchestrationCapabilityIds.WORKBENCH_CREATE,
+        name="Create collaboration workbench",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.EXTERNAL_MUTATION,
+      ),
+      CapabilitySpec(
+        capability_id=OrchestrationCapabilityIds.WORKBENCH_STATUS,
+        name="Inspect collaboration workbench",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.READ,
+      ),
+      CapabilitySpec(
+        capability_id=OrchestrationCapabilityIds.WORKBENCH_MESSAGE,
+        name="Send collaboration workbench message",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.EXTERNAL_MUTATION,
+      ),
+      CapabilitySpec(
+        capability_id=OrchestrationCapabilityIds.WORKBENCH_DECISION,
+        name="Create collaboration workbench decision artifact",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.WRITE,
+      ),
+      CapabilitySpec(
+        capability_id=OrchestrationCapabilityIds.WORKBENCH_CANCEL,
+        name="Cancel collaboration workbench",
         kind="tool",
         input_schema={"type": "object"},
         output_schema={"type": "object"},
@@ -191,6 +274,84 @@ class OrchestrationCapabilityProvider:
           },
         },
       ),
+      self._schema(
+        "workbench_create",
+        (
+          "Create a collaboration workbench for group chat, multi-CLI collaboration, technical review, "
+          "or parallel child-agent delegation. Use this when work should continue asynchronously, needs a moderator, "
+          "needs human participation, or needs multiple agents/CLI sessions."
+        ),
+        ["kind", "objective"],
+        {
+          "kind": {
+            "type": "string",
+            "enum": ["group_chat", "cli_collaboration", "technical_review", "parallel_delegation"],
+          },
+          "title": {"type": "string"},
+          "objective": {"type": "string"},
+          "parent_run_id": {"type": "string"},
+          "auto_start": {"type": "boolean"},
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "participant_id": {"type": "string"},
+                "kind": {"type": "string", "enum": ["human", "agent", "remote_agent", "observer"]},
+                "role": {"type": "string"},
+                "connector_id": {"type": "string"},
+                "agent_type": {"type": "string"},
+                "labels": {"type": "array", "items": {"type": "string"}},
+              },
+            },
+          },
+          "slices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {"type": "string"},
+                "objective": {"type": "string"},
+                "role": {"type": "string"},
+                "assignee_member_id": {"type": "string"},
+                "metadata": {"type": "object"},
+              },
+            },
+          },
+          "target_ref": {"type": "string"},
+          "metadata": {"type": "object"},
+        },
+      ),
+      self._schema(
+        "workbench_status",
+        "Inspect a collaboration workbench, including messages, members, task slices, taskboard items, and delegation statuses.",
+        ["workbench_id"],
+      ),
+      self._schema(
+        "workbench_message",
+        (
+          "Send a message into a workbench channel. Use this to act as moderator, user proxy, reviewer, "
+          "or coordinator and continue driving an async group/CLI task."
+        ),
+        ["workbench_id", "sender_participant_id"],
+        {
+          "text": {"type": "string"},
+          "content": {"type": "object"},
+          "sender_participant_id": {"type": "string"},
+        },
+      ),
+      self._schema(
+        "workbench_decision",
+        "Create a decision artifact from a group chat workbench once enough discussion/results exist.",
+        ["workbench_id"],
+        {"decided_by_participant_id": {"type": "string"}},
+      ),
+      self._schema(
+        "workbench_cancel",
+        "Cancel a collaboration workbench and any child delegations it owns.",
+        ["workbench_id"],
+        {"reason": {"type": "string"}},
+      ),
     ]
 
   def normalize_call(self, name: str, input: dict[str, Any], *, run_id: str, scope: str) -> AtomicToolCall:
@@ -201,6 +362,11 @@ class OrchestrationCapabilityProvider:
     if capability_id == OrchestrationCapabilityIds.AGENT_PARALLEL_DELEGATE:
       normalized.setdefault("parent_run_id", run_id)
       normalized.setdefault("parent_session_id", scope)
+    if capability_id == OrchestrationCapabilityIds.WORKBENCH_CREATE:
+      normalized.setdefault("parent_run_id", run_id)
+      normalized.setdefault("metadata", {})
+      if isinstance(normalized["metadata"], dict):
+        normalized["metadata"].setdefault("created_from_scope", scope)
     return AtomicToolCall(capability_id=capability_id, input=normalized, display_name=name)
 
   async def create_task(self, input: dict[str, Any]) -> ToolResult:
@@ -290,6 +456,98 @@ class OrchestrationCapabilityProvider:
     reports = await asyncio.gather(*coroutines)
     return ToolResult.success({"delegations": [report.to_dict() for report in reports]})
 
+  async def create_workbench(self, input: dict[str, Any]) -> ToolResult:
+    if self._workbench_control is None:
+      return ToolResult.failure("adapter_not_configured", "Collaboration workbench service is not configured.")
+    kind = input.get("kind")
+    if not isinstance(kind, str) or kind not in {
+      "group_chat",
+      "cli_collaboration",
+      "technical_review",
+      "parallel_delegation",
+    }:
+      return ToolResult.failure(
+        "invalid_input",
+        "kind must be group_chat, cli_collaboration, technical_review, or parallel_delegation.",
+      )
+    objective = input.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+      return ToolResult.failure("invalid_input", "objective must be a non-empty string.")
+    try:
+      if kind == "group_chat":
+        snapshot = self._workbench_control.create_group_chat(input)
+      elif kind == "cli_collaboration":
+        snapshot = await self._workbench_control.create_cli_collaboration(input)
+      elif kind == "technical_review":
+        snapshot = await self._workbench_control.create_technical_review(input)
+      else:
+        snapshot = await self._workbench_control.create_parallel_delegation(input)
+    except (KeyError, ValueError) as exc:
+      return ToolResult.failure("workbench_error", str(exc))
+    return ToolResult.success({"workbench": _workbench_view(snapshot)})
+
+  def workbench_status(self, input: dict[str, Any]) -> ToolResult:
+    if self._workbench_control is None:
+      return ToolResult.failure("adapter_not_configured", "Collaboration workbench service is not configured.")
+    workbench_id = input.get("workbench_id")
+    if not isinstance(workbench_id, str) or not workbench_id:
+      return ToolResult.failure("invalid_input", "workbench_id must be a non-empty string.")
+    try:
+      snapshot = self._workbench_control.snapshot(workbench_id)
+    except KeyError as exc:
+      return ToolResult.failure("workbench_not_found", str(exc))
+    return ToolResult.success({"workbench": _workbench_view(snapshot)})
+
+  def workbench_message(self, input: dict[str, Any]) -> ToolResult:
+    if self._workbench_control is None:
+      return ToolResult.failure("adapter_not_configured", "Collaboration workbench service is not configured.")
+    workbench_id = input.get("workbench_id")
+    if not isinstance(workbench_id, str) or not workbench_id:
+      return ToolResult.failure("invalid_input", "workbench_id must be a non-empty string.")
+    payload = {
+      "sender_participant_id": input.get("sender_participant_id"),
+      "text": input.get("text"),
+      "content": input.get("content") if isinstance(input.get("content"), dict) else None,
+    }
+    try:
+      message = self._workbench_control.send_message(workbench_id, payload)
+      snapshot = self._workbench_control.snapshot(workbench_id)
+    except (KeyError, ValueError) as exc:
+      return ToolResult.failure("workbench_error", str(exc))
+    return ToolResult.success({"message": message.to_dict(), "workbench": _workbench_view(snapshot)})
+
+  def workbench_decision(self, input: dict[str, Any]) -> ToolResult:
+    if self._workbench_control is None:
+      return ToolResult.failure("adapter_not_configured", "Collaboration workbench service is not configured.")
+    workbench_id = input.get("workbench_id")
+    if not isinstance(workbench_id, str) or not workbench_id:
+      return ToolResult.failure("invalid_input", "workbench_id must be a non-empty string.")
+    try:
+      result = self._workbench_control.create_decision_artifact(
+        workbench_id,
+        {
+          "decided_by_participant_id": input.get("decided_by_participant_id"),
+        },
+      )
+    except (KeyError, ValueError) as exc:
+      return ToolResult.failure("workbench_error", str(exc))
+    return ToolResult.success(result)
+
+  async def workbench_cancel(self, input: dict[str, Any]) -> ToolResult:
+    if self._workbench_control is None:
+      return ToolResult.failure("adapter_not_configured", "Collaboration workbench service is not configured.")
+    workbench_id = input.get("workbench_id")
+    if not isinstance(workbench_id, str) or not workbench_id:
+      return ToolResult.failure("invalid_input", "workbench_id must be a non-empty string.")
+    try:
+      snapshot = await self._workbench_control.cancel(
+        workbench_id,
+        reason=str(input.get("reason") or "cancelled by agent"),
+      )
+    except (KeyError, ValueError) as exc:
+      return ToolResult.failure("workbench_error", str(exc))
+    return ToolResult.success({"workbench": _workbench_view(snapshot)})
+
   @staticmethod
   def _schema(
     name: str,
@@ -312,3 +570,18 @@ class OrchestrationCapabilityProvider:
         },
       },
     }
+
+
+def _workbench_view(snapshot: Any) -> dict[str, Any]:
+  workbench = snapshot.workbench
+  messages = snapshot.messages[-8:] if getattr(snapshot, "messages", None) else []
+  return {
+    "workbench": workbench.to_dict(),
+    "channel": snapshot.channel.to_dict() if snapshot.channel is not None else None,
+    "group_chat": snapshot.group_chat,
+    "members": [member.to_dict() for member in snapshot.members],
+    "task_slices": [item.to_dict() for item in snapshot.task_slices],
+    "delegations": snapshot.delegations,
+    "taskboard_items": snapshot.taskboard_items,
+    "recent_messages": [message.to_dict() for message in messages],
+  }

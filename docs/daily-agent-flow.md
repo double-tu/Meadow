@@ -174,10 +174,28 @@ User: 按代码评审流程检查这个仓库
 User: 拆成前端/后端/测试三个子任务并发执行
   -> Context includes Agent delegation catalog and TaskBoard/AgentPool state
   -> Model creates task split plan
+  -> CollaborationWorkbenchService creates a parallel-delegation workbench
   -> AgentDelegationBroker starts child tasks or TaskBoard claims
   -> Child agents run independently with lineage, status, cancel, artifact handoff
   -> Parent agent polls/waits and summarizes structured outputs
 ```
+
+### 群聊 / 多 CLI / 技术评审工作台
+
+```text
+User: 组织几个子 Agent 做技术评审
+  -> Context includes Workbench Skill + Collaboration Workbench API schema
+  -> Model selects workbench kind: group_chat / cli_collaboration / technical_review / parallel_delegation
+  -> CollaborationWorkbenchService creates members, channel, task slices, taskboard items
+  -> Optional auto_start delegates slices to configured CLI/remote agent connectors
+  -> UI renders channel timeline, task slices, delegation cards, approvals, artifacts
+  -> Model or user can send messages, create decision artifacts, cancel/retry slices
+  -> If missing inputs/authorization, model calls user_input_request and the chat turn waits for the user
+```
+
+详见 `docs/collaboration-workbench-architecture.md`。工作台是日常对话扩展到多 Agent 协作空间的应用层入口，不改变 Runtime/Capability/Policy 的职责边界。
+
+日常 Agent 可见的工作台工具包括 `workbench_create`、`workbench_status`、`workbench_message`、`workbench_decision`、`workbench_cancel`。模型可以在多轮工具循环里先创建工作台，再根据真实 `workbench_id` 继续发送主持人消息或查询状态。
 
 ### 用户输入/审批/暂停
 

@@ -15,7 +15,7 @@ from typing import Any, Literal
 from agent_kernel.capabilities.atomic import AtomicToolCatalog
 from agent_kernel.capabilities.runtime import CapabilityCallContext, CapabilityRuntime
 from agent_kernel.domain.base import new_id
-from agent_kernel.domain.context import ModelContext
+from agent_kernel.domain.context import ContextAssemblyRequest, ModelContext
 from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
 from agent_kernel.domain.serialization import to_json
 from agent_kernel.domain.skill import SkillCard
@@ -64,6 +64,7 @@ class ContinuousAgentRunner:
     model_gateway: ModelGateway,
     capability_runtime: CapabilityRuntime,
     tool_catalog: AtomicToolCatalog,
+    context_assembler=None,
     context_manager=None,
     skills: list[SkillCard] | None = None,
     system_instructions: str | None = None,
@@ -72,6 +73,7 @@ class ContinuousAgentRunner:
     self._model_gateway = model_gateway
     self._capability_runtime = capability_runtime
     self._tool_catalog = tool_catalog
+    self._context_assembler = context_assembler
     self._context_manager = context_manager
     self._skills = skills or []
     self._system_instructions = system_instructions or _DEFAULT_SYSTEM_INSTRUCTIONS
@@ -90,12 +92,7 @@ class ContinuousAgentRunner:
     config = config or ContinuousRunnerConfig()
     run_id = run_id or new_id("conv_run")
     scope = scope or run_id
-    messages: list[dict[str, Any]] = [
-      {"role": "system", "content": self._system_instructions},
-      *self._skill_messages(),
-      *_normalize_history_messages(history_messages or []),
-      {"role": "user", "content": user_message},
-    ]
+    messages: list[dict[str, Any]] = self._initial_messages(user_message, history_messages or [])
     all_tool_calls: list[ContinuousToolCallRecord] = []
     self._append_event(
       RuntimeEvent(
@@ -198,8 +195,6 @@ class ContinuousAgentRunner:
         turn_records,
       )
       messages = [
-        {"role": "system", "content": self._system_instructions},
-        *self._skill_messages(),
         *_normalize_history_messages(history_messages or []),
         {"role": "user", "content": user_message},
         {
@@ -216,6 +211,12 @@ class ContinuousAgentRunner:
           },
         }
       ]
+      if self._context_assembler is None:
+        messages = [
+          {"role": "system", "content": self._system_instructions},
+          *self._skill_messages(),
+          *messages,
+        ]
 
     return ContinuousRunnerResult(
       run_id=run_id,
@@ -251,6 +252,23 @@ class ContinuousAgentRunner:
       }
     ]
 
+  def _initial_messages(
+    self,
+    user_message: str,
+    history_messages: list[dict[str, Any]],
+  ) -> list[dict[str, Any]]:
+    base_messages = [
+      *_normalize_history_messages(history_messages),
+      {"role": "user", "content": user_message},
+    ]
+    if self._context_assembler is not None:
+      return base_messages
+    return [
+      {"role": "system", "content": self._system_instructions},
+      *self._skill_messages(),
+      *base_messages,
+    ]
+
   def _build_context(
     self,
     run_id: str,
@@ -259,6 +277,19 @@ class ContinuousAgentRunner:
     messages: list[dict[str, Any]],
   ) -> ModelContext:
     tool_schemas = self._tool_catalog.tool_schemas()
+    if self._context_assembler is not None:
+      return self._context_assembler.assemble(
+        ContextAssemblyRequest(
+          run_id=run_id,
+          scope=scope,
+          model_ref=model_ref,
+          messages=messages,
+          system_instructions=self._system_instructions,
+          skills=self._skills,
+          tool_schemas=tool_schemas,
+          max_tokens=4096,
+        )
+      ).model_context
     if self._context_manager is None:
       return ModelContext(messages=messages, tool_schemas=tool_schemas)
     context = self._context_manager.build(

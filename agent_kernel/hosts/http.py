@@ -11,6 +11,8 @@ import sqlite3
 from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlparse
 
+from agent_kernel.agents import AgentDelegationBroker, ProductCLIConnectorFactory, load_product_cli_connector_specs
+from agent_kernel.app.collaboration_workbench import CollaborationWorkbenchService
 from agent_kernel.app.tool_call_control import ToolCallControlOutcome, ToolCallControlService
 from agent_kernel.app.config_center import ConfigCenterService
 from agent_kernel.app.conversation_task_hub import ConversationTaskHub
@@ -37,6 +39,7 @@ from agent_kernel.domain.workflow import EdgeSpec, ExecutionCommand, NodeContext
 from agent_kernel.domain.base import utc_now
 from agent_kernel.hosts.dto import EventStreamEnvelope, error_response, ok_response
 from agent_kernel.config import LLMConfig
+from agent_kernel.memory import MemoryFacade
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.policy import ApprovalService, HumanInterventionService, InterventionOutcome
 from agent_kernel.policy.engine import PolicyEngine
@@ -134,6 +137,7 @@ class HTTPHost:
     control_plane: ControlPlaneService | None = None,
     desktop_workspace_service: DesktopWorkspaceService | None = None,
     desktop_chat_service: DesktopChatService | None = None,
+    collaboration_workbench_service: CollaborationWorkbenchService | None = None,
     config_center_service: ConfigCenterService | None = None,
     skill_service: SkillService | None = None,
     default_llm_config: LLMConfig | None = None,
@@ -152,19 +156,27 @@ class HTTPHost:
     )
     self._control_plane = control_plane or ControlPlaneService.from_config({"browser": {"enabled": False}})
     self._desktop_workspace_service = desktop_workspace_service or DesktopWorkspaceService(uow_factory)
+    self._collaboration_workbench_service = collaboration_workbench_service or CollaborationWorkbenchService(
+      uow_factory,
+      delegation_control=delegation_control,
+    )
     self._config_center_service = config_center_service or ConfigCenterService(uow_factory)
     self._skill_service = skill_service or SkillService(uow_factory)
     ensure_builtin_atomic_skills(self._skill_service)
     atomic_capabilities = AtomicCapabilityProvider(
       file_workspace=LocalFileWorkspace(["."]),
       http_client=UrllibHTTPClient(),
+      memory=MemoryFacade(uow_factory),
       delegation=delegation_control,
+      uow_factory=uow_factory,
+      skill_service=self._skill_service,
     )
     orchestration_capabilities = OrchestrationCapabilityProvider(
       uow_factory=uow_factory,
       task_launcher=self._task_launcher,
       run_control=self._run_control,
       delegation_control=delegation_control,
+      workbench_control=self._collaboration_workbench_service,
     )
     capability_registry = CapabilityRegistry()
     local_tools = LocalToolExecutor()
@@ -430,6 +442,42 @@ class HTTPHost:
       raise KeyError(f"Workspace not found: {workspace_id}")
     return ok_response(workspace=snapshot.to_dict())
 
+  def list_collaboration_workbenches(self) -> dict[str, Any]:
+    return ok_response(
+      workbenches=[snapshot.to_dict() for snapshot in self._collaboration_workbench_service.list()]
+    )
+
+  def inspect_collaboration_workbench(self, workbench_id: str) -> dict[str, Any]:
+    return ok_response(workbench=self._collaboration_workbench_service.snapshot(workbench_id).to_dict())
+
+  def create_group_chat_workbench(self, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(workbench=self._collaboration_workbench_service.create_group_chat(payload).to_dict())
+
+  async def create_cli_workbench(self, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(workbench=(await self._collaboration_workbench_service.create_cli_collaboration(payload)).to_dict())
+
+  async def create_parallel_delegation_workbench(self, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(
+      workbench=(await self._collaboration_workbench_service.create_parallel_delegation(payload)).to_dict()
+    )
+
+  async def create_technical_review_workbench(self, payload: dict[str, Any]) -> dict[str, Any]:
+    return ok_response(workbench=(await self._collaboration_workbench_service.create_technical_review(payload)).to_dict())
+
+  def send_collaboration_workbench_message(self, workbench_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    message = self._collaboration_workbench_service.send_message(workbench_id, payload)
+    return ok_response(message=message.to_dict(), workbench=self._collaboration_workbench_service.snapshot(workbench_id).to_dict())
+
+  def create_collaboration_decision_artifact(self, workbench_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return self._collaboration_workbench_service.create_decision_artifact(workbench_id, payload)
+
+  async def cancel_collaboration_workbench(self, workbench_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    snapshot = await self._collaboration_workbench_service.cancel(
+      workbench_id,
+      reason=str(payload.get("reason") or "user requested workbench cancel"),
+    )
+    return ok_response(workbench=snapshot.to_dict())
+
   def list_pending_approvals(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
     run_id = _query_optional_str(query or {}, "run_id")
     return ok_response(approvals=self._desktop_workspace_service.list_pending_approvals(run_id))
@@ -485,6 +533,12 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
           return
         if len(segments) == 2 and segments[0] == "workspaces":
           self._write_json(HTTPStatus.OK, host.inspect_workspace(segments[1]))
+          return
+        if len(segments) == 2 and segments[0] == "collaboration" and segments[1] == "workbenches":
+          self._write_json(HTTPStatus.OK, host.list_collaboration_workbenches())
+          return
+        if len(segments) == 3 and segments[0] == "collaboration" and segments[1] == "workbenches":
+          self._write_json(HTTPStatus.OK, host.inspect_collaboration_workbench(segments[2]))
           return
         if len(segments) == 2 and segments[0] == "chat" and segments[1] == "sessions":
           self._write_json(HTTPStatus.OK, host.list_chat_sessions())
@@ -597,6 +651,29 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
         if len(segments) == 4 and segments[0] == "chat" and segments[1] == "sessions" and segments[3] == "pause":
           self._write_json(HTTPStatus.OK, host.pause_chat_session(segments[2], payload))
           return
+        if len(segments) == 3 and segments[0] == "collaboration" and segments[1] == "workbenches":
+          if segments[2] == "group-chat":
+            self._write_json(HTTPStatus.CREATED, host.create_group_chat_workbench(payload))
+            return
+          if segments[2] == "cli":
+            self._write_json(HTTPStatus.CREATED, asyncio.run(host.create_cli_workbench(payload)))
+            return
+          if segments[2] == "technical-review":
+            self._write_json(HTTPStatus.CREATED, asyncio.run(host.create_technical_review_workbench(payload)))
+            return
+          if segments[2] == "parallel-delegation":
+            self._write_json(HTTPStatus.CREATED, asyncio.run(host.create_parallel_delegation_workbench(payload)))
+            return
+        if len(segments) == 4 and segments[0] == "collaboration" and segments[1] == "workbenches":
+          if segments[3] == "messages":
+            self._write_json(HTTPStatus.CREATED, host.send_collaboration_workbench_message(segments[2], payload))
+            return
+          if segments[3] == "decision":
+            self._write_json(HTTPStatus.CREATED, host.create_collaboration_decision_artifact(segments[2], payload))
+            return
+          if segments[3] == "cancel":
+            self._write_json(HTTPStatus.OK, asyncio.run(host.cancel_collaboration_workbench(segments[2], payload)))
+            return
         if len(segments) == 1 and segments[0] == "mcp-servers":
           self._write_json(HTTPStatus.OK, host.upsert_mcp_server(payload))
           return
@@ -775,10 +852,19 @@ def build_server(
   port: int = 0,
   *,
   control_config: dict[str, Any] | None = None,
+  config_path: str | None = None,
+  delegation_control: AgentDelegationControl | None = None,
   default_llm_config: LLMConfig | None = None,
 ) -> ThreadingHTTPServer:
   control_plane = ControlPlaneService.from_config(control_config) if control_config is not None else None
-  http_host = HTTPHost(unit_of_work_factory(conn), control_plane=control_plane, default_llm_config=default_llm_config)
+  uow_factory = unit_of_work_factory(conn)
+  resolved_delegation_control = delegation_control or _build_delegation_control(config_path, uow_factory)
+  http_host = HTTPHost(
+    uow_factory,
+    control_plane=control_plane,
+    delegation_control=resolved_delegation_control,
+    default_llm_config=default_llm_config,
+  )
   return ThreadingHTTPServer((host, port), make_handler(http_host))
 
 
@@ -788,6 +874,8 @@ def serve(
   port: int = 8080,
   *,
   control_config: dict[str, Any] | None = None,
+  config_path: str | None = None,
+  delegation_control: AgentDelegationControl | None = None,
   default_llm_config: LLMConfig | None = None,
 ) -> None:
   conn = connect_sqlite(db_path, check_same_thread=False)
@@ -797,6 +885,8 @@ def serve(
       host=host,
       port=port,
       control_config=control_config,
+      config_path=config_path,
+      delegation_control=delegation_control,
       default_llm_config=default_llm_config,
     )
     server.serve_forever()
@@ -822,6 +912,17 @@ def _sample_task_workflow() -> WorkflowSpec:
 
 def _sample_task_echo_node(ctx: NodeContext) -> NodeResult:
   return NodeResult(state_patch={"echo": ctx.input.get("title") or ctx.input.get("text")})
+
+
+def _build_delegation_control(
+  config_path: str | None,
+  uow_factory,
+) -> AgentDelegationBroker | None:
+  specs = load_product_cli_connector_specs(config_path)
+  if not specs:
+    return None
+  connectors = ProductCLIConnectorFactory().build_many(specs)
+  return AgentDelegationBroker(uow_factory, connectors)
 
 
 def _default_desktop_atomic_grants() -> list[CapabilityGrant]:
@@ -851,11 +952,23 @@ def _default_desktop_atomic_grants() -> list[CapabilityGrant]:
     AtomicCapabilityIds.AGENT_DELEGATE,
     AtomicCapabilityIds.AGENT_DELEGATION_STATUS,
     AtomicCapabilityIds.AGENT_CANCEL_DELEGATION,
+    AtomicCapabilityIds.SKILL_OPEN,
+    AtomicCapabilityIds.MEMORY_SEARCH,
+    AtomicCapabilityIds.MEMORY_READ,
+    AtomicCapabilityIds.ARTIFACT_READ,
+    AtomicCapabilityIds.EVENT_SEARCH,
+    AtomicCapabilityIds.CONTEXT_COMPACT,
+    AtomicCapabilityIds.CONTEXT_EXPAND,
     OrchestrationCapabilityIds.TASK_CREATE,
     OrchestrationCapabilityIds.WORKFLOW_RUN,
     OrchestrationCapabilityIds.TASK_STATUS,
     OrchestrationCapabilityIds.TASK_CANCEL,
     OrchestrationCapabilityIds.AGENT_PARALLEL_DELEGATE,
+    OrchestrationCapabilityIds.WORKBENCH_CREATE,
+    OrchestrationCapabilityIds.WORKBENCH_STATUS,
+    OrchestrationCapabilityIds.WORKBENCH_MESSAGE,
+    OrchestrationCapabilityIds.WORKBENCH_DECISION,
+    OrchestrationCapabilityIds.WORKBENCH_CANCEL,
   ]
   return [
     CapabilityGrant(

@@ -7,6 +7,7 @@ from agent_kernel.domain.interaction import (
   InteractionMessage,
   InteractionParticipant,
 )
+from agent_kernel.domain.identifiers import ArtifactRef
 
 
 class InteractionFabric:
@@ -23,12 +24,21 @@ class InteractionFabric:
     topic: str,
     participant_ids: list[str],
     mode: ChannelMode | str = ChannelMode.AD_HOC,
+    *,
+    bound_objective_id: str | None = None,
+    bound_task_id: str | None = None,
+    bound_run_id: str | None = None,
+    bound_artifact_refs: list[ArtifactRef] | None = None,
   ) -> InteractionChannel:
     channel = InteractionChannel(
       channel_id=new_id("channel"),
       topic=topic,
       mode=mode,
       participant_ids=participant_ids,
+      bound_objective_id=bound_objective_id,
+      bound_task_id=bound_task_id,
+      bound_run_id=bound_run_id,
+      bound_artifact_refs=bound_artifact_refs or [],
     )
     with self._uow_factory() as uow:
       uow.interactions.save_channel(channel)
@@ -53,4 +63,3 @@ class InteractionFabric:
   def list_messages(self, channel_id: str) -> list[InteractionMessage]:
     with self._uow_factory() as uow:
       return uow.interactions.list_messages(channel_id)
-

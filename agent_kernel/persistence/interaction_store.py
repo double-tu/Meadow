@@ -25,6 +25,7 @@ from agent_kernel.domain.delegation import DelegationTask
 from agent_kernel.domain.mcp_config import MCPServerDefinition
 from agent_kernel.domain.scheduled_task import ScheduledTask, ScheduledTaskTrigger
 from agent_kernel.domain.serialization import to_primitive
+from agent_kernel.domain.workbench import CollaborationWorkbench, WorkbenchMember, WorkbenchTaskSlice
 
 
 class InteractionStore:
@@ -128,6 +129,28 @@ class InteractionStore:
 
   def list_handoffs(self, task_id: str) -> list[HandoffRecord]:
     return [HandoffRecord.from_dict(data) for data in self._list("handoff", task_id)]
+
+  def save_workbench(self, item: CollaborationWorkbench) -> None:
+    self._save(item.workbench_id, "collaboration_workbench", None, item)
+
+  def get_workbench(self, workbench_id: str) -> CollaborationWorkbench | None:
+    data = self._get(workbench_id)
+    return CollaborationWorkbench.from_dict(data) if data is not None else None
+
+  def list_workbenches(self) -> list[CollaborationWorkbench]:
+    return [CollaborationWorkbench.from_dict(data) for data in self._list_all("collaboration_workbench")]
+
+  def save_workbench_member(self, workbench_id: str, item: WorkbenchMember) -> None:
+    self._save(item.member_id, "workbench_member", workbench_id, item)
+
+  def list_workbench_members(self, workbench_id: str) -> list[WorkbenchMember]:
+    return [WorkbenchMember.from_dict(data) for data in self._list("workbench_member", workbench_id)]
+
+  def save_workbench_task_slice(self, workbench_id: str, item: WorkbenchTaskSlice) -> None:
+    self._save(item.slice_id, "workbench_task_slice", workbench_id, item)
+
+  def list_workbench_task_slices(self, workbench_id: str) -> list[WorkbenchTaskSlice]:
+    return [WorkbenchTaskSlice.from_dict(data) for data in self._list("workbench_task_slice", workbench_id)]
 
   def save_delegation_task(self, item: DelegationTask) -> None:
     self._save(item.task_id, "delegation_task", item.parent_run_id, item)

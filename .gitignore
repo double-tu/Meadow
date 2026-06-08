@@ -26,8 +26,13 @@ ENV/
 # Build/package output
 build/
 dist/
+desktop/ui/dist/
 *.egg-info/
 .eggs/
+
+# Node dependencies
+node_modules/
+desktop/node_modules/
 
 # Local runtime data
 *.sqlite

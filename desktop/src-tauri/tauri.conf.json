@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.meadow.desktop",
   "build": {
-    "frontendDist": "../static",
+    "frontendDist": "../ui/dist",
     "devUrl": "http://127.0.0.1:4173"
   },
   "app": {

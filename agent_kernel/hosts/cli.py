@@ -268,6 +268,7 @@ async def _dispatch(args: argparse.Namespace, conn) -> dict[str, Any]:
       host=args.host,
       port=args.port,
       control_config=control_config if isinstance(control_config, dict) else {},
+      config_path=args.config,
       default_llm_config=default_llm_config,
     )
     return ok_response(status="http_stopped")

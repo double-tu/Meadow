@@ -7,7 +7,7 @@ from agent_kernel.capabilities.adapters import LocalToolExecutor
 from agent_kernel.config import LLMConfig
 from agent_kernel.domain.capability import ToolResult
 from agent_kernel.domain.context import ModelContext
-from agent_kernel.models import MockModelProvider, ModelGateway, OpenAICompatibleProvider
+from agent_kernel.models import AnthropicMessagesProvider, GeminiProvider, MockModelProvider, ModelGateway, OpenAICompatibleProvider
 
 
 class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
@@ -119,6 +119,82 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(calls[0]["tools"][0]["function"]["name"], "http_request")
     self.assertEqual(result["tool_calls"][0]["function"]["name"], "http_request")
+
+  async def test_gemini_provider_maps_tools_and_function_calls(self) -> None:
+    calls = []
+
+    def transport(url, headers, payload, timeout_seconds):
+      calls.append((url, headers, payload, timeout_seconds))
+      return {
+        "candidates": [
+          {
+            "content": {
+              "parts": [
+                {"functionCall": {"name": "browser_scan", "args": {"tabs_only": True}}},
+                {"text": "checking"},
+              ]
+            }
+          }
+        ],
+        "usageMetadata": {"totalTokenCount": 8},
+      }
+
+    provider = GeminiProvider(api_key="gemini-key", timeout_seconds=9, transport=transport)
+
+    result = await provider.complete(
+      "gemini-2.5-pro",
+      ModelContext(
+        messages=[{"role": "system", "content": "中文"}, {"role": "user", "content": "看浏览器"}],
+        tool_schemas=[
+          {
+            "type": "function",
+            "function": {"name": "browser_scan", "description": "scan", "parameters": {"type": "object"}},
+          }
+        ],
+      ),
+    )
+
+    self.assertIn("models/gemini-2.5-pro:generateContent", calls[0][0])
+    self.assertIn("key=gemini-key", calls[0][0])
+    self.assertEqual(calls[0][2]["tools"][0]["functionDeclarations"][0]["name"], "browser_scan")
+    self.assertEqual(result["tool_calls"][0]["name"], "browser_scan")
+    self.assertEqual(result["tool_calls"][0]["input"], {"tabs_only": True})
+    self.assertEqual(result["usage"], {"totalTokenCount": 8})
+
+  async def test_anthropic_provider_maps_tools_and_tool_use(self) -> None:
+    calls = []
+
+    def transport(url, headers, payload, timeout_seconds):
+      calls.append((url, headers, payload, timeout_seconds))
+      return {
+        "content": [
+          {"type": "tool_use", "name": "task_status", "input": {"run_id": "run_1"}},
+          {"type": "text", "text": "done"},
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 4},
+      }
+
+    provider = AnthropicMessagesProvider(api_key="anthropic-key", base_url="https://claude.example/v1", transport=transport)
+
+    result = await provider.complete(
+      "claude-sonnet-4",
+      ModelContext(
+        messages=[{"role": "system", "content": "中文"}, {"role": "user", "content": "状态"}],
+        tool_schemas=[
+          {
+            "type": "function",
+            "function": {"name": "task_status", "description": "status", "parameters": {"type": "object"}},
+          }
+        ],
+      ),
+    )
+
+    self.assertEqual(calls[0][0], "https://claude.example/v1/messages")
+    self.assertEqual(calls[0][1]["x-api-key"], "anthropic-key")
+    self.assertEqual(calls[0][2]["tools"][0]["input_schema"], {"type": "object"})
+    self.assertEqual(result["tool_calls"][0]["name"], "task_status")
+    self.assertEqual(result["tool_calls"][0]["input"], {"run_id": "run_1"})
+    self.assertEqual(result["content"], "done")
 
   def test_llm_config_reads_environment(self) -> None:
     with mock.patch.dict(

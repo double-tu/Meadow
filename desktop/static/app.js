@@ -292,10 +292,8 @@ async function renderSkills() {
 async function renderConfig() {
   const data = await apiGet("/config");
   const sections = data.config_sections || [];
-  if (!sections.some((item) => item.section === state.configSection)) {
-    state.configSection = sections[0]?.section || "llm";
-  }
-  const current = (await apiGet(`/config/${encodeURIComponent(state.configSection)}`)).config_section;
+  const sectionIds = sections.map((item) => item.section);
+  if (![...sectionIds, "raw"].includes(state.configSection)) state.configSection = "llm";
   const layout = div("config-layout");
 
   const listPanel = div("panel");
@@ -304,11 +302,29 @@ async function renderConfig() {
   listTitle.textContent = "配置分区";
   listHeader.append(listTitle);
   const listBody = div("panel-body session-list");
-  for (const section of sections) {
-    const item = button(section.section, async () => {
-      state.configSection = section.section;
+  const sectionLabels = {
+    llm: ["大模型", "Provider / Model / Agent"],
+    agents: ["Agent", "默认 Agent 与委派策略"],
+    ui: ["界面", "语言、主题、密度"],
+    mcp: ["MCP", "工具同步策略"],
+    control: ["控制能力", "浏览器、桌面、移动"],
+    raw: ["高级", "JSON 兜底编辑"],
+  };
+  const visibleSections = ["llm", "agents", "ui", "mcp", "control", "raw"].filter(
+    (section) => section === "raw" || sectionIds.includes(section),
+  );
+  for (const section of visibleSections) {
+    const [label, description] = sectionLabels[section] || [section, ""];
+    const item = button("", async () => {
+      state.configSection = section;
       await render();
-    }, `session-item ${section.section === state.configSection ? "active" : ""}`);
+    }, `session-item ${section === state.configSection ? "active" : ""}`);
+    item.classList.toggle("active", section === state.configSection);
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const sub = document.createElement("span");
+    sub.textContent = description;
+    item.append(title, sub);
     listBody.append(item);
   }
   listPanel.append(listHeader, listBody);
@@ -316,17 +332,460 @@ async function renderConfig() {
   const editor = div("panel config-editor");
   const editorHeader = div("panel-header");
   const editorTitle = document.createElement("h2");
-  editorTitle.textContent = `配置：${current.section}`;
+  editorTitle.textContent = sectionLabels[state.configSection]?.[0] || `配置：${state.configSection}`;
   editorHeader.append(editorTitle, pill("热更新"));
-  const body = div("panel-body config-editor");
-  const jsonEditor = textarea("JSON 配置", JSON.stringify(current.data, null, 2));
-  body.append(jsonEditor, div("row-actions", button("保存", async () => {
-    await apiPatch(`/config/${encodeURIComponent(current.section)}`, { data: JSON.parse(jsonEditor.value), merge: false });
-    await render();
-  }, "primary")));
+  const body = div("panel-body config-body");
+  if (state.configSection === "llm") {
+    const llm = (await apiGet("/config/llm")).config_section;
+    body.append(renderModelConfig(llm.data || {}));
+  } else if (state.configSection === "agents") {
+    const llm = (await apiGet("/config/llm")).config_section;
+    const agents = (await apiGet("/config/agents")).config_section;
+    body.append(renderAgentConfig(agents.data || {}, normalizeLlmConfig(llm.data || {})));
+  } else if (state.configSection === "ui") {
+    const ui = (await apiGet("/config/ui")).config_section;
+    body.append(renderSimpleConfigForm("ui", ui.data || {}, [
+      { key: "locale", label: "语言", type: "select", options: ["zh-CN", "en-US"] },
+      { key: "theme", label: "主题", type: "select", options: ["system", "light", "dark"] },
+      { key: "density", label: "密度", type: "select", options: ["compact", "comfortable"] },
+      { key: "default_view", label: "默认页面", type: "select", options: ["chat", "workspaces", "skills", "config"] },
+    ]));
+  } else if (state.configSection === "mcp") {
+    const mcp = (await apiGet("/config/mcp")).config_section;
+    body.append(renderSimpleConfigForm("mcp", mcp.data || {}, [
+      { key: "auto_sync_to_agents", label: "自动同步到 Agent", type: "boolean" },
+    ]));
+  } else if (state.configSection === "control") {
+    const control = (await apiGet("/config/control")).config_section;
+    body.append(renderSimpleConfigForm("control", control.data || {}, [
+      { key: "browser_enabled", label: "浏览器控制", type: "boolean" },
+      { key: "desktop_enabled", label: "桌面控制", type: "boolean" },
+      { key: "mobile_enabled", label: "移动控制", type: "boolean" },
+    ]));
+  } else {
+    const rawSection = select(sectionIds);
+    rawSection.value = sectionIds.includes("llm") ? "llm" : sectionIds[0];
+    const rawEditor = textarea("JSON 配置", "");
+    const loadRaw = async () => {
+      const current = (await apiGet(`/config/${encodeURIComponent(rawSection.value)}`)).config_section;
+      rawEditor.value = JSON.stringify(current.data, null, 2);
+    };
+    rawSection.addEventListener("change", loadRaw);
+    await loadRaw();
+    body.append(
+      div("form-grid compact", field("分区", rawSection), field("JSON", rawEditor)),
+      div("row-actions", button("保存 JSON", async () => {
+        await apiPatch(`/config/${encodeURIComponent(rawSection.value)}`, { data: JSON.parse(rawEditor.value), merge: false });
+        await render();
+      }, "primary")),
+    );
+  }
   editor.append(editorHeader, body);
   layout.append(listPanel, editor);
   els.view.append(layout);
+}
+
+function renderModelConfig(data) {
+  const config = normalizeLlmConfig(data);
+  const root = div("config-stack");
+  const summary = div("config-summary");
+  summary.append(
+    metric("Provider", config.providers.length),
+    metric("模型", config.providers.reduce((total, provider) => total + provider.models.length, 0)),
+    metric("Agent 绑定", config.agent_bindings.length),
+  );
+  root.append(summary);
+
+  const global = div("settings-section");
+  const activeProvider = select(config.providers.map((provider) => ({ value: provider.provider_id, label: provider.name || provider.provider_id })));
+  activeProvider.value = config.active_provider_id || config.providers[0]?.provider_id || "";
+  const activeModel = select(modelsForProvider(config, activeProvider.value).map((model) => ({ value: model.model_id, label: model.label || model.model_id })));
+  activeModel.value = config.active_model_id || modelsForProvider(config, activeProvider.value)[0]?.model_id || "";
+  activeProvider.addEventListener("change", () => {
+    activeModel.innerHTML = "";
+    for (const model of modelsForProvider(config, activeProvider.value)) {
+      const option = document.createElement("option");
+      option.value = model.model_id;
+      option.textContent = model.label || model.model_id;
+      activeModel.append(option);
+    }
+  });
+  const showReasoning = checkboxInput(config.display?.show_reasoning !== false);
+  const showBadges = checkboxInput(config.display?.show_model_badges !== false);
+  global.append(
+    div("section-title", "默认模型"),
+    div("form-grid", field("默认 Provider", activeProvider), field("默认模型", activeModel), field("显示推理过程", showReasoning), field("显示模型能力", showBadges)),
+    div("row-actions", button("保存默认模型", async () => {
+      config.active_provider_id = activeProvider.value;
+      config.active_model_id = activeModel.value;
+      config.display = { ...(config.display || {}), show_reasoning: showReasoning.checked, show_model_badges: showBadges.checked };
+      await saveLlmConfig(config);
+    }, "primary")),
+  );
+  root.append(global);
+
+  const providerSection = div("settings-section");
+  providerSection.append(div("section-title", "模型接入"));
+  for (const [index, provider] of config.providers.entries()) {
+    providerSection.append(renderProviderEditor(config, provider, index));
+  }
+  providerSection.append(div("row-actions", button("新增 Provider", async () => {
+    config.providers.push(newProviderConfig(`provider_${Date.now()}`));
+    await saveLlmConfig(config);
+  }, "primary")));
+  root.append(providerSection);
+
+  const bindingSection = div("settings-section");
+  bindingSection.append(div("section-title", "Agent 模型绑定"));
+  for (const [index, binding] of config.agent_bindings.entries()) {
+    bindingSection.append(renderAgentBindingEditor(config, binding, index));
+  }
+  bindingSection.append(div("row-actions", button("新增 Agent 绑定", async () => {
+    config.agent_bindings.push({
+      agent_id: `agent_${config.agent_bindings.length + 1}`,
+      label: "自定义 Agent",
+      provider_id: config.active_provider_id || config.providers[0]?.provider_id || "",
+      model_id: config.active_model_id || "",
+      reasoning_model_id: "",
+      image_model_id: "",
+      show_reasoning: true,
+    });
+    await saveLlmConfig(config);
+  })));
+  root.append(bindingSection);
+  return root;
+}
+
+function renderProviderEditor(config, provider, index) {
+  const node = div("config-card provider-card");
+  const header = div("config-card-header");
+  header.append(
+    div("", document.createElement("strong"), div("muted", provider.provider_id)),
+    div("badge-row", badge(provider.kind), badge(provider.enabled !== false ? "启用" : "停用")),
+  );
+  header.querySelector("strong").textContent = provider.name || provider.provider_id;
+
+  const providerId = input("provider_id", provider.provider_id || "");
+  const name = input("名称", provider.name || "");
+  const kind = select([
+    { value: "openai-compatible", label: "OpenAI Compatible" },
+    { value: "gemini", label: "Gemini" },
+    { value: "anthropic", label: "Anthropic" },
+    { value: "agent-cli", label: "Agent CLI / Cloud Code" },
+    { value: "custom", label: "自定义" },
+  ]);
+  kind.value = provider.kind || "openai-compatible";
+  const enabled = checkboxInput(provider.enabled !== false);
+  const baseUrl = input("Base URL", provider.base_url || defaultBaseUrl(kind.value));
+  const apiKeyEnv = input("API Key 环境变量", provider.api_key_env || "");
+  const apiKey = input("API Key", provider.api_key === "***" ? "" : provider.api_key || "");
+  apiKey.type = "password";
+  apiKey.autocomplete = "off";
+  const timeout = input("超时秒数", String(provider.timeout_seconds || 60));
+  timeout.type = "number";
+  timeout.min = "1";
+
+  const modelList = div("model-list");
+  for (const [modelIndex, model] of provider.models.entries()) {
+    modelList.append(renderModelEditor(config, provider, model, modelIndex));
+  }
+  const newModelId = input("模型 ID", "");
+  const newModelLabel = input("显示名称", "");
+
+  node.append(
+    header,
+    div(
+      "form-grid",
+      field("Provider ID", providerId),
+      field("名称", name),
+      field("类型", kind),
+      field("启用", enabled),
+      field("Base URL", baseUrl),
+      field("API Key Env", apiKeyEnv),
+      field("API Key", apiKey),
+      field("Timeout", timeout),
+    ),
+    div("section-subtitle", "模型与能力"),
+    modelList,
+    div("form-grid compact", field("模型 ID", newModelId), field("显示名称", newModelLabel)),
+    div(
+      "row-actions",
+      button("保存 Provider", async () => {
+        provider.provider_id = providerId.value.trim() || provider.provider_id;
+        provider.name = name.value.trim() || provider.provider_id;
+        provider.kind = kind.value;
+        provider.enabled = enabled.checked;
+        provider.base_url = baseUrl.value.trim() || defaultBaseUrl(kind.value);
+        provider.api_key_env = apiKeyEnv.value.trim();
+        if (apiKey.value.trim()) provider.api_key = apiKey.value.trim();
+        provider.timeout_seconds = Number(timeout.value || 60);
+        if (!config.active_provider_id) config.active_provider_id = provider.provider_id;
+        await saveLlmConfig(config);
+      }, "primary"),
+      button("新增模型", async () => {
+        const modelId = newModelId.value.trim();
+        if (!modelId) return;
+        provider.models.push(newModelConfig(modelId, newModelLabel.value.trim()));
+        await saveLlmConfig(config);
+      }),
+      button("删除 Provider", async () => {
+        config.providers.splice(index, 1);
+        if (config.active_provider_id === provider.provider_id) config.active_provider_id = config.providers[0]?.provider_id || "";
+        await saveLlmConfig(config);
+      }, "danger"),
+    ),
+  );
+  return node;
+}
+
+function renderModelEditor(config, provider, model, index) {
+  const node = div("model-row");
+  const modelId = input("model_id", model.model_id || "");
+  const label = input("显示名称", model.label || "");
+  const enabled = checkboxInput(model.enabled !== false);
+  const contextWindow = input("上下文", String(model.context_window || ""));
+  contextWindow.type = "number";
+  const caps = normalizeCapabilities(model.capabilities || {});
+  const capInputs = {};
+  const capGrid = div("cap-grid");
+  for (const cap of MODEL_CAPABILITIES) {
+    const capInput = checkboxInput(Boolean(caps[cap.key]));
+    capInputs[cap.key] = capInput;
+    capGrid.append(field(cap.label, capInput));
+  }
+  node.append(
+    div("form-grid compact", field("模型 ID", modelId), field("名称", label), field("启用", enabled), field("上下文窗口", contextWindow)),
+    capGrid,
+    div("row-actions",
+      button("保存模型", async () => {
+        model.model_id = modelId.value.trim() || model.model_id;
+        model.label = label.value.trim();
+        model.enabled = enabled.checked;
+        model.context_window = Number(contextWindow.value || 0) || undefined;
+        model.capabilities = Object.fromEntries(Object.entries(capInputs).map(([key, inputNode]) => [key, inputNode.checked]));
+        await saveLlmConfig(config);
+      }),
+      button("删除模型", async () => {
+        provider.models.splice(index, 1);
+        await saveLlmConfig(config);
+      }, "danger"),
+    ),
+  );
+  return node;
+}
+
+function renderAgentBindingEditor(config, binding, index) {
+  const node = div("config-card binding-card");
+  const agentId = input("Agent ID", binding.agent_id || "");
+  const label = input("名称", binding.label || "");
+  const provider = select(config.providers.map((item) => ({ value: item.provider_id, label: item.name || item.provider_id })));
+  provider.value = binding.provider_id || config.active_provider_id || "";
+  const model = select(modelsForProvider(config, provider.value).map((item) => ({ value: item.model_id, label: item.label || item.model_id })));
+  model.value = binding.model_id || "";
+  const reasoningModel = input("推理模型 ID", binding.reasoning_model_id || "");
+  const imageModel = input("图像模型 ID", binding.image_model_id || "");
+  const showReasoning = checkboxInput(binding.show_reasoning !== false);
+  provider.addEventListener("change", () => {
+    model.innerHTML = "";
+    for (const item of modelsForProvider(config, provider.value)) {
+      const option = document.createElement("option");
+      option.value = item.model_id;
+      option.textContent = item.label || item.model_id;
+      model.append(option);
+    }
+  });
+  node.append(
+    div("config-card-header", div("", strong(binding.label || binding.agent_id || "Agent 绑定"), div("muted", binding.agent_id || "")), badge("Agent")),
+    div("form-grid", field("Agent ID", agentId), field("名称", label), field("Provider", provider), field("主模型", model), field("推理模型", reasoningModel), field("图像模型", imageModel), field("展示推理", showReasoning)),
+    div("row-actions", button("保存绑定", async () => {
+      binding.agent_id = agentId.value.trim() || binding.agent_id;
+      binding.label = label.value.trim() || binding.agent_id;
+      binding.provider_id = provider.value;
+      binding.model_id = model.value;
+      binding.reasoning_model_id = reasoningModel.value.trim();
+      binding.image_model_id = imageModel.value.trim();
+      binding.show_reasoning = showReasoning.checked;
+      await saveLlmConfig(config);
+    }, "primary"), button("删除绑定", async () => {
+      config.agent_bindings.splice(index, 1);
+      await saveLlmConfig(config);
+    }, "danger")),
+  );
+  return node;
+}
+
+function renderAgentConfig(data, llmConfig) {
+  const root = div("config-stack");
+  const defaultAgent = input("默认 Agent", data.default_agent_id || "desktop_daily_agent");
+  const defaultConnector = input("默认连接器", data.default_connector_id || "");
+  const autoDelegate = checkboxInput(Boolean(data.auto_delegate));
+  const fallbackProvider = select(llmConfig.providers.map((provider) => ({ value: provider.provider_id, label: provider.name || provider.provider_id })));
+  fallbackProvider.value = data.model_policy?.fallback_provider_id || llmConfig.active_provider_id || "";
+  const fallbackModel = select(modelsForProvider(llmConfig, fallbackProvider.value).map((model) => ({ value: model.model_id, label: model.label || model.model_id })));
+  fallbackModel.value = data.model_policy?.fallback_model_id || llmConfig.active_model_id || "";
+  const allowOverride = checkboxInput(data.model_policy?.allow_agent_override !== false);
+  fallbackProvider.addEventListener("change", () => {
+    fallbackModel.innerHTML = "";
+    for (const model of modelsForProvider(llmConfig, fallbackProvider.value)) {
+      const option = document.createElement("option");
+      option.value = model.model_id;
+      option.textContent = model.label || model.model_id;
+      fallbackModel.append(option);
+    }
+  });
+  root.append(
+    div("settings-section",
+      div("section-title", "Agent 策略"),
+      div("form-grid", field("默认 Agent", defaultAgent), field("默认连接器", defaultConnector), field("自动委派", autoDelegate), field("允许 Agent 覆盖模型", allowOverride), field("兜底 Provider", fallbackProvider), field("兜底模型", fallbackModel)),
+      div("row-actions", button("保存 Agent 配置", async () => {
+        await apiPatch("/config/agents", {
+          data: {
+            ...data,
+            default_agent_id: defaultAgent.value.trim() || "desktop_daily_agent",
+            default_connector_id: defaultConnector.value.trim(),
+            auto_delegate: autoDelegate.checked,
+            model_policy: {
+              ...(data.model_policy || {}),
+              allow_agent_override: allowOverride.checked,
+              fallback_provider_id: fallbackProvider.value,
+              fallback_model_id: fallbackModel.value,
+            },
+          },
+          merge: false,
+        });
+        await render();
+      }, "primary")),
+    ),
+  );
+  return root;
+}
+
+function renderSimpleConfigForm(section, data, fields) {
+  const root = div("config-stack");
+  const form = div("form-grid");
+  const controls = {};
+  for (const spec of fields) {
+    let control;
+    if (spec.type === "select") {
+      control = select(spec.options);
+      control.value = data[spec.key] || spec.options[0];
+    } else if (spec.type === "boolean") {
+      control = checkboxInput(Boolean(data[spec.key]));
+    } else {
+      control = input(spec.label, data[spec.key] || "");
+    }
+    controls[spec.key] = control;
+    form.append(field(spec.label, control));
+  }
+  root.append(div("settings-section", form, div("row-actions", button("保存", async () => {
+    const next = { ...data };
+    for (const spec of fields) {
+      const control = controls[spec.key];
+      next[spec.key] = spec.type === "boolean" ? control.checked : control.value;
+    }
+    await apiPatch(`/config/${encodeURIComponent(section)}`, { data: next, merge: false });
+    await render();
+  }, "primary"))));
+  return root;
+}
+
+const MODEL_CAPABILITIES = [
+  { key: "text", label: "文本" },
+  { key: "function_calling", label: "工具调用" },
+  { key: "reasoning", label: "推理" },
+  { key: "vision", label: "视觉理解" },
+  { key: "image_input", label: "图片输入" },
+  { key: "image_output", label: "图片输出" },
+  { key: "audio_input", label: "音频输入" },
+  { key: "audio_output", label: "音频输出" },
+];
+
+function normalizeLlmConfig(data) {
+  const providers = Array.isArray(data.providers) ? data.providers : [];
+  const normalizedProviders = providers.length ? providers : [newProviderConfig("openai_default")];
+  for (const provider of normalizedProviders) {
+    provider.provider_id = provider.provider_id || provider.id || provider.name || `provider_${Date.now()}`;
+    provider.name = provider.name || provider.provider_id;
+    provider.kind = provider.kind || provider.provider || provider.platform || "openai-compatible";
+    provider.enabled = provider.enabled !== false;
+    provider.base_url = provider.base_url || defaultBaseUrl(provider.kind);
+    provider.api_key_env = provider.api_key_env || "";
+    provider.api_key = provider.api_key || "";
+    provider.timeout_seconds = provider.timeout_seconds || 60;
+    provider.models = Array.isArray(provider.models) && provider.models.length ? provider.models : [newModelConfig(data.model || "gpt-4.1-mini", data.model || "GPT-4.1 mini")];
+    for (const model of provider.models) {
+      model.model_id = model.model_id || model.id || String(model.name || "");
+      model.label = model.label || model.name || model.model_id;
+      model.enabled = model.enabled !== false;
+      model.capabilities = normalizeCapabilities(model.capabilities || {});
+    }
+  }
+  return {
+    ...data,
+    active_provider_id: data.active_provider_id || normalizedProviders[0]?.provider_id || "",
+    active_model_id: data.active_model_id || normalizedProviders[0]?.models[0]?.model_id || "",
+    providers: normalizedProviders,
+    agent_bindings: Array.isArray(data.agent_bindings) && data.agent_bindings.length ? data.agent_bindings : [{
+      agent_id: "desktop_daily_agent",
+      label: "日常 Agent",
+      provider_id: data.active_provider_id || normalizedProviders[0]?.provider_id || "",
+      model_id: data.active_model_id || normalizedProviders[0]?.models[0]?.model_id || "",
+      reasoning_model_id: "",
+      image_model_id: "",
+      show_reasoning: true,
+    }],
+    display: data.display || { show_reasoning: true, show_model_badges: true },
+  };
+}
+
+function normalizeCapabilities(caps) {
+  const next = {};
+  for (const cap of MODEL_CAPABILITIES) next[cap.key] = Boolean(caps[cap.key]);
+  if (!Object.keys(caps).length) {
+    next.text = true;
+    next.function_calling = true;
+  }
+  return next;
+}
+
+function newProviderConfig(providerId) {
+  return {
+    provider_id: providerId,
+    name: providerId === "openai_default" ? "OpenAI" : "新 Provider",
+    kind: "openai-compatible",
+    enabled: true,
+    base_url: "https://api.openai.com/v1",
+    api_key_env: "OPENAI_API_KEY",
+    api_key: "",
+    timeout_seconds: 60,
+    models: [newModelConfig("gpt-4.1-mini", "GPT-4.1 mini")],
+  };
+}
+
+function newModelConfig(modelId, label = "") {
+  return {
+    model_id: modelId,
+    label: label || modelId,
+    enabled: true,
+    context_window: 0,
+    capabilities: { text: true, function_calling: true, vision: false, reasoning: false, image_input: false, image_output: false, audio_input: false, audio_output: false },
+  };
+}
+
+function defaultBaseUrl(kind) {
+  if (kind === "gemini") return "https://generativelanguage.googleapis.com/v1beta";
+  if (kind === "anthropic") return "https://api.anthropic.com/v1";
+  return "https://api.openai.com/v1";
+}
+
+function modelsForProvider(config, providerId) {
+  const provider = config.providers.find((item) => item.provider_id === providerId) || config.providers[0];
+  return provider?.models || [];
+}
+
+async function saveLlmConfig(config) {
+  await apiPatch("/config/llm", { data: config, merge: false });
+  await render();
 }
 
 async function renderWorkspaces() {
@@ -550,6 +1009,43 @@ function miniCard(title, text) {
   return node;
 }
 
+function field(label, control) {
+  const node = div("field");
+  const text = document.createElement("label");
+  text.textContent = label;
+  node.append(text, control);
+  return node;
+}
+
+function checkboxInput(checked) {
+  const node = document.createElement("input");
+  node.type = "checkbox";
+  node.checked = Boolean(checked);
+  return node;
+}
+
+function metric(label, value) {
+  const node = div("metric");
+  const strongNode = document.createElement("strong");
+  strongNode.textContent = String(value);
+  const span = document.createElement("span");
+  span.textContent = label;
+  node.append(strongNode, span);
+  return node;
+}
+
+function badge(text) {
+  const node = div("badge");
+  node.textContent = text || "unknown";
+  return node;
+}
+
+function strong(text) {
+  const node = document.createElement("strong");
+  node.textContent = text;
+  return node;
+}
+
 function div(className, ...children) {
   const node = document.createElement("div");
   if (className) node.className = className;
@@ -582,10 +1078,11 @@ function textarea(placeholder, value) {
 
 function select(values) {
   const node = document.createElement("select");
-  for (const value of values) {
+  for (const item of values) {
+    const value = typeof item === "object" ? item.value : item;
     const option = document.createElement("option");
     option.value = value;
-    option.textContent = value;
+    option.textContent = typeof item === "object" ? item.label : value;
     node.append(option);
   }
   return node;

@@ -23,6 +23,7 @@ class DesktopWorkspaceSnapshot(DomainModel):
   channel_ids: list[str] = field(default_factory=list)
   artifact_ids: list[str] = field(default_factory=list)
   taskboard_item_ids: list[str] = field(default_factory=list)
+  collaboration_workbench_ids: list[str] = field(default_factory=list)
   delegation_task_ids: list[str] = field(default_factory=list)
   pending_approval_ids: list[str] = field(default_factory=list)
   active_tool_call_ids: list[str] = field(default_factory=list)
@@ -39,6 +40,7 @@ class DesktopWorkspaceService:
       runs = uow.states.list_all()
       channels = uow.interactions.list_channels()
       taskboard_items = uow.interactions.list_taskboard_items()
+      workbenches = uow.interactions.list_workbenches()
       agent_sessions = uow.agent_sessions.list_all()
       delegations = uow.interactions.list_delegation_tasks()
       artifacts = uow.artifacts.list_all()
@@ -93,6 +95,22 @@ class DesktopWorkspaceService:
       _append_unique(snapshot.taskboard_item_ids, item.item_id)
       for ref in item.result_artifact_refs:
         _append_unique(snapshot.artifact_ids, ref.artifact_id)
+
+    for workbench in workbenches:
+      workspace_id = (
+        run_to_workspace.get(workbench.parent_run_id or "")
+        or _workspace_id_for(None, workbench.parent_run_id or workbench.workbench_id)
+      )
+      snapshot = ensure(workspace_id, workbench.title)
+      _append_unique(snapshot.collaboration_workbench_ids, workbench.workbench_id)
+      if workbench.parent_run_id:
+        _append_unique(snapshot.run_ids, workbench.parent_run_id)
+      if workbench.channel_id:
+        _append_unique(snapshot.channel_ids, workbench.channel_id)
+      for item_id in workbench.taskboard_item_ids:
+        _append_unique(snapshot.taskboard_item_ids, item_id)
+      for task_id in workbench.delegation_task_ids:
+        _append_unique(snapshot.delegation_task_ids, task_id)
 
     for session in agent_sessions:
       workspace_id = task_to_workspace.get(session.task_id or "") or _workspace_id_for(session.task_id, session.session_id)

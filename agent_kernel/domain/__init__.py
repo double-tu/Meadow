@@ -16,7 +16,18 @@ from agent_kernel.domain.autonomy import (
   WorkflowTemplateStatus,
 )
 from agent_kernel.domain.capability import CapabilityGrant, CapabilitySpec, ToolResult
-from agent_kernel.domain.context import ContextCandidate, ContextPlan, ModelContext, RetrievalPack
+from agent_kernel.domain.context import (
+  ContextAssemblyRequest,
+  ContextCandidate,
+  ContextLayer,
+  ContextLayerItem,
+  ContextLayerKind,
+  ContextPack,
+  ContextPlan,
+  LayerBudget,
+  ModelContext,
+  RetrievalPack,
+)
 from agent_kernel.domain.conversation import Message, Objective, Thread
 from agent_kernel.domain.delegation import DelegationStatus, DelegationTask, DelegationTaskReport
 from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
@@ -82,6 +93,14 @@ from agent_kernel.domain.workflow import (
   NodeSpec,
   WorkflowSpec,
 )
+from agent_kernel.domain.workbench import (
+  CollaborationWorkbench,
+  CollaborationWorkbenchKind,
+  CollaborationWorkbenchStatus,
+  WorkbenchMember,
+  WorkbenchTaskSlice,
+  WorkbenchTaskSliceStatus,
+)
 
 __all__ = [
   "AgentSession",
@@ -100,7 +119,15 @@ __all__ = [
   "ChannelMode",
   "CircuitBreakerState",
   "CircuitStatus",
+  "CollaborationWorkbench",
+  "CollaborationWorkbenchKind",
+  "CollaborationWorkbenchStatus",
+  "ContextAssemblyRequest",
   "ContextCandidate",
+  "ContextLayer",
+  "ContextLayerItem",
+  "ContextLayerKind",
+  "ContextPack",
   "ContextPlan",
   "DeadLetterItem",
   "DelegationStatus",
@@ -123,6 +150,7 @@ __all__ = [
   "InteractionChannel",
   "InteractionMessage",
   "InteractionParticipant",
+  "LayerBudget",
   "MemoryItem",
   "MemoryRef",
   "MergeQueueItem",
@@ -171,6 +199,9 @@ __all__ = [
   "WorkflowSpec",
   "WorkflowTemplate",
   "WorkflowTemplateStatus",
+  "WorkbenchMember",
+  "WorkbenchTaskSlice",
+  "WorkbenchTaskSliceStatus",
   "WorkspaceLease",
   "assert_transition",
   "can_transition",

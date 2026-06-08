@@ -1,20 +1,22 @@
 :root {
   color-scheme: light;
-  --bg: #f4f5f7;
-  --sidebar: #ebedf0;
+  --bg: #eef1f5;
+  --sidebar: #171b22;
   --panel: #ffffff;
-  --panel-soft: #f8f9fb;
-  --text: #20242a;
-  --muted: #66707c;
+  --panel-soft: #f6f8fb;
+  --text: #1c2430;
+  --muted: #5d6878;
   --faint: #8b949f;
-  --border: #d9dee5;
-  --border-strong: #c6ced7;
-  --accent: #2563eb;
-  --accent-soft: #e8f0ff;
+  --border: #d6dce5;
+  --border-strong: #b9c2cf;
+  --accent: #2364d2;
+  --accent-soft: #e8f1ff;
+  --teal: #0f766e;
+  --teal-soft: #dff7f3;
   --success: #16794c;
   --danger: #b42318;
   --warn: #a15c07;
-  --shadow: 0 1px 2px rgba(19, 27, 38, 0.08);
+  --shadow: 0 1px 2px rgba(19, 27, 38, 0.08), 0 8px 24px rgba(19, 27, 38, 0.04);
 }
 
 * {
@@ -81,8 +83,19 @@ button:hover {
   height: 34px;
   place-items: center;
   border-radius: 9px;
-  background: #1f2937;
-  color: #fff;
+  background: #f4f7fb;
+  color: #18202b;
+}
+
+.brand-copy strong {
+  color: #f8fafc;
+}
+
+.brand-copy span {
+  color: #aab4c3;
+}
+
+.brand-mark {
   font-weight: 700;
 }
 
@@ -93,11 +106,6 @@ button:hover {
 
 .brand-copy strong {
   font-size: 14px;
-}
-
-.brand-copy span {
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .nav {
@@ -112,13 +120,13 @@ button:hover {
   background: transparent;
   padding: 9px 10px;
   text-align: left;
-  color: #374151;
+  color: #c8d0dc;
 }
 
 .nav-item.active {
-  border-color: var(--border);
-  background: var(--panel);
-  color: var(--accent);
+  border-color: rgba(255, 255, 255, 0.16);
+  background: #252b35;
+  color: #ffffff;
   box-shadow: var(--shadow);
 }
 
@@ -255,6 +263,7 @@ textarea {
 .panel-header h2 {
   margin: 0;
   font-size: 13px;
+  letter-spacing: 0;
 }
 
 .panel-body {
@@ -417,21 +426,160 @@ textarea {
 
 .config-layout {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: 230px minmax(0, 1fr);
   gap: 12px;
   height: 100%;
 }
 
 .config-editor {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
 }
 
-.config-editor textarea {
+.config-editor textarea,
+.config-body textarea {
   min-height: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.config-body {
+  display: block;
+}
+
+.config-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.config-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 10px;
+}
+
+.metric strong {
+  display: block;
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.metric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.section-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.section-subtitle {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.form-grid.compact {
+  grid-template-columns: repeat(2, minmax(160px, 1fr));
+}
+
+.field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.field input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+}
+
+.config-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 10px;
+}
+
+.config-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.badge {
+  border: 1px solid #b8d8d2;
+  border-radius: 999px;
+  background: var(--teal-soft);
+  color: var(--teal);
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.model-list {
+  display: grid;
+  gap: 8px;
+}
+
+.model-row {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px;
+}
+
+.cap-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
+  gap: 8px;
 }
 
 .empty,

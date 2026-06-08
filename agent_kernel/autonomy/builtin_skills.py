@@ -94,6 +94,39 @@ BUILTIN_ATOMIC_SKILLS: tuple[SkillCard, ...] = (
     failure_modes=["连接器未配置", "子 Agent 无响应", "委派任务失败"],
   ),
   SkillCard(
+    skill_id="builtin.atomic.collaboration_workbench",
+    name="多 Agent 协作工作台",
+    description="创建和推进群聊、多 CLI 协同、技术评审、并行子 Agent delegation 等异步协作空间。",
+    when_to_use=(
+      "用户要求组织多个 Agent/CLI 一起工作、技术评审、群聊讨论、主持人协调、"
+      "持续任务、并行搜索、需要人和 Agent 混合参与时使用。"
+    ),
+    instructions=(
+      "先用 workbench_create 创建合适类型的工作台：group_chat、cli_collaboration、"
+      "technical_review 或 parallel_delegation。需要继续推进时用 workbench_message 代表主持人、"
+      "用户代理或 reviewer 发消息；需要查看进度用 workbench_status；讨论形成结论后用 "
+      "workbench_decision 生成决策 artifact；用户要求停止时用 workbench_cancel。"
+      "如果缺少 connector_id、成员角色、评审目标等必要信息，使用 user_input_request 挂起向用户确认。"
+    ),
+    status=SkillStatus.ACTIVE,
+    execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
+    recommended_tools=[
+      "workbench_create",
+      "workbench_status",
+      "workbench_message",
+      "workbench_decision",
+      "workbench_cancel",
+      "user_input_request",
+      "agent_delegation_status",
+    ],
+    constraints=[
+      "不要在 UI 或服务层用关键词硬路由，必须由模型基于上下文和 Skill 选择工具。",
+      "能异步推进的任务应保留 workbench_id，后续通过 status/message/decision 继续。",
+      "人类参与者可以直接进入工作台，也可以由日常 Agent 作为代理人转述和推进。",
+    ],
+    failure_modes=["连接器未配置", "成员或任务切片不完整", "子 Agent 长时间运行", "需要用户确认后才能继续"],
+  ),
+  SkillCard(
     skill_id="builtin.atomic.memory_checkpoint",
     name="记忆检查点与演化埋点",
     description="记录当前任务的关键上下文、经验或后续可沉淀为记忆/Skill 的候选内容。",

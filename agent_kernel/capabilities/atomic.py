@@ -22,6 +22,7 @@ from agent_kernel.capabilities.registry import CapabilityRegistry
 from agent_kernel.domain.base import new_id
 from agent_kernel.domain.capability import CapabilitySpec, SideEffectLevel, ToolResult
 from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
+from agent_kernel.domain.identifiers import ArtifactRef
 from agent_kernel.memory.facade import MemoryFacade
 
 
@@ -50,6 +51,13 @@ class AtomicCapabilityIds:
   AGENT_DELEGATE = "atom.agent.delegate"
   AGENT_DELEGATION_STATUS = "atom.agent.delegation_status"
   AGENT_CANCEL_DELEGATION = "atom.agent.cancel_delegation"
+  SKILL_OPEN = "atom.context.skill_open"
+  MEMORY_SEARCH = "atom.context.memory_search"
+  MEMORY_READ = "atom.context.memory_read"
+  ARTIFACT_READ = "atom.context.artifact_read"
+  EVENT_SEARCH = "atom.context.event_search"
+  CONTEXT_COMPACT = "atom.context.compact"
+  CONTEXT_EXPAND = "atom.context.expand"
 
 
 @dataclass(slots=True)
@@ -107,6 +115,11 @@ class AgentDelegationTool(Protocol):
     ...
 
 
+class SkillReader(Protocol):
+  def get(self, skill_id: str):
+    ...
+
+
 def _summarize_http_body(body: str) -> dict[str, Any]:
   title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
   page_title = _clean_html_text(title_match.group(1)) if title_match else None
@@ -154,6 +167,106 @@ def _unique_preserve_order(values) -> list[str]:
   return result
 
 
+def _positive_int(value: object, *, default: int, maximum: int) -> int:
+  try:
+    parsed = int(value) if value is not None else default
+  except (TypeError, ValueError):
+    parsed = default
+  return max(1, min(maximum, parsed))
+
+
+def _string_list(value: object) -> list[str]:
+  if value is None:
+    return []
+  if not isinstance(value, list):
+    return []
+  return [str(item) for item in value if isinstance(item, str) and item]
+
+
+def _memory_score(memory, query: str) -> float:
+  importance = memory.importance if memory.importance is not None else 0.0
+  if not query:
+    return importance
+  haystack = str(memory.content).lower()
+  terms = [term for term in re.split(r"\s+", query.lower()) if term]
+  if not terms:
+    return importance
+  matched = sum(1 for term in terms if term in haystack)
+  return matched / len(terms) + importance * 0.2
+
+
+def _memory_summary(memory, *, score: float) -> dict[str, Any]:
+  content = memory.content
+  summary = content.get("summary") or content.get("key_info") or content.get("outcome") or str(content)
+  return {
+    "memory_id": memory.memory_id,
+    "memory_type": memory.memory_type,
+    "scope": memory.scope,
+    "score": round(score, 4),
+    "importance": memory.importance,
+    "summary": _compact_text(str(summary), 600),
+    "artifact_refs": [ref.to_dict() for ref in memory.source_artifact_refs],
+  }
+
+
+def _memory_detail(memory) -> dict[str, Any]:
+  data = memory.to_dict()
+  data["content"] = _compact_value(data.get("content"), max_chars=2500)
+  return data
+
+
+def _event_summary(event: RuntimeEvent) -> dict[str, Any]:
+  return {
+    "event_id": event.event_id,
+    "run_id": event.run_id,
+    "event_type": event.event_type.value,
+    "timestamp": event.timestamp.isoformat(),
+    "agent_id": event.agent_id,
+    "task_id": event.task_id,
+    "payload": _compact_value(event.payload, max_chars=1200),
+    "artifact_refs": [ref.to_dict() for ref in event.artifact_refs],
+  }
+
+
+def _event_detail(event: RuntimeEvent) -> dict[str, Any]:
+  data = event.to_dict()
+  data["payload"] = _compact_value(data.get("payload"), max_chars=2500)
+  return data
+
+
+def _compact_value(value: object, *, max_chars: int) -> object:
+  text = str(value)
+  if len(text) <= max_chars:
+    return value
+  return {
+    "_truncated": True,
+    "preview": _compact_text(text, max_chars),
+    "original_chars": len(text),
+  }
+
+
+def _compact_text(value: str, max_chars: int) -> str:
+  return value if len(value) <= max_chars else value[:max_chars] + "...[truncated]"
+
+
+def _inline_artifact_content(metadata: dict[str, Any]) -> str | None:
+  for key in ("content", "body", "text", "payload"):
+    value = metadata.get(key)
+    if isinstance(value, str):
+      return value
+    if value is not None and key == "payload":
+      return str(value)
+  return None
+
+
+def _artifact_file_path(uri: str) -> str | None:
+  if uri.startswith("file://"):
+    return uri.removeprefix("file://")
+  if uri.startswith("/") or uri.startswith("./") or uri.startswith("../"):
+    return uri
+  return None
+
+
 class AtomicCapabilityProvider:
   """Registers default atomic capabilities and renders model-visible schemas."""
 
@@ -164,12 +277,16 @@ class AtomicCapabilityProvider:
     http_client: HTTPClient | None = None,
     memory: MemoryFacade | None = None,
     delegation: AgentDelegationTool | None = None,
+    uow_factory: Any | None = None,
+    skill_service: SkillReader | None = None,
     default_code_cwd: str | None = None,
   ) -> None:
     self._file_workspace = file_workspace
     self._http_client = http_client
     self._memory = memory
     self._delegation = delegation
+    self._uow_factory = uow_factory
+    self._skill_service = skill_service
     self._default_code_cwd = default_code_cwd
     self._aliases = {
       "workspace_read": AtomicCapabilityIds.WORKSPACE_READ,
@@ -196,7 +313,17 @@ class AtomicCapabilityProvider:
       "agent_delegate": AtomicCapabilityIds.AGENT_DELEGATE,
       "agent_delegation_status": AtomicCapabilityIds.AGENT_DELEGATION_STATUS,
       "agent_cancel_delegation": AtomicCapabilityIds.AGENT_CANCEL_DELEGATION,
+      "skill_open": AtomicCapabilityIds.SKILL_OPEN,
+      "memory_search": AtomicCapabilityIds.MEMORY_SEARCH,
+      "memory_read": AtomicCapabilityIds.MEMORY_READ,
+      "artifact_read": AtomicCapabilityIds.ARTIFACT_READ,
+      "event_search": AtomicCapabilityIds.EVENT_SEARCH,
+      "context_compact": AtomicCapabilityIds.CONTEXT_COMPACT,
+      "context_expand": AtomicCapabilityIds.CONTEXT_EXPAND,
     }
+
+  def can_handle(self, name: str) -> bool:
+    return name in self._aliases or name in self._aliases.values()
 
   def register(self, registry: CapabilityRegistry, local_tools: LocalToolExecutor) -> None:
     for spec in self.capability_specs():
@@ -212,6 +339,13 @@ class AtomicCapabilityProvider:
     local_tools.register(AtomicCapabilityIds.AGENT_DELEGATE, self.delegate_agent)
     local_tools.register(AtomicCapabilityIds.AGENT_DELEGATION_STATUS, self.get_delegation_status)
     local_tools.register(AtomicCapabilityIds.AGENT_CANCEL_DELEGATION, self.cancel_delegation)
+    local_tools.register(AtomicCapabilityIds.SKILL_OPEN, self.open_skill)
+    local_tools.register(AtomicCapabilityIds.MEMORY_SEARCH, self.search_memory)
+    local_tools.register(AtomicCapabilityIds.MEMORY_READ, self.read_memory)
+    local_tools.register(AtomicCapabilityIds.ARTIFACT_READ, self.read_artifact)
+    local_tools.register(AtomicCapabilityIds.EVENT_SEARCH, self.search_events)
+    local_tools.register(AtomicCapabilityIds.CONTEXT_COMPACT, self.compact_context)
+    local_tools.register(AtomicCapabilityIds.CONTEXT_EXPAND, self.expand_context)
 
   def capability_specs(self) -> list[CapabilitySpec]:
     return [
@@ -355,6 +489,32 @@ class AtomicCapabilityProvider:
         output_schema={"type": "object"},
         side_effect_level=SideEffectLevel.EXTERNAL_MUTATION,
       ),
+      *[
+        CapabilitySpec(
+          capability_id=capability_id,
+          name=name,
+          kind="tool",
+          input_schema={"type": "object"},
+          output_schema={"type": "object"},
+          side_effect_level=SideEffectLevel.READ,
+        )
+        for capability_id, name in [
+          (AtomicCapabilityIds.SKILL_OPEN, "Open skill details"),
+          (AtomicCapabilityIds.MEMORY_SEARCH, "Search memory"),
+          (AtomicCapabilityIds.MEMORY_READ, "Read memory"),
+          (AtomicCapabilityIds.ARTIFACT_READ, "Read artifact metadata"),
+          (AtomicCapabilityIds.EVENT_SEARCH, "Search runtime events"),
+          (AtomicCapabilityIds.CONTEXT_EXPAND, "Expand context refs"),
+        ]
+      ],
+      CapabilitySpec(
+        capability_id=AtomicCapabilityIds.CONTEXT_COMPACT,
+        name="Compact context into memory",
+        kind="tool",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        side_effect_level=SideEffectLevel.WRITE,
+      ),
     ]
 
   def tool_schemas(self) -> list[dict[str, Any]]:
@@ -440,6 +600,77 @@ class AtomicCapabilityProvider:
           "parent_run_id": {"type": "string"},
           "task_id": {"type": "string"},
           "reason": {"type": "string"},
+        },
+      ),
+      self._schema(
+        "skill_open",
+        "Open a selected skill's full spec when compact SkillCard/index context is not enough.",
+        ["skill_id"],
+        {
+          "skill_id": {"type": "string"},
+          "detail_level": {"type": "string", "enum": ["card", "spec"]},
+        },
+      ),
+      self._schema(
+        "memory_search",
+        "Search working, episodic, semantic, procedural, or artifact memory in the current scope.",
+        ["query"],
+        {
+          "query": {"type": "string"},
+          "memory_type": {"type": "string", "enum": ["working", "episodic", "semantic", "procedural", "artifact"]},
+          "limit": {"type": "integer"},
+        },
+      ),
+      self._schema(
+        "memory_read",
+        "Read one memory item by memory_id.",
+        ["memory_id"],
+        {"memory_id": {"type": "string"}},
+      ),
+      self._schema(
+        "artifact_read",
+        "Read artifact reference, metadata, and a bounded content view when an adapter can resolve it.",
+        ["artifact_id"],
+        {
+          "artifact_id": {"type": "string"},
+          "include_content": {"type": "boolean"},
+          "start": {"type": "integer"},
+          "count": {"type": "integer"},
+          "keyword": {"type": "string"},
+        },
+      ),
+      self._schema(
+        "event_search",
+        "Search runtime events by run_id, event_type, or query text.",
+        [],
+        {
+          "run_id": {"type": "string"},
+          "event_type": {"type": "string"},
+          "query": {"type": "string"},
+          "limit": {"type": "integer"},
+        },
+      ),
+      self._schema(
+        "context_compact",
+        "Store a compact summary of older context or tool results as episodic memory.",
+        ["summary"],
+        {
+          "summary": {"type": "string"},
+          "outcome": {"type": "string"},
+          "observations": {"type": "array", "items": {"type": "string"}},
+          "event_ids": {"type": "array", "items": {"type": "string"}},
+          "artifact_ids": {"type": "array", "items": {"type": "string"}},
+        },
+      ),
+      self._schema(
+        "context_expand",
+        "Expand memory, artifact, event, or skill refs omitted from the compact prompt.",
+        [],
+        {
+          "memory_ids": {"type": "array", "items": {"type": "string"}},
+          "artifact_ids": {"type": "array", "items": {"type": "string"}},
+          "event_ids": {"type": "array", "items": {"type": "string"}},
+          "skill_ids": {"type": "array", "items": {"type": "string"}},
         },
       ),
     ]
@@ -763,6 +994,247 @@ class AtomicCapabilityProvider:
     except ValueError as exc:
       return ToolResult.failure("delegation_error", str(exc))
     return ToolResult.success({"delegation": report.to_dict()})
+
+  def open_skill(self, input: dict[str, Any]) -> ToolResult:
+    if self._skill_service is None:
+      return ToolResult.failure("adapter_not_configured", "Skill service is not configured.")
+    skill_id = self._required_string(input, "skill_id")
+    if isinstance(skill_id, ToolResult):
+      return skill_id
+    skill = self._skill_service.get(skill_id)
+    if skill is None:
+      return ToolResult.failure("not_found", f"Skill not found: {skill_id}")
+    data = skill.to_dict()
+    if str(input.get("detail_level") or "spec") == "card":
+      data = {
+        key: data.get(key)
+        for key in [
+          "skill_id",
+          "name",
+          "description",
+          "when_to_use",
+          "status",
+          "execution_mode",
+          "recommended_tools",
+          "recommended_workflows",
+          "use_policy",
+        ]
+      }
+    return ToolResult.success({"skill": data})
+
+  def search_memory(self, input: dict[str, Any]) -> ToolResult:
+    if self._memory is None:
+      return ToolResult.failure("adapter_not_configured", "Memory facade is not configured.")
+    scope = str(input.get("scope") or "default")
+    query = str(input.get("query") or "").strip()
+    memory_type = self._optional_string(input.get("memory_type"))
+    limit = _positive_int(input.get("limit"), default=5, maximum=20)
+    memories = self._memory.retrieve(scope, memory_type=memory_type, limit=100)
+    ranked = sorted(
+      (
+        (_memory_score(memory, query), memory)
+        for memory in memories
+      ),
+      key=lambda item: item[0],
+      reverse=True,
+    )
+    if query:
+      ranked = [item for item in ranked if item[0] > 0]
+    return ToolResult.success(
+      {
+        "scope": scope,
+        "query": query,
+        "memory_type": memory_type,
+        "results": [
+          _memory_summary(memory, score=score)
+          for score, memory in ranked[:limit]
+        ],
+      }
+    )
+
+  def read_memory(self, input: dict[str, Any]) -> ToolResult:
+    if self._uow_factory is None:
+      return ToolResult.failure("adapter_not_configured", "Unit of work factory is not configured.")
+    memory_id = self._required_string(input, "memory_id")
+    if isinstance(memory_id, ToolResult):
+      return memory_id
+    with self._uow_factory() as uow:
+      memory = uow.memory.get(memory_id)
+      if memory is not None:
+        uow.memory.mark_used(memory_id)
+    if memory is None:
+      return ToolResult.failure("not_found", f"Memory not found: {memory_id}")
+    return ToolResult.success({"memory": _memory_detail(memory)})
+
+  def read_artifact(self, input: dict[str, Any]) -> ToolResult:
+    if self._uow_factory is None:
+      return ToolResult.failure("adapter_not_configured", "Unit of work factory is not configured.")
+    artifact_id = self._required_string(input, "artifact_id")
+    if isinstance(artifact_id, ToolResult):
+      return artifact_id
+    with self._uow_factory() as uow:
+      artifact = uow.artifacts.get(artifact_id)
+      metadata = uow.artifacts.get_metadata(artifact_id)
+    if artifact is None:
+      return ToolResult.failure("not_found", f"Artifact not found: {artifact_id}")
+    content_result = self._read_artifact_content(
+      artifact,
+      metadata or {},
+      include_content=input.get("include_content", True),
+      start=input.get("start"),
+      count=input.get("count"),
+      keyword=input.get("keyword"),
+    )
+    return ToolResult.success(
+      {
+        "artifact": artifact.to_dict(),
+        "metadata": metadata or {},
+        **content_result,
+      },
+      artifact_refs=[artifact],
+    )
+
+  def search_events(self, input: dict[str, Any]) -> ToolResult:
+    if self._uow_factory is None:
+      return ToolResult.failure("adapter_not_configured", "Unit of work factory is not configured.")
+    run_id = self._optional_string(input.get("run_id"))
+    event_type = self._optional_string(input.get("event_type"))
+    query = str(input.get("query") or "").strip().lower()
+    limit = _positive_int(input.get("limit"), default=10, maximum=50)
+    with self._uow_factory() as uow:
+      events = uow.events.list_by_run(run_id) if run_id else uow.events.list_all()
+    if event_type:
+      events = [event for event in events if event.event_type.value == event_type]
+    if query:
+      events = [
+        event
+        for event in events
+        if query in str(event.payload).lower()
+        or query in event.event_type.value.lower()
+        or query in event.event_id.lower()
+      ]
+    return ToolResult.success(
+      {
+        "run_id": run_id,
+        "event_type": event_type,
+        "query": query,
+        "events": [_event_summary(event) for event in events[-limit:]],
+      }
+    )
+
+  def compact_context(self, input: dict[str, Any]) -> ToolResult:
+    if self._memory is None:
+      return ToolResult.failure("adapter_not_configured", "Memory facade is not configured.")
+    scope = str(input.get("scope") or input.get("run_id") or "default")
+    summary = self._required_string(input, "summary")
+    if isinstance(summary, ToolResult):
+      return summary
+    observations = input.get("observations") or [summary]
+    if not isinstance(observations, list):
+      return ToolResult.failure("invalid_input", "observations must be a list when provided.")
+    event_ids = input.get("event_ids") or []
+    if not isinstance(event_ids, list):
+      return ToolResult.failure("invalid_input", "event_ids must be a list when provided.")
+    artifact_refs = self._artifact_refs_from_ids(input.get("artifact_ids"))
+    item = self._memory.write_episode(
+      scope=scope,
+      task_id=self._optional_string(input.get("task_id")),
+      event_ids=[str(event_id) for event_id in event_ids],
+      observations=[str(observation) for observation in observations],
+      outcome=str(input.get("outcome") or summary),
+      artifact_refs=artifact_refs,
+      importance=0.75,
+      created_by="context_compact",
+    )
+    return ToolResult.success(
+      {
+        "memory_id": item.memory_id,
+        "scope": scope,
+        "memory_type": item.memory_type,
+        "summary": item.content.get("summary"),
+      },
+      artifact_refs=artifact_refs,
+    )
+
+  def expand_context(self, input: dict[str, Any]) -> ToolResult:
+    expanded: dict[str, Any] = {}
+    memory_ids = _string_list(input.get("memory_ids"))
+    artifact_ids = _string_list(input.get("artifact_ids"))
+    event_ids = _string_list(input.get("event_ids"))
+    skill_ids = _string_list(input.get("skill_ids"))
+    if memory_ids:
+      expanded["memories"] = [
+        result.output["memory"]
+        for memory_id in memory_ids
+        if (result := self.read_memory({"memory_id": memory_id})).ok
+      ]
+    if artifact_ids:
+      expanded["artifacts"] = [
+        result.output
+        for artifact_id in artifact_ids
+        if (result := self.read_artifact({"artifact_id": artifact_id})).ok
+      ]
+    if event_ids:
+      if self._uow_factory is None:
+        return ToolResult.failure("adapter_not_configured", "Unit of work factory is not configured.")
+      with self._uow_factory() as uow:
+        events = [event for event_id in event_ids if (event := uow.events.get(event_id)) is not None]
+      expanded["events"] = [_event_detail(event) for event in events]
+    if skill_ids:
+      expanded["skills"] = [
+        result.output["skill"]
+        for skill_id in skill_ids
+        if (result := self.open_skill({"skill_id": skill_id, "detail_level": "spec"})).ok
+      ]
+    return ToolResult.success({"expanded": expanded})
+
+  def _artifact_refs_from_ids(self, raw_ids: object) -> list[ArtifactRef]:
+    artifact_ids = _string_list(raw_ids)
+    if self._uow_factory is None or not artifact_ids:
+      return []
+    with self._uow_factory() as uow:
+      return [ref for artifact_id in artifact_ids if (ref := uow.artifacts.get(artifact_id)) is not None]
+
+  def _read_artifact_content(
+    self,
+    artifact: ArtifactRef,
+    metadata: dict[str, Any],
+    *,
+    include_content: object,
+    start: object = None,
+    count: object = None,
+    keyword: object = None,
+  ) -> dict[str, Any]:
+    if include_content is False:
+      return {"content_available": False, "content_status": "not_requested"}
+    inline = _inline_artifact_content(metadata)
+    if inline is not None:
+      return {
+        "content_available": True,
+        "content_source": "metadata",
+        "content": self._select_text_view(inline, start=start, count=count, keyword=keyword),
+      }
+    if self._file_workspace is not None:
+      path = _artifact_file_path(artifact.uri)
+      if path:
+        try:
+          content = self._file_workspace.read_text(path)
+        except (OSError, PermissionError) as exc:
+          return {
+            "content_available": False,
+            "content_status": "read_failed",
+            "content_error": str(exc),
+          }
+        return {
+          "content_available": True,
+          "content_source": "file_workspace",
+          "content": self._select_text_view(content, start=start, count=count, keyword=keyword),
+        }
+    return {
+      "content_available": False,
+      "content_status": "adapter_not_available",
+      "note": "No artifact content adapter matched this URI/media type.",
+    }
 
   @classmethod
   def _control_input(cls, target_kind: str, capability_id: str, input: dict[str, Any]) -> dict[str, Any]:

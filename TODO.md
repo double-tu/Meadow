@@ -1,6 +1,6 @@
 # Agent Kernel Development TODO
 
-更新时间: 2026-06-07 03:10:00 CST
+更新时间: 2026-06-08 13:14:16 CST
 
 ## 当前目标
 
@@ -9,6 +9,23 @@
 当前仓库状态: 已完成 Phase 0-9 的 MVP 主线；已具备 Durable Runtime、Agent Orchestration、Capability/Policy、Memory/Context、Replay/Observability、Extension SDK、Autonomy、Interaction Fabric、CLI/HTTP Host、MCP 配置管理、Scheduled Task API 和 Control Plane 装配/健康检查基础闭环。
 
 重要边界: 当前实现是可运行 MVP 基座，不等价于 `python-code-architecture-design.md` 的完整目标。后续开发必须优先补齐实时干预、长期进程恢复、多 CLI AgentConnector、HTTP/event stream、MCP/Workbench、工作区隔离和自主探索深化等缺口，避免把“接口/草案/基础服务”误判为完整能力。
+
+## 当前阶段目标 - 七层上下文与记忆机制
+
+目标: 以 `docs/context-memory-architecture.md` 为阶段性蓝图，把 Meadow 的上下文从“消息 + memory”推进到七层可预算、可解释、可扩展的上下文操作系统。日常对话、工作台、多 Agent、CLI、浏览器、Workflow 后续统一通过该机制获得上下文，而不是在各服务里硬拼 prompt。
+
+- [x] 编写七层上下文与记忆架构/代码设计文档: `docs/context-memory-architecture.md`。
+- [x] 实现 `ContextAssembler` 与 `ContextBudgetManager`: 支持 System/Policy、Agent Profile、Skill/Tool Index、Working Memory、Conversation Window、Episodic/Event/Artifact、Long-term Semantic/Procedural 七层组装。
+- [x] 实现渐进式 Skill 披露 MVP: 默认只注入 SkillCard/Tool Index，不再把完整 Skill instructions 直接放入日常 Agent 默认上下文。
+- [x] 实现 SkillSpec 按需打开 MVP: 模型可通过 `skill_open` 读取完整 Skill instructions、约束、失败模式、推荐工具/工作流；SkillResource/脚本/参考文件细粒度加载仍待补。
+- [x] 实现模型可见上下文读取工具 MVP: `skill_open`、`memory_search`、`memory_read`、`artifact_read`、`event_search`、`context_compact`、`context_expand` 已注册到 Atomic capability/tool schema 并经 CapabilityRuntime 执行。
+- [ ] 实现 SkillResource 按需打开: 支持脚本、参考文件、模板、compiled workflow 细节分层读取。
+- [x] 实现 artifact 内容读取 adapter MVP: `artifact_read` 可读取 metadata 内联 content/body/text/payload，或经授权 `FileWorkspace` 读取 `file://`/本地路径，并支持 start/count/keyword 窗口化输出；对象存储、截图/blob、多媒体 adapter 仍待补。
+- [x] 将 `ContinuousAgentRunner` 与日常对话接入 `ContextAssembler`，保留旧 `ContextManager` 兼容路径。
+- [x] 实现会话历史压缩与摘要 memory MVP: `ConversationHistoryCompactor` 将旧 user/assistant 消息写入 episodic memory，DesktopChatService 在模型调用前自动触发并记录 compacted message ids。
+- [x] 实现后台 MemoryCurator MVP: `MemoryCurator.curate_run` 从工具/Agent/Workbench/候选事件写 run episodic summary，并复用 `MemoryEvolutionSettlementService` 结算 semantic/procedural memory。
+- [ ] 实现 MemoryCurator 调度 worker/API: 当前为可调用服务，尚未接入后台定时/队列/HTTP 控制入口。
+- [ ] 完成验收: 同一任务中模型能看到能力索引、主动打开 skill/记忆/artifact、上下文 ledger 可解释包含与省略原因，大 payload 不进入 event payload。
 
 ## 桌面端可视化路线
 
@@ -22,6 +39,9 @@
 - [ ] 将日常对话控制对齐真实 runtime: pause/retry/clear/resume/cancel 映射到 run/task/tool-call/session 控制, 而不是只改 UI 或 chat session 状态。
 - [x] 完成桌面端基础 API: workspace 聚合、全局审批队列、tool-call 列表、live event stream 游标、scheduled task 更新/删除/触发历史、control command 执行。
 - [x] 完成桌面端壳骨架: 本地启动/连接 Python HTTP host，提供 Workspace、Approvals、Events、MCP、Scheduled Tasks、Control 基础页面。
+- [x] 完成配置中心大模型结构化管理 MVP: Provider/Model/Agent Binding 表单化配置、模型能力标签、Agent 级模型选择、Gemini/Anthropic/OpenAI-compatible provider runtime 接入、密钥脱敏回写保护。
+- [x] 启动可视化前端框架化迁移: 新增 `docs/visual-frontend-architecture.md`、`TODO.visual-frontend.md`，搭建 `desktop/ui` React/Vite/TypeScript 工程，Tauri 指向 Vite dev/dist，完成首版 AppShell 与功能模块入口。
+- [x] 完成多 Agent 工作台 API/模型工具 MVP: 新增 `docs/collaboration-workbench-architecture.md`，实现群聊、多 CLI 协同、技术评审、并行子 Agent delegation 工作台入口，并通过 Skill/工具目录暴露给日常 Agent 自主调用。
 - [ ] 完成多 Agent/Team 可视化: leader/worker、delegation status card、taskboard、channel timeline、workspace isolation/patch review 入口。
 - [ ] 完成权限与安全中心: 命令、文件 diff、网络、控制动作、MCP 工具调用的结构化审批预览和 approve/reject/cancel/kill 操作。
 - [ ] 完成控制 Workbench 可视化: browser/desktop/mobile target 列表、截图/DOM/UI tree、动作执行、artifact handoff。
@@ -124,6 +144,7 @@
 
 目标: 建立 Memory 与 Context 分离，并能解释每次上下文构建依据。
 
+- [ ] 按 `docs/context-memory-architecture.md` 深化为七层上下文组装: System/Policy、Agent Profile、Skill/Tool Index、Working Memory、Conversation Window、Episodic/Event/Artifact、Long-term Semantic/Procedural。
 - [x] 实现 working memory。
 - [x] 实现 episodic memory。
 - [x] 实现 artifact memory。
@@ -213,6 +234,15 @@
 - [x] 实现 channel summary 和 decision artifact 基础服务。
 - [x] 实现 cross-channel summary 和 decision artifact 聚合基础服务。
 - [x] 实现自由发言和主持人选人 speaker selector。
+- [x] 实现 CollaborationWorkbenchService，统一创建 group_chat、cli_collaboration、technical_review、parallel_delegation 工作台，落到 members/channel/task slices/taskboard/delegation/events。
+- [x] HTTP Host 新增 `/collaboration/workbenches/*` API，并将 workbench 纳入桌面 workspace 聚合。
+- [x] `OrchestrationCapabilityProvider` 新增 `workbench_create/status/message/decision/cancel` 模型可见工具，Daily Agent 可在多轮工具循环中创建工作台、查询状态、代表主持人/用户代理发送消息并推进异步协作。
+- [x] 内置 `builtin.atomic.collaboration_workbench` Skill，描述群聊、多 CLI、技术评审、并行 delegation 的使用时机、工具和挂起规则。
+- [x] DesktopChatService 持久化 `waiting_for_user` / `awaiting_approval` 状态，模型调用 `user_input_request` 后不会把对话错误标记为 idle，而是保留 active_run_id 和 pending 信息供用户继续。
+- [ ] 实现工作台 task slice 级 retry/delete/assign/skip/bypass 和结果汇总策略。
+- [ ] 实现工作台后台 auto-advance worker: 定期查询 delegation/terminal/channel 状态，并在策略允许时自动推进下一轮消息或请求人工输入。
+- [ ] 实现真实终端流查看与多 CLI 会话输出 artifact 化。
+- [ ] 实现大规模搜索调度策略: URL 分片、预算、限速、去重、失败重试、结果 artifact。
 - [x] 实现 workspace isolation、merge/review workflow 草案。
 - [x] 实现真实 Git worktree allocation、release、approved patch merge 和 merge conflict rollback。
 - [x] 编写测试: 回合制群聊、observer request_pause。
@@ -815,6 +845,25 @@
 - `CapabilityRuntime` 将 inspect payload 透传到 `ControlWorkbench.inspect_browser`，`AtomicCapabilityProvider` 的 `browser_scan` schema 同步暴露 `tabs_only`。
 - 已通过真实 `/control/commands` inspect 小红书页面摘要验收，并通过 `python3 -m unittest discover -s tests` 与 `python3 scripts/verify_realized_todo.py --no-real-llm`。
 - 剩余差距: 尚未完全复刻 GenericAgent `simphtml` 的可见 DOM 简化粒度，桌面端浏览器结果可视化、截图/交互 artifact handoff 和更细的页面元素选择仍待补。
+
+### 2026-06-08 13:14:16 CST
+
+- 新增 `docs/collaboration-workbench-architecture.md`，梳理群聊、多 CLI 协同、技术评审、并行子 Agent delegation 的工作台边界；明确参考 CodeG/AionUI 的状态/布局思想，但不复制其运行时结构。
+- 新增 `agent_kernel.domain.workbench`，定义 `CollaborationWorkbench`、`WorkbenchMember`、`WorkbenchTaskSlice` 及状态枚举。
+- 新增 `CollaborationWorkbenchService`，复用 InteractionFabric、GroupChatService、TaskBoardService 和 AgentDelegationBroker，支持 `auto_start=true` 时真实启动子 Agent delegation。
+- HTTP Host 新增 `/collaboration/workbenches` 系列 API，HTTP 启动路径可从 `agent_connectors` 配置装配 delegation broker；DesktopWorkspaceSnapshot 增加 `collaboration_workbench_ids`。
+- `OrchestrationCapabilityProvider` 新增 `workbench_create/status/message/decision/cancel`，并纳入默认桌面 grant；日常 Agent 工具循环可由模型自主创建工作台，再基于真实 `workbench_id` 继续发送主持人消息。
+- 新增内置 `builtin.atomic.collaboration_workbench` Skill，让模型基于 Skill 描述选择工作台，而不是 ChatService/UI 关键词硬路由。
+- DesktopChatService 现在会把 Daily Agent 的 `waiting_for_user` / `awaiting_approval` 结果保存到 session status/metadata，并把 pending question/approval 转为 assistant message，可支持工作台缺 connector、缺目标或需人工授权时挂起等待。
+- 新增测试覆盖群聊消息与 decision artifact、并行子 Agent 自动启动、技术评审默认切片、HTTP 工作台创建/读取、缺 broker 错误、内置工作台 Skill、日常 Agent 模型选择 `workbench_create` + `workbench_message`、`user_input_request` 挂起状态。
+- 验证命令: `python3 -m unittest tests.unit.test_collaboration_workbench tests.unit.test_http_host`、`python3 -m unittest discover -s tests`、`python3 scripts/verify_realized_todo.py --no-real-llm`，全部通过。
+
+- 对照 Codeg `model-provider-settings` 与 AionUI Provider/Conversation 模型选择流程，确认合理抽象是 Provider、Model、Capability、Agent Binding 分离，而不是在 UI 暴露单块 JSON。
+- `ConfigCenterService` 默认 `llm` 配置升级为多 Provider、多 Model、Agent Binding schema，保留高级 JSON 兜底；嵌套 `api_key` 等敏感字段读取时脱敏，保存脱敏值时保留原密钥。
+- 新增 `GeminiProvider` 与 `AnthropicMessagesProvider`，将原生 Gemini `functionCall`、Anthropic `tool_use` 归一化为 Meadow runner 现有 `tool_calls`，与 OpenAI-compatible provider 共用 `ModelGateway` 协议。
+- `DesktopChatService` 支持从配置中心读取 `desktop_daily_agent` 的 provider/model 绑定，仍兼容旧式 `llm.provider/model/base_url/api_key_env` 配置。
+- 桌面配置中心改为 Codeg/AionUI 风格的工作台表单: 大模型 Provider 卡片、模型能力矩阵、Agent 模型绑定、UI/MCP/Control 简单表单与高级 JSON 兜底。
+- 验证命令: `node --check desktop/static/app.js`、`python3 -m unittest tests.unit.test_models_and_tools tests.unit.test_http_host`、`python3 scripts/verify_realized_todo.py --no-real-llm`、`python3 -m unittest discover -s tests`，全部通过。
 
 ### 2026-06-07 02:18:00 CST
 

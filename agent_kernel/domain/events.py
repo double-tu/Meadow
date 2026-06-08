@@ -51,6 +51,9 @@ class RuntimeEventType(StrEnum):
   AGENT_DELEGATION_COMPLETED = "agent.delegation.completed"
   AGENT_DELEGATION_FAILED = "agent.delegation.failed"
   AGENT_DELEGATION_CANCELLED = "agent.delegation.cancelled"
+  WORKBENCH_CREATED = "workbench.created"
+  WORKBENCH_UPDATED = "workbench.updated"
+  WORKBENCH_CANCELLED = "workbench.cancelled"
 
 
 @dataclass(slots=True)

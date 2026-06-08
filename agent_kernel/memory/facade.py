@@ -209,6 +209,11 @@ class MemoryFacade:
     with self._uow_factory() as uow:
       return uow.memory.list_by_scope(scope, memory_type=memory_type, limit=limit)
 
+  def save(self, item: MemoryItem) -> MemoryItem:
+    with self._uow_factory() as uow:
+      uow.memory.save(item)
+    return item
+
   def retrieve_episodic(self, scope: str, query: str, limit: int = 5) -> list[MemoryItem]:
     memories = self.retrieve(scope, memory_type="episodic", limit=100)
     return self._episode_retriever.retrieve(query, memories, limit=limit)

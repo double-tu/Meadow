@@ -11,13 +11,14 @@ Implemented MVP areas:
 - Agent orchestration with sessions, mailbox, child agent spawn/await/cancel, skill-aware turns, and agent-as-workflow-node.
 - Capability runtime with policy checks, grant filesystem/network scope checks, approval flow, audit records, standard `ToolResult` envelopes, local/process tools, governed file/HTTP side-effect adapters, process stdout/stderr and structured JSONL streaming, timeout, injectable process isolation strategy, POSIX process group control, and tool-call cancel/kill control.
 - Control workbench API for browser, desktop, and mobile control atoms with deterministic fake backend, GenericAgent-compatible browser-link HTTP backend, extension-backed tab creation/opening, browser tab/page-summary scan (`tabs_only`, title/url/feed/card/text extraction), Win32 desktop backend, UIA-style/UIAutomation desktop tree detectors, driver/HTTP vision detector adapters, and ADB mobile backend routed through capability policy/audit.
-- Memory/context with working/artifact memory, context budget, sensitivity filtering, tool visibility pruning, large-memory artifact refs, and context ledger.
+- Memory/context with seven-layer assembly, working/artifact memory, bounded artifact content reads, chat-history compaction, deterministic run-event curation, context budget, sensitivity filtering, tool visibility pruning, progressive Skill disclosure, model-visible context reader tools, large-memory artifact refs, and context ledger.
 - Episodic memory with deterministic summarizer/retriever interfaces, conservative semantic consolidation, memory evolution candidate settlement, sparse/vector-store semantic retrieval interfaces, and structured fact conflict detection.
 - Observability/replay with timeline, artifact inspect, cost ledger, audit sinks, exact/partial/recovery replay, and eval assertions.
 - Extension manifest loader, contribution registry, permission-to-grant mapping, and dynamic importlib entrypoint runtime for registering tool providers.
 - Autonomous exploration MVP with composable multi-strategy planning, dynamic tool/workflow composition, attempts, verification, failure reflection, trace distillation, draft workflow templates, and skill evolution records.
 - Multi-agent interaction fabric MVP with channels, messages, round-robin/free-for-all/moderated group chat, agent pools, taskboard basics, observer findings with runtime pause/context correction/current-step interrupt, connector routing, and channel/cross-channel decision artifacts.
 - Asynchronous agent delegation broker with parent-scoped delegate/status/cancel, depth limits, parent-run cancel cascade, orphaned-running recovery, large-result artifact handoff, long-poll status waits, connector cancellation, terminal reports, runtime events, HTTP endpoints, model-visible atomic tools, and a stdio MCP companion surface.
+- Collaboration workbench API and model-visible tools for group chat, multi-CLI collaboration, technical review, and parallel child-agent delegation, backed by interaction channels, task slices, taskboard items, delegation broker calls, runtime events, desktop workspace aggregation, and Daily Agent tool-loop access.
 - Workspace isolation interfaces with fake backend, Git worktree backend, and priority merge queue for isolated patch review/merge workflows.
 - Handoff service with lineage, state summary, constraints, artifact refs, and channel message routing.
 - Human intervention with event append, working-memory steering, CLI/HTTP `intervene`, pause-and-resume, and current-step interruption metadata.
@@ -26,11 +27,11 @@ Implemented MVP areas:
 - MCP configuration management service with import/export, enable/agent-type filtering, stdio command assembly, HTTP/CLI management routes, and config-file import support.
 - Scheduled task service with persisted one-shot/interval/simple-cron task definitions, due-task triggering, trigger history, and HTTP/CLI management routes.
 - Control plane assembly and health/target inspection routes for configured browser-link, ADB mobile, Win32 desktop, or fake control backends.
-- Desktop workspace API with workspace aggregation, global pending approvals, tool-call lists, event cursor streams, scheduled task mutation/history, control command execution, CORS support, and a thin static/Tauri shell scaffold.
-- Desktop chat, skill management, and hot-updatable config center APIs with a Chinese conversation-first desktop shell.
+- Desktop workspace API with workspace aggregation, global pending approvals, tool-call lists, event cursor streams, scheduled task mutation/history, control command execution, CORS support, and a thin React/Vite/Tauri shell scaffold.
+- Desktop chat, skill management, and hot-updatable config center APIs with a Chinese conversation-first desktop shell, structured multi-provider/model/agent binding configuration, model capability tags, and a Codeg/AionUI-inspired settings workbench.
 - Host DTOs plus HTTP host for task create, run inspect, run event NDJSON/SSE stream, artifact inspect, run cancel, human intervention, approval resolution, tool-call cancel/kill, and agent delegation requests.
 - CLI host for sample run, inspect, replay, approve, reject, cancel, cancel/kill tool call, intervene, llm-smoke, and configured external-agent delegation.
-- OpenAI-compatible LLM smoke command configured by environment variables or TOML/JSON config.
+- OpenAI-compatible LLM smoke command configured by environment variables or TOML/JSON config; desktop chat runtime can also resolve structured config-center providers for OpenAI-compatible, Gemini, and Anthropic model APIs.
 
 ## Quick Start
 
@@ -108,6 +109,24 @@ python3 -m agent_kernel.hosts.cli --config agent-kernel.toml mcp-delegation-serv
 
 The MCP server provides `delegate_to_agent`, `get_delegation_status`, and `cancel_delegation` over stdio JSON-RPC.
 
+Create a multi-agent collaboration workbench through the HTTP host:
+
+```bash
+curl -X POST http://127.0.0.1:8080/collaboration/workbenches/parallel-delegation \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "parallel search",
+    "objective": "split a research task across multiple child agents",
+    "auto_start": false,
+    "members": [
+      {"role":"docs-search","kind":"remote_agent","connector_id":"codex_cli","agent_type":"codex"},
+      {"role":"web-search","kind":"remote_agent","connector_id":"claude_cli","agent_type":"claude"}
+    ]
+  }'
+```
+
+Use `auto_start=true` only when the HTTP host was started with a config file containing `agent_connectors`.
+
 Recover orphaned running delegation records after a host restart:
 
 ```bash
@@ -151,10 +170,11 @@ Start the HTTP API host used by the desktop shell:
 python3 -m agent_kernel.hosts.cli --db /tmp/meadow-desktop.sqlite http --host 127.0.0.1 --port 8080
 ```
 
-Open the API-first desktop shell:
+Install and open the API-first desktop shell:
 
 ```bash
-python3 -m http.server 4173 --directory desktop/static
+npm --prefix desktop install
+npm --prefix desktop run dev:web
 ```
 
 Then visit `http://127.0.0.1:4173` and connect it to `http://127.0.0.1:8080`.
@@ -176,12 +196,14 @@ agent-kernel --db /tmp/agent_kernel.sqlite sample-run --run-id run_demo --text h
 - Current CLI is a minimal host, not the final Web/Desktop workspace.
 - Browser control can use a GenericAgent-compatible `/link`-style HTTP backend. The neutral `BrowserLinkHTTPBackend` supports session listing, JavaScript execution, existing-tab navigation, no-target navigation through extension `tabs.create`, tab-only scans, and visible page summary extraction; desktop control can use the optional Win32 desktop backend plus UIA-style/UIAutomation/vision detectors, and mobile control can use the ADB backend plus optional vision detector.
 - The desktop shell under `desktop/` is intentionally thin: it consumes workspace, approval, event, MCP, schedule, and control APIs and does not embed runtime or agent logic.
+- Config center stores LLM settings as provider records, model records, capability flags, and agent bindings. Sensitive values are masked on read and preserved when the UI writes masked payloads back, so API keys do not get overwritten by `***`.
 
 ## Known MVP Gaps
 
 - HTTP host has task creation backed by a default runtime workflow, JSON control endpoints for run cancel, human intervention, approval resolution, and tool-call cancel/kill plus NDJSON/SSE event streams; WebSocket streaming and the full Web/Desktop workspace are not implemented.
 - Tool-call cancel/kill and process stream control only operate inside the current runtime process; after restart, host commands persist control requests but cannot signal or reattach to the original process group.
-- Product CLI shim profiles for Codex/Claude/Gemini exist and run through a generic JSONL subprocess adapter; delegation can route through configured connectors, while deeper product-native protocol adapters remain future work.
+- Product CLI shim profiles for Codex/Claude/Gemini exist and run through a generic JSONL subprocess adapter; delegation can route through configured connectors, while deeper product-native protocol adapters and richer Cloud/Claude Code model-provider handoff remain future work.
+- Collaboration workbench can create group chat, CLI collaboration, technical review, and parallel delegation objects through API and through model-selected Daily Agent tools. Rich desktop visualization, retry/delete/assign flows per task slice, long-running background auto-advance workers, real terminal stream viewing, large-scale search scheduling policy, and review merge policy remain future work.
 - Handoff has a persistent service and channel routing; product CLI sessions can be connected through the generic JSONL shim profile path.
 - Generic Workbench has a JSON HTTP client adapter. MCP has stdio JSON-RPC client/tool executor plus persisted config management. Control has config-driven browser-link HTTP, GenericAgent-style tab creation and page summary scan, Win32 desktop/UIA-style/UIAutomation/driver vision/HTTP vision, ADB mobile backends, and health/target inspection. Full `simphtml`-level visible DOM simplification, richer screenshot/interaction artifacts, product-specific Workbench adapters, and production-grade CV model packaging remain future work.
 - Extension runtime can dynamically import entrypoints and register tool providers; sandboxed/plugin-process execution and richer contribution types remain future work.

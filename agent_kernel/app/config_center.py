@@ -50,7 +50,9 @@ class ConfigCenterService:
     with self._uow_factory() as uow:
       record = uow.interactions.get_record("config_section", section)
       current = ConfigSectionRecord.from_dict(record) if record is not None else None
-    next_data = {**(current.data if current and merge else {}), **data}
+    base_data = current.data if current else {}
+    incoming = _preserve_masked_sensitive(data, base_data)
+    next_data = _deep_merge(base_data, incoming) if current and merge else incoming
     updated = ConfigSectionRecord(section=section, data=next_data, updated_at=utc_now())
     with self._uow_factory() as uow:
       uow.interactions.save_record("config_section", section, updated)
@@ -73,15 +75,63 @@ def _default_sections() -> dict[str, dict[str, Any]]:
       "default_view": "chat",
     },
     "llm": {
-      "provider": "openai-compatible",
-      "model": "",
-      "base_url": "https://api.openai.com/v1",
-      "api_key_env": "OPENAI_API_KEY",
-      "timeout_seconds": 60,
+      "active_provider_id": "openai_default",
+      "active_model_id": "gpt-4.1-mini",
+      "providers": [
+        {
+          "provider_id": "openai_default",
+          "name": "OpenAI",
+          "kind": "openai-compatible",
+          "enabled": True,
+          "base_url": "https://api.openai.com/v1",
+          "api_key_env": "OPENAI_API_KEY",
+          "api_key": "",
+          "timeout_seconds": 60,
+          "models": [
+            {
+              "model_id": "gpt-4.1-mini",
+              "label": "GPT-4.1 mini",
+              "enabled": True,
+              "context_window": 128000,
+              "capabilities": {
+                "text": True,
+                "function_calling": True,
+                "vision": True,
+                "reasoning": False,
+                "image_input": True,
+                "image_output": False,
+                "audio_input": False,
+                "audio_output": False,
+              },
+            }
+          ],
+        }
+      ],
+      "agent_bindings": [
+        {
+          "agent_id": "desktop_daily_agent",
+          "label": "日常 Agent",
+          "provider_id": "openai_default",
+          "model_id": "gpt-4.1-mini",
+          "reasoning_model_id": "",
+          "image_model_id": "",
+          "show_reasoning": True,
+        }
+      ],
+      "display": {
+        "show_reasoning": True,
+        "show_model_badges": True,
+      },
     },
     "agents": {
+      "default_agent_id": "desktop_daily_agent",
       "default_connector_id": "",
       "auto_delegate": False,
+      "model_policy": {
+        "allow_agent_override": True,
+        "fallback_provider_id": "openai_default",
+        "fallback_model_id": "gpt-4.1-mini",
+      },
     },
     "mcp": {
       "auto_sync_to_agents": True,
@@ -98,7 +148,7 @@ def _mask_sensitive(value: Any) -> Any:
   if isinstance(value, dict):
     masked = {}
     for key, item in value.items():
-      if str(key).lower() in SENSITIVE_KEYS:
+      if _is_sensitive_key(str(key)):
         masked[key] = "***" if item else ""
       else:
         masked[key] = _mask_sensitive(item)
@@ -106,3 +156,50 @@ def _mask_sensitive(value: Any) -> Any:
   if isinstance(value, list):
     return [_mask_sensitive(item) for item in value]
   return value
+
+
+def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+  merged = dict(base)
+  for key, value in incoming.items():
+    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+      merged[key] = _deep_merge(merged[key], value)
+    else:
+      merged[key] = value
+  return merged
+
+
+def _preserve_masked_sensitive(value: Any, current: Any) -> Any:
+  if isinstance(value, dict):
+    preserved: dict[str, Any] = {}
+    current_dict = current if isinstance(current, dict) else {}
+    for key, item in value.items():
+      if _is_sensitive_key(str(key)) and item == "***":
+        preserved[key] = current_dict.get(key, "")
+      else:
+        preserved[key] = _preserve_masked_sensitive(item, current_dict.get(key))
+    return preserved
+  if isinstance(value, list):
+    current_list = current if isinstance(current, list) else []
+    return [
+      _preserve_masked_sensitive(item, _matching_current_list_item(item, current_list, index))
+      for index, item in enumerate(value)
+    ]
+  return value
+
+
+def _matching_current_list_item(item: Any, current: list[Any], index: int) -> Any:
+  if not isinstance(item, dict):
+    return current[index] if index < len(current) else None
+  for key in ("provider_id", "model_id", "agent_id", "id", "name"):
+    marker = item.get(key)
+    if marker is None:
+      continue
+    for candidate in current:
+      if isinstance(candidate, dict) and candidate.get(key) == marker:
+        return candidate
+  return current[index] if index < len(current) else None
+
+
+def _is_sensitive_key(key: str) -> bool:
+  normalized = key.lower()
+  return normalized in SENSITIVE_KEYS or normalized.endswith("_api_key") or normalized.endswith("_secret")

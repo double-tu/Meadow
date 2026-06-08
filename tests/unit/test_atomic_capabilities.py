@@ -20,9 +20,11 @@ from agent_kernel.capabilities.adapters import (
   LocalToolExecutor,
 )
 from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
-from agent_kernel.domain import CapabilityGrant
+from agent_kernel.autonomy import SkillService
+from agent_kernel.domain import ArtifactRef, CapabilityGrant, RuntimeEvent, RuntimeEventType
 from agent_kernel.domain.base import utc_now
-from agent_kernel.persistence import connect_sqlite
+from agent_kernel.memory import MemoryFacade
+from agent_kernel.persistence import UnitOfWork, connect_sqlite
 from agent_kernel.runtime import unit_of_work_factory
 from agent_kernel.policy import PolicyEngine
 
@@ -174,6 +176,108 @@ class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
     self.assertIn("agent_delegate", names)
     self.assertIn("agent_delegation_status", names)
     self.assertIn("agent_cancel_delegation", names)
+    self.assertIn("skill_open", names)
+    self.assertIn("memory_search", names)
+    self.assertIn("memory_read", names)
+    self.assertIn("artifact_read", names)
+    self.assertIn("event_search", names)
+    self.assertIn("context_compact", names)
+    self.assertIn("context_expand", names)
+
+  async def test_context_reader_tools_open_search_read_and_expand_refs(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      skills = SkillService(uow_factory)
+      skill = skills.create_interpreted_skill(
+        name="Browser inspect",
+        description="Inspect pages with browser tools.",
+        when_to_use="When the user asks to inspect a web page.",
+        instructions="Use browser_scan before summarizing page content.",
+        recommended_tools=["browser_scan"],
+      )
+      memory = MemoryFacade(uow_factory)
+      working = memory.write_working("chat_1", {"key_info": "深圳 weather request"}, importance=0.9)
+      semantic = memory.write_semantic("chat_1", {"summary": "User prefers Chinese output"}, importance=0.8)
+      artifact = ArtifactRef("art_weather", "artifact://weather", "application/json")
+      with UnitOfWork(conn) as uow:
+        uow.artifacts.save(artifact, {"summary": "weather payload"})
+        uow.events.append(
+          RuntimeEvent(
+            event_type=RuntimeEventType.TOOL_CALL_COMPLETED,
+            run_id="run_reader",
+            payload={"summary": "browser_scan returned Shenzhen weather"},
+            artifact_refs=[artifact],
+          )
+        )
+      provider = AtomicCapabilityProvider(
+        memory=memory,
+        uow_factory=uow_factory,
+        skill_service=skills,
+      )
+
+      opened = provider.open_skill({"skill_id": skill.skill_id})
+      searched = provider.search_memory({"scope": "chat_1", "query": "weather", "limit": 5})
+      read = provider.read_memory({"memory_id": working.memory_id})
+      artifact_read = provider.read_artifact({"artifact_id": artifact.artifact_id})
+      events = provider.search_events({"run_id": "run_reader", "query": "weather"})
+      compacted = provider.compact_context(
+        {
+          "scope": "chat_1",
+          "summary": "Older browser weather turn was compacted.",
+          "artifact_ids": [artifact.artifact_id],
+        }
+      )
+      expanded = provider.expand_context(
+        {
+          "memory_ids": [semantic.memory_id],
+          "artifact_ids": [artifact.artifact_id],
+          "skill_ids": [skill.skill_id],
+        }
+      )
+
+      self.assertTrue(opened.ok)
+      self.assertIn("Use browser_scan", opened.output["skill"]["instructions"])
+      self.assertTrue(searched.ok)
+      self.assertEqual(searched.output["results"][0]["memory_id"], working.memory_id)
+      self.assertTrue(read.ok)
+      self.assertEqual(read.output["memory"]["content"]["key_info"], "深圳 weather request")
+      self.assertEqual(artifact_read.output["metadata"]["summary"], "weather payload")
+      self.assertEqual(events.output["events"][0]["event_type"], RuntimeEventType.TOOL_CALL_COMPLETED.value)
+      self.assertTrue(compacted.ok)
+      self.assertEqual(compacted.output["memory_type"], "episodic")
+      self.assertEqual(expanded.output["expanded"]["memories"][0]["memory_id"], semantic.memory_id)
+      self.assertEqual(expanded.output["expanded"]["artifacts"][0]["artifact"]["artifact_id"], artifact.artifact_id)
+      self.assertEqual(expanded.output["expanded"]["skills"][0]["skill_id"], skill.skill_id)
+    finally:
+      conn.close()
+
+  async def test_artifact_read_can_return_bounded_metadata_and_file_content(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      conn = connect_sqlite()
+      try:
+        uow_factory = unit_of_work_factory(conn)
+        file_path = Path(tmp) / "artifact.txt"
+        file_path.write_text("alpha\nbeta\ngamma\ndelta\n", encoding="utf-8")
+        inline = ArtifactRef("art_inline", "artifact://inline", "text/plain")
+        file_ref = ArtifactRef("art_file", f"file://{file_path}", "text/plain")
+        with UnitOfWork(conn) as uow:
+          uow.artifacts.save(inline, {"content": "one\ntwo\nthree"})
+          uow.artifacts.save(file_ref, {"kind": "file"})
+        provider = AtomicCapabilityProvider(
+          file_workspace=LocalFileWorkspace([tmp]),
+          uow_factory=uow_factory,
+        )
+
+        inline_read = provider.read_artifact({"artifact_id": inline.artifact_id, "start": 2, "count": 1})
+        file_read = provider.read_artifact({"artifact_id": file_ref.artifact_id, "keyword": "gamma", "count": 2})
+
+        self.assertTrue(inline_read.output["content_available"])
+        self.assertEqual(inline_read.output["content"]["content"], "2|two")
+        self.assertEqual(file_read.output["content_source"], "file_workspace")
+        self.assertEqual(file_read.output["content"]["content"], "2|beta\n3|gamma")
+      finally:
+        conn.close()
 
   async def test_atomic_agent_delegation_routes_through_capability_runtime(self) -> None:
     conn = connect_sqlite()

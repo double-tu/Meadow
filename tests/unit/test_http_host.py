@@ -5,11 +5,13 @@ from datetime import timedelta
 
 from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
 from agent_kernel.app.conversation_task_hub import ConversationTaskHub
+from agent_kernel.app.config_center import ConfigCenterService
+from agent_kernel.app.collaboration_workbench import CollaborationWorkbenchService
 from agent_kernel.app.control_plane import ControlPlaneService
 from agent_kernel.app.desktop_chat import DesktopChatService
 from agent_kernel.app.orchestration_tools import CompositeToolCatalog, OrchestrationCapabilityIds, OrchestrationCapabilityProvider
 from agent_kernel.autonomy import SkillService
-from agent_kernel.capabilities import CapabilityRegistry, CapabilityRuntime
+from agent_kernel.capabilities import AtomicCapabilityIds, AtomicCapabilityProvider, CapabilityRegistry, CapabilityRuntime
 from agent_kernel.capabilities.adapters import LocalToolExecutor
 from agent_kernel.capabilities.adapters.control import ControlResult, ControlTarget, ControlWorkbench, FakeControlBackend
 from agent_kernel.domain import (
@@ -722,6 +724,202 @@ class HTTPHostTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_default_chat_daily_agent_can_create_and_advance_workbench_by_tool_choice(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      gateway = ModelGateway()
+      provider = MockModelProvider(
+        responses=[
+          {
+            "tool_calls": [
+              {
+                "name": "workbench_create",
+                "input": {
+                  "kind": "group_chat",
+                  "title": "评审群聊",
+                  "objective": "组织多个角色评审当前方案",
+                  "members": [
+                    {"participant_id": "daily_agent", "kind": "agent", "role": "moderator"},
+                    {"participant_id": "human_user", "kind": "human", "role": "owner"},
+                    {"participant_id": "reviewer", "kind": "agent", "role": "reviewer"},
+                  ],
+                },
+              }
+            ]
+          },
+          {
+            "tool_calls": [
+              {
+                "name": "workbench_message",
+                "input": {
+                  "workbench_id": "FROM_TOOL_RESULT",
+                  "sender_participant_id": "daily_agent",
+                  "text": "请 reviewer 从架构风险角度先给出意见。",
+                },
+              }
+            ]
+          },
+          {
+            "finish": True,
+            "output": {"content": "已创建评审群聊，并以主持人身份发起第一轮讨论。"},
+          },
+        ]
+      )
+
+      class WorkbenchAwareGateway(ModelGateway):
+        def __init__(self):
+          super().__init__()
+          self._calls = 0
+
+        async def complete(self, provider_name, model_ref, context):
+          self._calls += 1
+          if self._calls == 2:
+            tool_result = context.messages[-1]["content"]["results"][0]["output"]
+            workbench_id = tool_result["workbench"]["workbench"]["workbench_id"]
+            provider.responses[0]["tool_calls"][0]["input"]["workbench_id"] = workbench_id
+          return await super().complete(provider_name, model_ref, context)
+
+      gateway = WorkbenchAwareGateway()
+      gateway.register_provider("mock", provider)
+      launcher = SampleWorkflowTaskLauncher(uow_factory)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      workbench_service = CollaborationWorkbenchService(uow_factory)
+      orchestration = OrchestrationCapabilityProvider(
+        uow_factory=uow_factory,
+        task_launcher=launcher,
+        run_control=RuntimeEngine(uow_factory, NodeExecutorRegistry()),
+        workbench_control=workbench_service,
+      )
+      orchestration.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id=f"grant_{capability_id}",
+              capability_id=capability_id,
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+            for capability_id in [
+              OrchestrationCapabilityIds.WORKBENCH_CREATE,
+              OrchestrationCapabilityIds.WORKBENCH_MESSAGE,
+            ]
+          ]
+        ),
+        local_tools,
+        uow_factory=uow_factory,
+      )
+      chat_service = DesktopChatService(
+        uow_factory,
+        launcher,
+        model_gateway=gateway,
+        model_provider_name="mock",
+        model_ref="mock-model",
+        skill_service=SkillService(uow_factory),
+        capability_runtime=runtime,
+        atomic_capabilities=CompositeToolCatalog([orchestration]),
+        conversation_task_hub=ConversationTaskHub(uow_factory, launcher),
+      )
+      handler = make_handler(HTTPHost(uow_factory, desktop_chat_service=chat_service))
+
+      created_session = self._request_json(handler, "POST", "/chat/sessions", {"title": "日常对话"})
+      session_id = created_session["chat_session"]["session_id"]
+      sent = self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "组织一个技术评审群聊并先推进一轮", "run_id": "chat_workbench_run"},
+      )
+
+      self.assertEqual(sent["messages"][1]["content"], "已创建评审群聊，并以主持人身份发起第一轮讨论。")
+      daily_agent = sent["messages"][1]["metadata"]["llm_result"]["daily_agent"]
+      self.assertEqual([call["name"] for call in daily_agent["tool_calls"]], ["workbench_create", "workbench_message"])
+      self.assertTrue(all(call["ok"] for call in daily_agent["tool_calls"]))
+      workbench_id = daily_agent["tool_calls"][0]["output"]["workbench"]["workbench"]["workbench_id"]
+      snapshot = workbench_service.snapshot(workbench_id)
+      self.assertEqual(snapshot.workbench.kind, "group_chat")
+      self.assertEqual(snapshot.messages[0].sender_participant_id, "daily_agent")
+      self.assertIn("workbench_create", [schema["function"]["name"] for schema in provider.calls[0][1].tool_schemas])
+      with UnitOfWork(conn) as uow:
+        calls = uow.tool_calls.list_by_run("chat_workbench_run")
+      self.assertEqual([call.capability_id for call in calls], [
+        OrchestrationCapabilityIds.WORKBENCH_CREATE,
+        OrchestrationCapabilityIds.WORKBENCH_MESSAGE,
+      ])
+    finally:
+      conn.close()
+
+  def test_default_chat_daily_agent_persists_waiting_for_user_state(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      gateway = ModelGateway()
+      provider = MockModelProvider(
+        responses=[
+          {
+            "tool_calls": [
+              {
+                "name": "user_input_request",
+                "input": {
+                  "question": "请提供要参与工作台的 CLI connector_id。",
+                  "candidates": ["codex_cli", "claude_cli"],
+                },
+              }
+            ]
+          }
+        ]
+      )
+      gateway.register_provider("mock", provider)
+      launcher = SampleWorkflowTaskLauncher(uow_factory)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      atomic = AtomicCapabilityProvider()
+      atomic.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_user_input",
+              capability_id=AtomicCapabilityIds.USER_INPUT_REQUEST,
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        uow_factory=uow_factory,
+      )
+      chat_service = DesktopChatService(
+        uow_factory,
+        launcher,
+        model_gateway=gateway,
+        model_provider_name="mock",
+        model_ref="mock-model",
+        skill_service=SkillService(uow_factory),
+        capability_runtime=runtime,
+        atomic_capabilities=CompositeToolCatalog([atomic]),
+        conversation_task_hub=ConversationTaskHub(uow_factory, launcher),
+      )
+      handler = make_handler(HTTPHost(uow_factory, desktop_chat_service=chat_service))
+
+      created_session = self._request_json(handler, "POST", "/chat/sessions", {"title": "日常对话"})
+      session_id = created_session["chat_session"]["session_id"]
+      sent = self._request_json(
+        handler,
+        "POST",
+        f"/chat/sessions/{session_id}/messages",
+        {"content": "启动多 CLI 协同", "run_id": "chat_waiting_run"},
+      )
+
+      self.assertEqual(sent["session"]["status"], "waiting_for_user")
+      self.assertIn("请提供要参与工作台的 CLI connector_id", sent["messages"][1]["content"])
+      self.assertEqual(sent["session"]["metadata"]["active_run_id"], "chat_waiting_run")
+      self.assertEqual(sent["messages"][1]["metadata"]["pending"]["question"], "请提供要参与工作台的 CLI connector_id。")
+    finally:
+      conn.close()
+
   def test_default_chat_daily_agent_receives_session_history(self) -> None:
     conn = connect_sqlite()
     try:
@@ -804,6 +1002,85 @@ class HTTPHostTests(unittest.TestCase):
       self.assertEqual(config.api_key, "key-from-file")
       self.assertEqual(config.base_url, "https://llm.example/v1")
       self.assertEqual(config.timeout_seconds, 99)
+    finally:
+      conn.close()
+
+  def test_desktop_chat_reads_provider_model_agent_binding_config(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      ConfigCenterService(uow_factory).update_section(
+        "llm",
+        {
+          "active_provider_id": "gemini_primary",
+          "active_model_id": "gemini-2.5-flash",
+          "providers": [
+            {
+              "provider_id": "gemini_primary",
+              "name": "Gemini",
+              "kind": "gemini",
+              "base_url": "https://gemini.example/v1beta",
+              "api_key": "gemini-secret",
+              "timeout_seconds": 22,
+              "models": [
+                {
+                  "model_id": "gemini-2.5-flash",
+                  "enabled": True,
+                  "capabilities": {"text": True, "vision": True, "function_calling": True},
+                }
+              ],
+            }
+          ],
+          "agent_bindings": [
+            {
+              "agent_id": "desktop_daily_agent",
+              "provider_id": "gemini_primary",
+              "model_id": "gemini-2.5-flash",
+            }
+          ],
+        },
+        merge=False,
+      )
+      service = DesktopChatService(uow_factory, SampleWorkflowTaskLauncher(uow_factory))
+
+      config = service._load_llm_config()
+
+      self.assertEqual(config.provider, "gemini")
+      self.assertEqual(config.model, "gemini-2.5-flash")
+      self.assertEqual(config.api_key, "gemini-secret")
+      self.assertEqual(config.base_url, "https://gemini.example/v1beta")
+      self.assertEqual(config.timeout_seconds, 22)
+    finally:
+      conn.close()
+
+  def test_config_center_preserves_masked_nested_api_keys(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      service = ConfigCenterService(uow_factory)
+      service.update_section(
+        "llm",
+        {
+          "providers": [
+            {
+              "provider_id": "openai_default",
+              "name": "OpenAI",
+              "kind": "openai-compatible",
+              "api_key": "secret-value",
+              "models": [{"model_id": "gpt-test", "enabled": True}],
+            }
+          ]
+        },
+        merge=False,
+      )
+
+      masked = service.get_section("llm").data
+      saved = service.update_section("llm", masked, merge=False)
+      revealed = service.get_section("llm", reveal_sensitive=True).data
+
+      self.assertEqual(masked["providers"][0]["api_key"], "***")
+      self.assertEqual(saved.data["providers"][0]["api_key"], "***")
+      self.assertEqual(revealed["providers"][0]["api_key"], "secret-value")
     finally:
       conn.close()
 

@@ -14,10 +14,13 @@ from agent_kernel.autonomy.skill_service import SkillService
 from agent_kernel.capabilities.atomic import AtomicCapabilityProvider
 from agent_kernel.capabilities.runtime import CapabilityRuntime
 from agent_kernel.config import LLMConfig
+from agent_kernel.context import ContextAssembler
+from agent_kernel.app.conversation_history import ConversationHistoryCompactor
 from agent_kernel.domain.base import DomainModel, new_id, utc_now
 from agent_kernel.domain.context import ModelContext
 from agent_kernel.domain.states import RunStatus
-from agent_kernel.models import ModelGateway, OpenAICompatibleProvider
+from agent_kernel.memory import MemoryFacade
+from agent_kernel.models import AnthropicMessagesProvider, GeminiProvider, ModelGateway, OpenAICompatibleProvider
 
 
 class DesktopChatTaskLauncher(Protocol):
@@ -78,6 +81,8 @@ class DesktopChatService:
     self._atomic_capabilities = atomic_capabilities
     self._conversation_task_hub = conversation_task_hub
     self._default_llm_config = default_llm_config
+    self._memory = MemoryFacade(self._uow_factory)
+    self._history_compactor = ConversationHistoryCompactor(self._memory)
 
   def create_session(self, data: dict[str, Any] | None = None) -> DesktopChatSession:
     raw = data or {}
@@ -132,6 +137,7 @@ class DesktopChatService:
         updated_at=utc_now(),
       )
     )
+    compaction = self._compact_history_for_session(session_id, session.metadata)
     if self._conversation_task_hub is not None:
       turn = await self._conversation_task_hub.start_daily_turn(
         thread_id=session_id,
@@ -175,6 +181,8 @@ class DesktopChatService:
       current_message_id=user_message.message_id,
     )
     assistant_content = str(llm_result.get("content") or "")
+    next_status = _session_status_from_llm_result(llm_result)
+    pending = _daily_agent_pending(llm_result)
     assistant_message = DesktopChatMessage(
       message_id=new_id("chat_msg"),
       session_id=session_id,
@@ -184,6 +192,7 @@ class DesktopChatService:
       metadata={
         "task_result": launcher_result,
         "llm_result": llm_result,
+        "pending": pending,
         "selected_skill_ids": selected_skill_ids,
         "capability_hints": _capability_hints(selected_skill_ids),
       },
@@ -193,13 +202,15 @@ class DesktopChatService:
     updated = replace(
       session,
       title=title,
-      status="idle",
+      status=next_status,
       message_count=session.message_count + 2,
       metadata={
         **session.metadata,
-        "active_run_id": None,
+        "active_run_id": run_id if next_status in {"waiting_for_user", "awaiting_approval"} else None,
         "last_run_id": assistant_message.run_id,
         "last_user_message_id": user_message.message_id,
+        "pending": pending,
+        **compaction,
       },
       updated_at=utc_now(),
     )
@@ -337,6 +348,10 @@ class DesktopChatService:
       model_gateway=gateway,
       capability_runtime=self._capability_runtime,
       tool_catalog=self._atomic_capabilities,
+      context_assembler=ContextAssembler(
+        uow_factory=self._uow_factory,
+        memory=self._memory,
+      ),
       skills=active_skills,
     )
     try:
@@ -354,7 +369,7 @@ class DesktopChatService:
         "content": f"日常 Agent 执行失败：{exc}",
         "error": {"type": "daily_agent_execution_failed", "message": str(exc)},
       }
-    content = _assistant_content_from_runner_output(outcome.output)
+    content = _assistant_content_from_runner_result(outcome)
     return {
       "content": content,
       "daily_agent": {
@@ -383,54 +398,57 @@ class DesktopChatService:
       return self._model_gateway, self._model_provider_name, self._model_ref
     config = self._load_llm_config()
     gateway = ModelGateway()
-    gateway.register_provider(
-      config.provider,
-      OpenAICompatibleProvider(
-        api_key=config.api_key,
-        base_url=config.base_url,
-        timeout_seconds=config.timeout_seconds,
-      ),
-    )
+    gateway.register_provider(config.provider, _provider_from_config(config))
     return gateway, config.provider, config.model
 
   def _load_llm_config(self) -> LLMConfig:
     with self._uow_factory() as uow:
       record = uow.interactions.get_record("config_section", "llm")
     data = record.get("data", {}) if isinstance(record, dict) and isinstance(record.get("data"), dict) else {}
+    profile = _llm_profile_from_config(data, agent_id="desktop_daily_agent")
     defaults = self._default_llm_config
     provider = str(
-      data.get("provider")
+      profile.get("provider")
+      or data.get("provider")
       or (defaults.provider if defaults is not None else None)
       or os.getenv("AGENT_KERNEL_LLM_PROVIDER")
       or "openai-compatible"
     )
     model = (
-      _string_or_none(data.get("model"))
+      _string_or_none(profile.get("model"))
+      or _string_or_none(data.get("model"))
       or (defaults.model if defaults is not None else None)
       or os.getenv("AGENT_KERNEL_LLM_MODEL")
       or os.getenv("OPENAI_MODEL")
     )
-    api_key_env = _string_or_none(data.get("api_key_env"))
+    api_key_env = _string_or_none(profile.get("api_key_env")) or _string_or_none(data.get("api_key_env"))
     api_key = (
       os.getenv(api_key_env) if api_key_env else None
     )
     api_key = (
       api_key
+      or _string_or_none(profile.get("api_key"))
       or _string_or_none(data.get("api_key"))
       or (defaults.api_key if defaults is not None else None)
       or os.getenv("AGENT_KERNEL_LLM_API_KEY")
       or os.getenv("OPENAI_API_KEY")
+      or os.getenv("GEMINI_API_KEY")
+      or os.getenv("ANTHROPIC_API_KEY")
     )
     base_url = (
-      _string_or_none(data.get("base_url"))
+      _string_or_none(profile.get("base_url"))
+      or _string_or_none(data.get("base_url"))
       or (defaults.base_url if defaults is not None else None)
       or os.getenv("AGENT_KERNEL_LLM_BASE_URL")
       or os.getenv("OPENAI_BASE_URL")
-      or "https://api.openai.com/v1"
+      or _default_base_url(provider)
     )
     timeout = data.get(
       "timeout_seconds",
-      defaults.timeout_seconds if defaults is not None else os.getenv("AGENT_KERNEL_LLM_TIMEOUT_SECONDS", 60),
+      profile.get(
+        "timeout_seconds",
+        defaults.timeout_seconds if defaults is not None else os.getenv("AGENT_KERNEL_LLM_TIMEOUT_SECONDS", 60),
+      ),
     )
     missing = []
     if not model:
@@ -486,6 +504,22 @@ class DesktopChatService:
         history.append({"role": message.role, "content": message.content})
     return history
 
+  def _compact_history_for_session(self, session_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    compacted_ids = _string_list_or_empty(metadata.get("compacted_message_ids"))
+    result = self._history_compactor.compact(
+      scope=session_id,
+      messages=self.list_messages(session_id),
+      already_compacted_message_ids=compacted_ids,
+      task_id=session_id,
+    )
+    if result.memory is None:
+      return {"compacted_message_ids": compacted_ids}
+    merged_ids = [*compacted_ids, *result.compacted_message_ids]
+    return {
+      "compacted_message_ids": merged_ids,
+      "last_compaction_memory_id": result.memory.memory_id,
+    }
+
   def _save_session(self, session: DesktopChatSession) -> None:
     with self._uow_factory() as uow:
       uow.interactions.save_record("desktop_chat_session", session.session_id, session)
@@ -501,6 +535,12 @@ def _string_list(value: object) -> list[str]:
   if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
     raise ValueError("selected_skill_ids must be a list of strings.")
   return value
+
+
+def _string_list_or_empty(value: object) -> list[str]:
+  if not isinstance(value, list):
+    return []
+  return [item for item in value if isinstance(item, str)]
 
 
 def _capability_hints(selected_skill_ids: list[str]) -> list[dict[str, Any]]:
@@ -522,6 +562,79 @@ def _string_or_none(value: object) -> str | None:
   return text or None
 
 
+def _llm_profile_from_config(data: dict[str, Any], *, agent_id: str) -> dict[str, Any]:
+  providers = data.get("providers")
+  if not isinstance(providers, list) or not providers:
+    return {}
+  bindings = data.get("agent_bindings")
+  binding = _find_mapping(bindings, "agent_id", agent_id) if isinstance(bindings, list) else None
+  provider_id = (
+    _string_or_none(binding.get("provider_id")) if binding else None
+  ) or _string_or_none(data.get("active_provider_id"))
+  provider = _find_mapping(providers, "provider_id", provider_id) if provider_id else None
+  provider = provider or next((item for item in providers if isinstance(item, dict) and item.get("enabled", True)), None)
+  if not isinstance(provider, dict):
+    return {}
+  models = provider.get("models")
+  model_id = (
+    _string_or_none(binding.get("model_id")) if binding else None
+  ) or _string_or_none(data.get("active_model_id"))
+  if not model_id and isinstance(models, list):
+    for candidate in models:
+      if isinstance(candidate, dict) and candidate.get("enabled", True):
+        model_id = _string_or_none(candidate.get("model_id"))
+        break
+  return {
+    "provider": provider.get("kind") or provider.get("provider") or provider.get("platform"),
+    "model": model_id,
+    "api_key": provider.get("api_key"),
+    "api_key_env": provider.get("api_key_env"),
+    "base_url": provider.get("base_url"),
+    "timeout_seconds": provider.get("timeout_seconds"),
+  }
+
+
+def _find_mapping(items: object, key: str, value: str | None) -> dict[str, Any] | None:
+  if not value or not isinstance(items, list):
+    return None
+  for item in items:
+    if isinstance(item, dict) and item.get(key) == value:
+      return item
+  return None
+
+
+def _provider_from_config(config: LLMConfig):
+  provider_kind = config.provider.lower()
+  if provider_kind in {"openai-compatible", "openai", "deepseek", "new-api"}:
+    return OpenAICompatibleProvider(
+      api_key=config.api_key,
+      base_url=config.base_url,
+      timeout_seconds=config.timeout_seconds,
+    )
+  if provider_kind in {"gemini", "google-gemini"}:
+    return GeminiProvider(
+      api_key=config.api_key,
+      base_url=config.base_url,
+      timeout_seconds=config.timeout_seconds,
+    )
+  if provider_kind in {"anthropic", "claude"}:
+    return AnthropicMessagesProvider(
+      api_key=config.api_key,
+      base_url=config.base_url,
+      timeout_seconds=config.timeout_seconds,
+    )
+  raise ValueError(f"暂不支持的模型 provider 类型: {config.provider}")
+
+
+def _default_base_url(provider: str) -> str:
+  provider_kind = provider.lower()
+  if provider_kind in {"gemini", "google-gemini"}:
+    return "https://generativelanguage.googleapis.com/v1beta"
+  if provider_kind in {"anthropic", "claude"}:
+    return "https://api.anthropic.com/v1"
+  return "https://api.openai.com/v1"
+
+
 def _assistant_content_from_runner_output(output: dict[str, Any]) -> str:
   content = output.get("content")
   if isinstance(content, str) and content.strip():
@@ -535,3 +648,36 @@ def _assistant_content_from_runner_output(output: dict[str, Any]) -> str:
   if output:
     return str(output)
   return "日常 Agent 已完成运行，但没有返回可展示内容。"
+
+
+def _assistant_content_from_runner_result(outcome: ContinuousRunnerResult) -> str:
+  if outcome.status == "waiting_for_user" and isinstance(outcome.pending, dict):
+    question = outcome.pending.get("question")
+    candidates = outcome.pending.get("candidates")
+    text = str(question) if isinstance(question, str) and question.strip() else "我需要你补充一个信息才能继续。"
+    if isinstance(candidates, list) and candidates:
+      text += "\n\n可选项：" + "、".join(str(item) for item in candidates)
+    return text
+  if outcome.status == "awaiting_approval" and isinstance(outcome.pending, dict):
+    capability_id = outcome.pending.get("capability_id")
+    reason = outcome.pending.get("reason")
+    return f"需要审批后才能继续执行：{capability_id or '工具调用'}。\n原因：{reason or '策略要求审批'}"
+  return _assistant_content_from_runner_output(outcome.output)
+
+
+def _daily_agent_pending(llm_result: dict[str, Any]) -> dict[str, Any] | None:
+  daily_agent = llm_result.get("daily_agent")
+  if not isinstance(daily_agent, dict):
+    return None
+  pending = daily_agent.get("pending")
+  return pending if isinstance(pending, dict) else None
+
+
+def _session_status_from_llm_result(llm_result: dict[str, Any]) -> str:
+  daily_agent = llm_result.get("daily_agent")
+  if not isinstance(daily_agent, dict):
+    return "idle"
+  status = daily_agent.get("status")
+  if status in {"waiting_for_user", "awaiting_approval"}:
+    return str(status)
+  return "idle"

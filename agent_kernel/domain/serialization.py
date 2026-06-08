@@ -21,6 +21,8 @@ def to_primitive(value: Any) -> Any:
     return [to_primitive(item) for item in value]
   if isinstance(value, tuple):
     return [to_primitive(item) for item in value]
+  if isinstance(value, set):
+    return [to_primitive(item) for item in sorted(value, key=str)]
   if isinstance(value, dict):
     return {str(key): to_primitive(item) for key, item in value.items()}
   return value
@@ -84,4 +86,3 @@ def _from_value(expected_type: Any, value: Any) -> Any:
     return from_dict(expected_type, value)
 
   return value
-
