@@ -19,6 +19,8 @@ from agent_kernel.domain.context import ContextAssemblyRequest, ModelContext
 from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
 from agent_kernel.domain.serialization import to_json
 from agent_kernel.domain.skill import SkillCard
+from agent_kernel.agents.goal_evidence import GoalEvidenceVerifier
+from agent_kernel.agents.tool_surface import SkillAwareToolSurfacePolicy, ToolSurfacePolicy, ToolSurfaceSelection
 from agent_kernel.models.gateway import ModelGateway
 from agent_kernel.policy.engine import PolicyDecisionType
 
@@ -67,6 +69,8 @@ class ContinuousAgentRunner:
     context_assembler=None,
     context_manager=None,
     skills: list[SkillCard] | None = None,
+    tool_surface_policy: ToolSurfacePolicy | None = None,
+    goal_evidence_verifier: GoalEvidenceVerifier | None = None,
     system_instructions: str | None = None,
   ) -> None:
     self._uow_factory = uow_factory
@@ -76,6 +80,8 @@ class ContinuousAgentRunner:
     self._context_assembler = context_assembler
     self._context_manager = context_manager
     self._skills = skills or []
+    self._tool_surface_policy = tool_surface_policy or SkillAwareToolSurfacePolicy()
+    self._goal_evidence_verifier = goal_evidence_verifier or GoalEvidenceVerifier()
     self._system_instructions = system_instructions or _DEFAULT_SYSTEM_INSTRUCTIONS
 
   async def run(
@@ -94,8 +100,11 @@ class ContinuousAgentRunner:
     scope = scope or run_id
     messages: list[dict[str, Any]] = self._initial_messages(user_message, history_messages or [])
     all_tool_calls: list[ContinuousToolCallRecord] = []
+    action_history: list[str] = []
+    finalization_instruction: str | None = None
     last_repetition_key: str | None = None
     consecutive_repeated_tool_calls = 0
+    empty_model_result_count = 0
     self._append_event(
       RuntimeEvent(
         event_type=RuntimeEventType.RUN_CREATED,
@@ -107,12 +116,51 @@ class ContinuousAgentRunner:
     )
 
     for turn in range(1, config.max_turns + 1):
-      context = self._build_context(run_id, scope, config.model_ref, messages)
+      tool_surface = self._select_tool_surface(user_message, turn)
+      if finalization_instruction is not None:
+        tool_surface = ToolSurfaceSelection(
+          skills=tool_surface.skills,
+          tool_schemas=[],
+          allowed_tool_names=[],
+          rationale="goal_evidence_satisfied",
+        )
+      context = self._build_context(run_id, scope, config.model_ref, messages, tool_surface)
       model_result = await self._model_gateway.complete(config.provider_name, config.model_ref, context)
       model_result = self._normalize_model_result(model_result)
       tool_calls = self._extract_tool_calls(model_result)
       if not tool_calls:
-        output = self._finish_output(model_result, all_tool_calls)
+        output = self._finish_output(model_result, all_tool_calls, turn=turn)
+        if _is_empty_model_diagnostic(output):
+          empty_model_result_count += 1
+          self._append_turn_event(run_id, agent_id, task_id, turn, output, [])
+          if empty_model_result_count >= 3:
+            return ContinuousRunnerResult(
+              run_id=run_id,
+              status="failed",
+              turns=turn,
+              output=output,
+              tool_calls=all_tool_calls,
+            )
+          messages = [
+            *_normalize_history_messages(history_messages or []),
+            {"role": "user", "content": user_message},
+            {
+              "role": "user",
+              "content": {
+                "type": "model_repair",
+                "original_user_goal": user_message,
+                "turn": turn,
+                "empty_response_count": empty_model_result_count,
+                "diagnostics": output.get("diagnostics", {}),
+                "instruction": (
+                  "[System] Blank response. Regenerate and continue the original task. "
+                  "If tools are needed, call the next appropriate tool. If the task is impossible, "
+                  "return a concise final answer explaining the concrete blocker and evidence."
+                ),
+              },
+            },
+          ]
+          continue
         self._append_turn_event(run_id, agent_id, task_id, turn, output, [])
         return ContinuousRunnerResult(
           run_id=run_id,
@@ -123,6 +171,7 @@ class ContinuousAgentRunner:
         )
 
       turn_records: list[ContinuousToolCallRecord] = []
+      empty_model_result_count = 0
       tool_messages: list[dict[str, Any]] = []
       for raw_call in tool_calls:
         call = self._tool_catalog.normalize_call(
@@ -217,6 +266,9 @@ class ContinuousAgentRunner:
           }
         )
       all_tool_calls.extend(turn_records)
+      action_history.extend(_summarize_turn_records(turn_records, turn=turn))
+      evidence = self._goal_evidence_verifier.evaluate(user_message, all_tool_calls)
+      finalization_instruction = evidence.instruction if evidence.satisfied else None
       self._append_turn_event(
         run_id,
         agent_id,
@@ -234,22 +286,23 @@ class ContinuousAgentRunner:
             "type": "tool_results",
             "original_user_goal": user_message,
             "turn": turn,
+            "action_history": action_history[-12:],
             "results": tool_messages,
             "instruction": (
               "Continue working on original_user_goal. If the goal is not completed yet, call the next required tool. "
               "Do not finish by only summarizing intermediate inspection results unless they fully satisfy the original goal. "
-              "Follow the relevant Skill/SOP instructions when a selected or active Skill applies."
+              "Use action_history to avoid repeating failed or already-completed steps. "
+              "Follow the relevant Skill/SOP instructions when a selected or active Skill applies. "
+              + (
+                finalization_instruction
+                if finalization_instruction is not None
+                else "When browser/page/search/feed observations fully satisfy the goal, stop tool use and provide the final answer."
+              )
+              + _progress_guard_instruction(turn)
             ),
           },
         }
       ]
-      if self._context_assembler is None:
-        messages = [
-          {"role": "system", "content": self._system_instructions},
-          *self._skill_messages(),
-          *messages,
-        ]
-
     return ContinuousRunnerResult(
       run_id=run_id,
       status="max_turns_exceeded",
@@ -258,8 +311,35 @@ class ContinuousAgentRunner:
       tool_calls=all_tool_calls,
     )
 
-  def _skill_messages(self) -> list[dict[str, Any]]:
-    if not self._skills:
+  def _select_tool_surface(self, user_message: str, turn: int) -> ToolSurfaceSelection:
+    return self._tool_surface_policy.select(
+      user_goal=user_message,
+      skills=self._skills,
+      tool_schemas=self._tool_catalog.tool_schemas(),
+      turn=turn,
+    )
+
+  def _tool_surface_messages(self, selection: ToolSurfaceSelection) -> list[dict[str, Any]]:
+    if not selection.allowed_tool_names and not selection.rationale:
+      return []
+    return [
+      {
+        "role": "system",
+        "content": {
+          "type": "tool_surface",
+          "rationale": selection.rationale,
+          "allowed_tools": selection.allowed_tool_names,
+          "instruction": (
+            "Use only these currently exposed tools. If allowed_tools is empty, produce the final answer only. "
+            "If a relevant Skill/SOP is selected, follow it as the task procedure. "
+            "When observations already satisfy the user goal, stop calling tools and provide the final answer."
+          ),
+        },
+      }
+    ]
+
+  def _skill_messages(self, skills: list[SkillCard]) -> list[dict[str, Any]]:
+    if not skills:
       return []
     return [
       {
@@ -278,7 +358,7 @@ class ContinuousAgentRunner:
               "constraints": skill.constraints,
               "failure_modes": skill.failure_modes,
             }
-            for skill in self._skills
+            for skill in skills
           ],
         },
       }
@@ -293,13 +373,7 @@ class ContinuousAgentRunner:
       *_normalize_history_messages(history_messages),
       {"role": "user", "content": user_message},
     ]
-    if self._context_assembler is not None:
-      return base_messages
-    return [
-      {"role": "system", "content": self._system_instructions},
-      *self._skill_messages(),
-      *base_messages,
-    ]
+    return base_messages
 
   def _build_context(
     self,
@@ -307,8 +381,9 @@ class ContinuousAgentRunner:
     scope: str,
     model_ref: str,
     messages: list[dict[str, Any]],
+    tool_surface: ToolSurfaceSelection,
   ) -> ModelContext:
-    tool_schemas = self._tool_catalog.tool_schemas()
+    tool_schemas = tool_surface.tool_schemas
     if self._context_assembler is not None:
       return self._context_assembler.assemble(
         ContextAssemblyRequest(
@@ -317,18 +392,24 @@ class ContinuousAgentRunner:
           model_ref=model_ref,
           messages=messages,
           system_instructions=self._system_instructions,
-          skills=self._skills,
+          skills=tool_surface.skills,
           tool_schemas=tool_schemas,
           max_tokens=4096,
         )
       ).model_context
+    model_messages = [
+      {"role": "system", "content": self._system_instructions},
+      *self._tool_surface_messages(tool_surface),
+      *self._skill_messages(tool_surface.skills),
+      *messages,
+    ]
     if self._context_manager is None:
-      return ModelContext(messages=messages, tool_schemas=tool_schemas)
+      return ModelContext(messages=model_messages, tool_schemas=tool_schemas)
     context = self._context_manager.build(
       run_id=run_id,
       scope=scope,
       model_ref=model_ref,
-      messages=messages,
+      messages=model_messages,
       available_tools=tool_schemas,
     )
     context.tool_schemas = tool_schemas
@@ -385,14 +466,19 @@ class ContinuousAgentRunner:
     return {"name": name, "input": payload}
 
   @staticmethod
-  def _finish_output(result: dict[str, Any], tool_calls: list[ContinuousToolCallRecord] | None = None) -> dict[str, Any]:
+  def _finish_output(
+    result: dict[str, Any],
+    tool_calls: list[ContinuousToolCallRecord] | None = None,
+    *,
+    turn: int | None = None,
+  ) -> dict[str, Any]:
     output = result.get("output", result.get("content", result))
     normalized = output if isinstance(output, dict) else {"value": output}
     if _has_displayable_output(normalized):
       return normalized
     if tool_calls:
       return _fallback_output_from_tool_calls(tool_calls)
-    return normalized
+    return _diagnostic_output_for_empty_model_result(result, turn=turn)
 
   def _append_turn_event(
     self,
@@ -600,12 +686,31 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
       lines.append("部分浏览器操作失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
     return {"content": "\n".join(lines)}
   if browser_observations:
+    browser_feed_titles: list[str] = []
+    for item in browser_observations:
+      titles = item.get("feed_titles")
+      if isinstance(titles, list):
+        browser_feed_titles.extend(str(title) for title in titles if str(title).strip())
+    if browser_feed_titles:
+      lines = ["已通过浏览器获取到页面推荐内容，执行轮次已用完。根据已返回的数据，看到的推荐内容包括："]
+      lines.extend(f"- {title}" for title in _unique_strings(browser_feed_titles)[:20])
+      if access_issues:
+        lines.append("")
+        lines.append("访问受限：" + "；".join(_unique_strings(access_issues)[-3:]))
+      if failed_tools:
+        lines.append("")
+        lines.append("部分浏览器操作失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
+      return {"content": "\n".join(lines)}
     lines = ["已通过浏览器读取到页面内容，但执行轮次已用完。根据已返回的页面观察："]
     for item in browser_observations[-3:]:
       title = item.get("title")
       url = item.get("url")
       if title or url:
         lines.append(f"- 页面：{title or url}")
+      titles = item.get("feed_titles")
+      if isinstance(titles, list) and titles:
+        lines.append("  - 推荐内容：")
+        lines.extend(f"    - {feed_title}" for feed_title in _unique_strings([str(feed_title) for feed_title in titles])[:8])
       cards = item.get("visible_cards")
       if isinstance(cards, list) and cards:
         lines.extend(f"  - {card}" for card in _unique_strings([str(card) for card in cards])[:6])
@@ -656,12 +761,114 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
   return {"content": "\n".join(summary)}
 
 
+def _diagnostic_output_for_empty_model_result(result: dict[str, Any], *, turn: int | None = None) -> dict[str, Any]:
+  markers = []
+  for key in ("finish", "finish_reason", "stop_reason"):
+    value = result.get(key)
+    if value is not None:
+      markers.append(f"{key}={value}")
+  marker_text = "；".join(markers) if markers else "模型未提供 finish/stop 标记"
+  turn_text = f"第 {turn} 轮" if turn is not None else "当前轮"
+  return {
+    "content": (
+      f"日常 Agent 在{turn_text}没有返回可展示内容，也没有发起工具调用。\n"
+      f"诊断：{marker_text}。\n"
+      "这通常表示模型提前结束、输出为空，或工具面/Skill 指令没有让模型继续推进任务。请重试；"
+      "如果再次出现，需要查看该 run 的 model call 与 agent.turn.completed 事件。"
+    ),
+    "diagnostics": {
+      "type": "empty_model_result",
+      "turn": turn,
+      "model_result_keys": sorted(str(key) for key in result.keys()),
+    },
+  }
+
+
+def _is_empty_model_diagnostic(output: dict[str, Any]) -> bool:
+  diagnostics = output.get("diagnostics")
+  return isinstance(diagnostics, dict) and diagnostics.get("type") == "empty_model_result"
+
+
+def _progress_guard_instruction(turn: int) -> str:
+  if turn % 75 == 0:
+    return (
+      " [DANGER] This task has run for many turns. Stop ineffective retries; summarize current evidence, "
+      "state the blocker, and request user input if progress requires external help."
+    )
+  if turn % 7 == 0:
+    return (
+      " [DANGER] Avoid ineffective retries. If there is no new progress, switch strategy: inspect the actual "
+      "environment/state, use a different capability/source, or request user input with the concrete blocker."
+    )
+  return ""
+
+
+def _summarize_turn_records(records: list[ContinuousToolCallRecord], *, turn: int) -> list[str]:
+  summaries: list[str] = []
+  for record in records:
+    status = "ok" if record.ok else f"failed:{(record.error or {}).get('type', 'unknown')}"
+    details: list[str] = []
+    target_id = _record_target_id(record)
+    if target_id:
+      details.append(f"target={target_id}")
+    url = _record_url(record)
+    if url:
+      details.append(f"url={url}")
+    page = record.output.get("page")
+    if isinstance(page, dict):
+      title = page.get("title")
+      if isinstance(title, str) and title.strip():
+        details.append(f"page={title.strip()[:80]}")
+      feed_titles = page.get("feed_titles")
+      if isinstance(feed_titles, list) and feed_titles:
+        details.append(f"feed_titles={len(feed_titles)}")
+    suffix = " " + " ".join(details) if details else ""
+    summaries.append(f"turn {turn}: {record.name} {status}{suffix}")
+  return summaries
+
+
+def _record_target_id(record: ContinuousToolCallRecord) -> str | None:
+  for source in (record.output, record.input):
+    value = source.get("target_id") or source.get("active_target_id")
+    if isinstance(value, str) and value:
+      return value
+  scope = record.output.get("browser_scope")
+  if isinstance(scope, dict):
+    value = scope.get("active_target_id")
+    if isinstance(value, str) and value:
+      return value
+  return None
+
+
+def _record_url(record: ContinuousToolCallRecord) -> str | None:
+  value = record.output.get("url")
+  if isinstance(value, str) and value:
+    return value
+  payload = record.input.get("payload")
+  if isinstance(payload, dict):
+    value = payload.get("url")
+    if isinstance(value, str) and value:
+      return value
+  return None
+
+
 def _has_displayable_output(output: dict[str, Any]) -> bool:
   for key in ("content", "summary", "value"):
     value = output.get(key)
     if isinstance(value, str) and value.strip():
       return True
-  return bool(output) and output != {"content": ""} and output != {"value": ""} and output != {"output": ""}
+  rich_keys = {
+    "workbench",
+    "delegation",
+    "delegations",
+    "page",
+    "results",
+    "search_results",
+    "feed_titles",
+    "visible_cards",
+    "diagnostics",
+  }
+  return any(key in output for key in rich_keys)
 
 
 def _extract_workbench_summary(output: dict[str, Any]) -> dict[str, Any] | None:
@@ -709,7 +916,7 @@ def _extract_delegation_summaries(output: dict[str, Any]) -> list[dict[str, Any]
 def _extract_browser_observation(output: dict[str, Any]) -> dict[str, Any] | None:
   page = output.get("page")
   if not isinstance(page, dict):
-    return None
+    return _extract_browser_observation_from_tool_result(output)
   observation: dict[str, Any] = {}
   for key in ("title", "url", "text"):
     value = page.get(key)
@@ -750,6 +957,139 @@ def _extract_browser_observation(output: dict[str, Any]) -> dict[str, Any] | Non
     if normalized_results:
       observation["search_results"] = normalized_results[:8]
   return observation or None
+
+
+def _extract_browser_observation_from_tool_result(output: dict[str, Any]) -> dict[str, Any] | None:
+  payload = _browser_tool_payload(output)
+  if payload is None:
+    return None
+  observation = _observation_from_structured_browser_payload(payload)
+  if observation:
+    for key in ("url", "title"):
+      value = output.get(key)
+      if isinstance(value, str) and value.strip() and key not in observation:
+        observation[key] = value.strip()
+    return observation
+  if isinstance(payload, str) and payload.strip():
+    return {"text": payload.strip()}
+  return None
+
+
+def _browser_tool_payload(output: dict[str, Any]) -> Any:
+  for key in ("js_return", "data"):
+    value = output.get(key)
+    if value is not None:
+      return _parse_browser_payload(value)
+  result = output.get("result")
+  if isinstance(result, dict) and "js_return" in result:
+    return _parse_browser_payload(result.get("js_return"))
+  if isinstance(result, dict) and "data" in result:
+    data = result.get("data")
+    if isinstance(data, dict) and "js_return" in data:
+      return _parse_browser_payload(data.get("js_return"))
+    return _parse_browser_payload(data)
+  if result is not None:
+    return _parse_browser_payload(result)
+  return None
+
+
+def _parse_browser_payload(value: Any) -> Any:
+  if isinstance(value, str):
+    text = value.strip()
+    if not text:
+      return value
+    try:
+      return json.loads(text)
+    except json.JSONDecodeError:
+      return value
+  return value
+
+
+def _observation_from_structured_browser_payload(payload: Any) -> dict[str, Any]:
+  if isinstance(payload, list):
+    cards = [_normalize_browser_card(item) for item in payload]
+    cards = [item for item in cards if item]
+    if not cards:
+      return {}
+    titles = [str(item["title"]) for item in cards if item.get("title")]
+    lines = [_browser_card_line(item) for item in cards]
+    return {
+      "feed_titles": _unique_strings(titles),
+      "visible_cards": _unique_strings([line for line in lines if line]),
+    }
+  if not isinstance(payload, dict):
+    return {}
+  observation: dict[str, Any] = {}
+  for key in ("title", "url", "text", "summary"):
+    value = payload.get(key)
+    if isinstance(value, str) and value.strip():
+      target_key = "text" if key == "summary" else key
+      observation[target_key] = value.strip()
+  for key, target_key in (
+    ("feed_titles", "feed_titles"),
+    ("titles", "feed_titles"),
+    ("visible_cards", "visible_cards"),
+    ("cards", "visible_cards"),
+  ):
+    value = payload.get(key)
+    if isinstance(value, list):
+      if all(isinstance(item, dict) for item in value):
+        nested = _observation_from_structured_browser_payload(value)
+        for nested_key, nested_value in nested.items():
+          if nested_value:
+            observation.setdefault(nested_key, nested_value)
+      else:
+        items = [str(item).strip() for item in value if str(item).strip()]
+        if items:
+          observation[target_key] = _unique_strings(items)
+  for key in ("items", "posts", "notes", "results", "data"):
+    value = payload.get(key)
+    if isinstance(value, list):
+      nested = _observation_from_structured_browser_payload(value)
+      for nested_key, nested_value in nested.items():
+        if nested_value and nested_key not in observation:
+          observation[nested_key] = nested_value
+  return observation
+
+
+def _normalize_browser_card(value: Any) -> dict[str, str]:
+  if isinstance(value, str):
+    text = value.strip()
+    return {"text": text, "title": text} if text else {}
+  if not isinstance(value, dict):
+    return {}
+  card: dict[str, str] = {}
+  for source_key, target_key in (
+    ("title", "title"),
+    ("displayTitle", "title"),
+    ("name", "title"),
+    ("text", "text"),
+    ("content", "text"),
+    ("author", "author"),
+    ("user", "author"),
+    ("time", "time"),
+    ("url", "url"),
+    ("href", "url"),
+    ("metrics", "metrics"),
+  ):
+    raw = value.get(source_key)
+    if isinstance(raw, str) and raw.strip():
+      card[target_key] = raw.strip()
+    elif raw is not None and target_key == "metrics":
+      card[target_key] = str(raw)
+  return card
+
+
+def _browser_card_line(card: dict[str, str]) -> str:
+  primary = card.get("title") or card.get("text") or ""
+  if not primary:
+    return ""
+  details = []
+  for key in ("author", "time", "metrics", "url"):
+    value = card.get(key)
+    if value:
+      details.append(value)
+  return primary if not details else f"{primary}（{'，'.join(details)}）"
 
 
 def _compact_browser_text(text: str) -> str:

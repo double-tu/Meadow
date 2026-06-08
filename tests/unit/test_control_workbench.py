@@ -227,6 +227,19 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(command["method"], "create")
     self.assertEqual(command["url"], "https://meadow.example")
 
+  async def test_browser_link_http_backend_create_tab_extracts_target_from_tabs_list_response(self) -> None:
+    transport = _BrowserLinkTabsListTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
+
+    result = await backend.execute(
+      ControlCommand.create("browser", "navigate", target_id=None, payload={"url": "https://meadow.example/explore"})
+    )
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["target_id"], "tab_new")
+    self.assertEqual(result.output["active_target_id"], "tab_new")
+    self.assertEqual(result.output["target"]["metadata"]["url"], "https://meadow.example/explore")
+
   async def test_browser_link_http_backend_inspect_fetches_page_summary(self) -> None:
     transport = _BrowserLinkTransport()
     backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
@@ -685,6 +698,39 @@ class _BrowserLinkTransport:
             }
           }
       return {"r": {"data": "Example"}}
+    return {"r": {"error": "unsupported"}}
+
+
+class _BrowserLinkTabsListTransport:
+  def __init__(self) -> None:
+    self.requests: list[dict[str, object]] = []
+
+  def post_json(self, payload: dict[str, object]) -> dict[str, object]:
+    self.requests.append(payload)
+    if payload.get("cmd") == "get_all_sessions":
+      return {
+        "r": [
+          {"id": "tab_old", "url": "https://old.example", "title": "Old", "type": "ext_ws"},
+          {"id": "tab_new", "url": "https://meadow.example/explore", "title": "Created", "type": "ext_ws"},
+        ]
+      }
+    if payload.get("cmd") == "execute_js":
+      code = payload.get("code")
+      if isinstance(code, str):
+        try:
+          command = json.loads(code)
+        except json.JSONDecodeError:
+          command = None
+        if isinstance(command, dict) and command.get("cmd") == "tabs" and command.get("method") == "create":
+          return {
+            "r": {
+              "data": [
+                {"id": "tab_old", "url": "https://old.example", "title": "Old", "active": False},
+                {"id": "tab_new", "url": command["url"], "title": "Created", "active": True},
+              ]
+            }
+          }
+      return {"r": {"data": "ok"}}
     return {"r": {"error": "unsupported"}}
 
 

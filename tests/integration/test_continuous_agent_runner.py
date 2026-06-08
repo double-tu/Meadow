@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from agent_kernel.agents import ContinuousAgentRunner, ContinuousRunnerConfig
+from agent_kernel.autonomy.builtin_skills import BUILTIN_ATOMIC_SKILLS
 from agent_kernel.capabilities import AtomicCapabilityProvider, CapabilityRegistry, CapabilityRuntime
 from agent_kernel.capabilities.adapters import ControlResult, ControlWorkbench, HTTPResponse, LocalFileWorkspace, LocalToolExecutor
 from agent_kernel.domain import CapabilityGrant, RuntimeEventType
@@ -267,9 +268,103 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_messages[-2]["content"], "打开小红书并查看推送内容")
         tool_result_content = second_messages[-1]["content"]
         self.assertEqual(tool_result_content["original_user_goal"], "打开小红书并查看推送内容")
+        self.assertEqual(tool_result_content["action_history"], ["turn 1: workspace_read ok"])
         self.assertIn("Continue working on original_user_goal", tool_result_content["instruction"])
+        self.assertIn("avoid repeating failed or already-completed steps", tool_result_content["instruction"])
       finally:
         conn.close()
+
+  async def test_runner_prunes_tool_surface_to_relevant_browser_skill(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(grants=[]),
+        local_tools,
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(responses=[{"finish": True, "output": {"summary": "ok"}}])
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+        skills=list(BUILTIN_ATOMIC_SKILLS),
+      )
+
+      await runner.run(
+        user_message="帮我用浏览器打开页面刷新一下，看看最新推荐帖子",
+        run_id="run_browser_tool_surface",
+        scope="scope_browser_tool_surface",
+        config=ContinuousRunnerConfig(max_turns=2),
+      )
+
+      tool_names = {schema["function"]["name"] for schema in provider.calls[0][1].tool_schemas}
+      self.assertIn("browser_scan", tool_names)
+      self.assertIn("browser_execute_js", tool_names)
+      self.assertIn("browser_navigate", tool_names)
+      self.assertIn("http_request", tool_names)
+      self.assertIn("skill_open", tool_names)
+      self.assertNotIn("workspace_write", tool_names)
+      self.assertNotIn("desktop_click", tool_names)
+      self.assertLess(len(tool_names), len(catalog.tool_schemas()))
+      navigate_schema = next(schema for schema in provider.calls[0][1].tool_schemas if schema["function"]["name"] == "browser_navigate")
+      self.assertIn("create a new owned tab", navigate_schema["function"]["description"])
+      selected_skill_messages = [
+        message
+        for message in provider.calls[0][1].messages
+        if isinstance(message.get("content"), dict) and message["content"].get("type") == "selected_skills"
+      ]
+      self.assertEqual(selected_skill_messages[0]["content"]["skills"][0]["skill_id"], "builtin.atomic.web_research")
+    finally:
+      conn.close()
+
+  async def test_runner_retries_empty_model_result_before_finishing(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(registry, PolicyEngine(grants=[]), local_tools, uow_factory=uow_factory)
+      provider = MockModelProvider(
+        responses=[
+          {"finish": True, "output": {}},
+          {"finish": True, "output": {"content": "恢复后的结果"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="帮我执行一个需要结果的任务",
+        run_id="run_empty_model_result",
+        scope="scope_empty_model_result",
+        config=ContinuousRunnerConfig(max_turns=4),
+      )
+
+      self.assertEqual(result.status, "completed")
+      self.assertEqual(result.output["content"], "恢复后的结果")
+      self.assertEqual(len(provider.calls), 2)
+      retry_content = provider.calls[1][1].messages[-1]["content"]
+      self.assertEqual(retry_content["type"], "model_repair")
+      self.assertIn("Blank response", retry_content["instruction"])
+    finally:
+      conn.close()
 
   async def test_runner_returns_fallback_content_when_max_turns_exceeded(self) -> None:
     conn = connect_sqlite()
@@ -322,6 +417,104 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(result.status, "max_turns_exceeded")
       self.assertIn("看到的推荐内容包括", result.output["content"])
       self.assertIn("云南大理避暑很舒服", result.output["content"])
+    finally:
+      conn.close()
+
+  async def test_runner_returns_diagnostic_when_model_finishes_empty_without_tools(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(registry, PolicyEngine(), local_tools, uow_factory=uow_factory)
+      provider = MockModelProvider(
+        responses=[
+          {"finish": True, "output": {}},
+          {"finish": True, "output": {}},
+          {"finish": True, "output": {}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="帮我完成一个任务",
+        run_id="run_empty_finish",
+        scope="scope_empty_finish",
+        config=ContinuousRunnerConfig(max_turns=4),
+      )
+
+      self.assertEqual(result.status, "failed")
+      self.assertIn("没有返回可展示内容", result.output["content"])
+      self.assertEqual(result.output["diagnostics"]["type"], "empty_model_result")
+      self.assertEqual(result.output["diagnostics"]["turn"], 3)
+    finally:
+      conn.close()
+
+  async def test_runner_fallback_summarizes_browser_execute_js_structured_cards(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_browser_js_cards",
+              capability_id="atom.browser.execute_js",
+              run_id="run_browser_js_cards",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        control_workbench=ControlWorkbench(_BrowserExecuteJsFeedBackend()),
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(
+        responses=[
+          {
+            "tool_calls": [
+              {
+                "name": "browser_execute_js",
+                "input": {"target_id": "tab_feed", "code": "return extractCards()"},
+              }
+            ]
+          }
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="通过浏览器打开小红书，刷新一下获取最新推荐帖子",
+        run_id="run_browser_js_cards",
+        scope="scope_browser_js_cards",
+        config=ContinuousRunnerConfig(max_turns=1),
+      )
+
+      self.assertEqual(result.status, "max_turns_exceeded")
+      self.assertIn("已通过浏览器获取到页面推荐内容", result.output["content"])
+      self.assertIn("深圳周末咖啡地图", result.output["content"])
+      self.assertIn("夏天通勤穿搭", result.output["content"])
     finally:
       conn.close()
 
@@ -494,9 +687,187 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
       self.assertEqual(result.status, "completed")
       self.assertIn("已通过浏览器读取到页面内容", result.output["content"])
-      self.assertIn("深圳 小学英语老师 王禾溪子_百度搜索", result.output["content"])
-      self.assertIn("南外(集团)滨海小学英语科组长王禾溪子老师", result.output["content"])
+      self.assertIn("深圳 小学英语老师_百度搜索", result.output["content"])
+      self.assertIn("南外老师", result.output["content"])
       self.assertIn("https://source.example/wanghexizi", result.output["content"])
+      action_history = provider.calls[1][1].messages[-1]["content"]["action_history"]
+      self.assertEqual(len(action_history), 1)
+      self.assertIn("turn 1: browser_scan ok", action_history[0])
+      self.assertIn("target=tab_search", action_history[0])
+      self.assertIn("page=深圳 小学英语老师_百度搜索", action_history[0])
+    finally:
+      conn.close()
+
+  async def test_runner_fallback_prioritizes_browser_feed_titles(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_browser_feed_observation",
+              capability_id="atom.browser.scan",
+              run_id="run_browser_feed_observation",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        control_workbench=ControlWorkbench(_BrowserFeedObservationBackend()),
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(
+        responses=[
+          {
+            "tool_calls": [
+              {
+                "name": "browser_scan",
+                "input": {"target_id": "tab_feed"},
+              }
+            ]
+          }
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="看看推荐帖子",
+        run_id="run_browser_feed_observation",
+        scope="scope_browser_feed_observation",
+        config=ContinuousRunnerConfig(max_turns=1),
+      )
+
+      self.assertEqual(result.status, "max_turns_exceeded")
+      self.assertIn("已通过浏览器获取到页面推荐内容", result.output["content"])
+      self.assertIn("云南大理避暑很舒服", result.output["content"])
+      self.assertIn("当了三十年的班主任", result.output["content"])
+    finally:
+      conn.close()
+
+  async def test_runner_fallback_summarizes_browser_execute_js_cards(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_browser_js_cards",
+              capability_id="atom.browser.execute_js",
+              run_id="run_browser_js_cards",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        control_workbench=ControlWorkbench(_BrowserExecuteJSCardsBackend()),
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(
+        responses=[
+          {
+            "tool_calls": [
+              {
+                "name": "browser_execute_js",
+                "input": {"target_id": "tab_feed", "code": "return extractCards()"},
+              }
+            ]
+          }
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="刷新一下获取最新推荐帖子",
+        run_id="run_browser_js_cards",
+        scope="scope_browser_js_cards",
+        config=ContinuousRunnerConfig(max_turns=1),
+      )
+
+      self.assertEqual(result.status, "max_turns_exceeded")
+      self.assertIn("已通过浏览器获取到页面推荐内容", result.output["content"])
+      self.assertIn("深圳周末去哪玩", result.output["content"])
+      self.assertIn("AI 工具流整理", result.output["content"])
+    finally:
+      conn.close()
+
+  async def test_runner_finalizes_after_sufficient_browser_feed_evidence(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_browser_feed_finalize",
+              capability_id="atom.browser.scan",
+              run_id="run_browser_feed_finalize",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        control_workbench=ControlWorkbench(_BrowserRichFeedObservationBackend()),
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(
+        responses=[
+          {"tool_calls": [{"name": "browser_scan", "input": {"target_id": "tab_feed"}}]},
+          {"finish": True, "output": {"content": "已整理推荐内容。"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+        skills=list(BUILTIN_ATOMIC_SKILLS),
+      )
+
+      result = await runner.run(
+        user_message="帮我用浏览器刷新页面，看看最新推荐帖子",
+        run_id="run_browser_feed_finalize",
+        scope="scope_browser_feed_finalize",
+        config=ContinuousRunnerConfig(max_turns=4),
+      )
+
+      self.assertEqual(result.status, "completed")
+      self.assertEqual(result.output["content"], "已整理推荐内容。")
+      self.assertEqual(provider.calls[1][1].tool_schemas, [])
+      tool_result_content = provider.calls[1][1].messages[-1]["content"]
+      self.assertIn("already satisfy the user goal", tool_result_content["instruction"])
     finally:
       conn.close()
 
@@ -534,18 +905,103 @@ class _BrowserObservationBackend:
       output={
         "active_target_id": "tab_search",
         "page": {
-          "title": "深圳 小学英语老师 王禾溪子_百度搜索",
-          "url": "https://www.baidu.com/s?wd=深圳+小学英语老师+王禾溪子",
+          "title": "深圳 小学英语老师_百度搜索",
+          "url": "https://www.baidu.com/s?wd=深圳+小学英语老师",
           "visible_cards": ["课程思政 项目育人", "四年级项目式学习课例"],
           "links": [{"text": "课程思政 项目育人", "href": "https://source.example/wanghexizi"}],
           "search_results": [
             {
               "title": "课程思政 项目育人",
               "href": "https://source.example/wanghexizi",
-              "snippet": "南外(集团)滨海小学英语科组长王禾溪子老师。",
+              "snippet": "南外老师。",
             }
           ],
-          "text": "称赞王禾溪子老师课堂的亮点纷呈。南外(集团)滨海小学英语科组长王禾溪子老师。",
+          "text": "称赞老师。",
+        },
+      },
+    )
+
+
+class _BrowserFeedObservationBackend:
+  def list_targets(self, kind=None):
+    return []
+
+  async def execute(self, command):
+    return ControlResult(
+      ok=True,
+      output={
+        "active_target_id": "tab_feed",
+        "page": {
+          "title": "小红书 - 你的生活兴趣社区",
+          "url": "https://www.xiaohongshu.com/explore",
+          "feed_titles": ["云南大理避暑很舒服", "当了三十年的班主任"],
+          "visible_cards": ["《用户协议》", "登录后推荐更懂你的笔记"],
+          "text": "登录后推荐更懂你的笔记",
+        },
+      },
+    )
+
+
+class _BrowserRichFeedObservationBackend:
+  def list_targets(self, kind=None):
+    return []
+
+  async def execute(self, command):
+    return ControlResult(
+      ok=True,
+      output={
+        "active_target_id": "tab_feed",
+        "page": {
+          "title": "推荐页",
+          "url": "https://example.test/feed",
+          "feed_titles": ["第一条推荐", "第二条推荐", "第三条推荐", "第四条推荐"],
+          "visible_cards": ["第一条推荐 作者A", "第二条推荐 作者B", "第三条推荐 作者C"],
+        },
+      },
+    )
+
+
+class _BrowserExecuteJsFeedBackend:
+  def list_targets(self, kind=None):
+    return []
+
+  async def execute(self, command):
+    return ControlResult(
+      ok=True,
+      output={
+        "target_id": command.target_id,
+        "result": {
+          "data": [
+            {
+              "title": "深圳周末咖啡地图",
+              "author": "城市漫游者",
+              "url": "https://www.xiaohongshu.com/explore/a",
+            },
+            {
+              "title": "夏天通勤穿搭",
+              "author": "日常记录",
+              "metrics": {"likes": 128},
+            },
+          ]
+        },
+      },
+    )
+
+
+class _BrowserExecuteJSCardsBackend:
+  def list_targets(self, kind=None):
+    return []
+
+  async def execute(self, command):
+    return ControlResult(
+      ok=True,
+      output={
+        "target_id": command.target_id,
+        "result": {
+          "js_return": [
+            {"title": "深圳周末去哪玩", "author": "本地生活"},
+            {"title": "AI 工具流整理", "author": "效率笔记"},
+          ]
         },
       },
     )

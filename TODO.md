@@ -1,6 +1,6 @@
 # Agent Kernel Development TODO
 
-更新时间: 2026-06-08 13:14:16 CST
+更新时间: 2026-06-08 14:08:35 CST
 
 ## 当前目标
 
@@ -41,13 +41,19 @@
 - [x] 收敛日常对话应用层边界: 新增 `ModelBindingProvider` 与 `DailyAgentExecutor` 接口, `DesktopChatService` 只委托模型绑定和 Agent 执行, 不再直接构造 provider/runner；当前默认实现仍是 `ContinuousDailyAgentExecutor`, 后续替换为 workflow-backed executor。
 - [ ] 增强 Agent Runtime 多轮行动循环: 模型基于 Context/Memory/Skills 自主选择 final response、capability call、workflow call、agent delegation、MCP/tool、user input request, 并把真实结果回灌继续推理。
 - [x] 对齐 GenericAgent 的浏览器/SOP 分层: 浏览器原子能力提供 `browser_scan`/`browser_navigate`/`browser_execute_js` 和结构化页面观察, `builtin.atomic.web_research` 以 SOP 指导模型组合工具, runner 不硬编码浏览器搜索流程。
-- [x] 强化动态信息流浏览器 SOP: compact Skill index 和工具 schema 均提示模型在推荐/最新帖子/Feed 页面优先用 `browser_execute_js` 做 refresh/scroll/DOM 卡片抽取, 减少重复全页 `browser_scan`。
+- [x] 强化动态信息流浏览器 SOP: compact Skill index 和工具 schema 均提示模型在推荐/最新帖子/Feed 页面优先用 `browser_execute_js` 做 refresh/scroll/DOM 卡片抽取, 减少重复全页 `browser_scan`；探索性打开/搜索默认 `browser_navigate` 不传 `target_id` 创建归属新标签页, 避免污染用户当前页。
 - [x] 建立浏览器目标所有权/租约/作用域 MVP: `ControlWorkbench` 通过 `BrowserTargetCoordinator` 支持全量 tabs 可见、run/agent/scope active target 绑定、跨 scope 操作拒绝和短租约注解, 避免日常对话/子 Agent 并发浏览器任务互相误读或误操作。
 - [ ] 深化浏览器目标治理: 持久化 BrowserTargetOwnership/lease 事件、支持 target release/transfer/force-claim API、浏览器 lane/pool、关闭/重载 exclusive lease、UI 展示 target owner/status/action。
 - [ ] 深化浏览器页面观察与 artifact handoff: 增强主内容抽取、动态页面滚动/分页、Feed/card 结构化抽取、搜索结果候选去噪、来源页正文窗口化读取, 并把大页面内容保存为 artifact ref 而不是直接塞入 event/context。
 - [ ] 增强 Web Research SOP 执行闭环验收: 日常对话中模型能先 scan tabs, 再搜索/打开候选结果页, 至少核验多个公开来源后回答; 工具失败时能基于 SOP 自动换链接、换搜索入口或退回 HTTP。
 - [x] 增加 ContinuousAgentRunner 重复工具调用保护 MVP: 对同一 capability + 稳定输入连续重复超过阈值时返回 guard 结果, 防止模型在浏览器/HTTP 失败或标签漂移时无限循环。
-- [ ] 实现模型可见能力目录裁剪: 内置原子能力、Workflow catalog、Agent delegation catalog、MCP catalog、Workbench/control catalog、Policy/grant context 通过 Skills/Context 注入, 由模型自主决策使用。
+- [x] 对齐 GenericAgent `no_tool` 空回复处理: 模型未调用工具且空/不可展示时不再直接完成, 而是把 `[System] Blank response` 修复提示回灌重试; 连续 3 次仍空才失败退出并带 run/turn/模型结果键诊断。
+- [x] 对齐 GenericAgent 周期性无效重试提醒: 工具结果回灌中加入 action_history, 每 7/75 轮注入换策略/探测真实状态/请求用户输入提示, 不让模型无新信息循环。
+- [x] 增强浏览器工具结果兜底摘要: `browser_execute_js` 返回 `result.data`、`result.js_return` 或卡片数组时, runner 可抽取 title/text/url/author/time/metrics 生成可展示推荐/页面观察, 避免“工具做了事但最终无内容”。
+- [x] 实现 Skill-aware 模型可见工具面收敛 MVP: `SkillAwareToolSurfacePolicy` 基于用户目标和 SkillCard/recommended_tools 每轮裁剪 tool schemas, 少量显式自定义 Skill 保留, 无匹配时保守回退全量工具。
+- [x] 实现 GoalEvidenceVerifier 软完成判断 MVP: 浏览器/feed/page 观察已满足目标时, 下一轮关闭工具面并要求模型基于证据输出最终答案, 避免继续无意义工具循环。
+- [x] 增加 Meadow vs GenericAgent 自动对比脚本: `scripts/compare_agents.py` 支持统一浏览器状态、记录两边 LLM payload、工具轨迹、浏览器桥调用和分析摘要, 便于后续回归对比。
+- [ ] 深化模型可见能力目录裁剪: 将 Workflow catalog、Agent delegation catalog、MCP catalog、Workbench/control catalog、Policy/grant context 统一纳入可解释 selection ledger, 支持 embedding/model router 替换当前启发式策略。
 - [ ] 将日常对话控制对齐真实 runtime: pause/retry/clear/resume/cancel 映射到 run/task/tool-call/session 控制, 而不是只改 UI 或 chat session 状态。
 - [x] 完成桌面端基础 API: workspace 聚合、全局审批队列、tool-call 列表、live event stream 游标、scheduled task 更新/删除/触发历史、control command 执行。
 - [x] 完成桌面端壳骨架: 本地启动/连接 Python HTTP host，提供 Workspace、Approvals、Events、MCP、Scheduled Tasks、Control 基础页面。

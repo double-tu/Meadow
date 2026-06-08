@@ -48,6 +48,7 @@ from agent_kernel.agents.handoff import (
   HandoffPolicy,
   HandoffService,
 )
+from agent_kernel.agents.goal_evidence import GoalEvidenceDecision, GoalEvidenceVerifier
 from agent_kernel.agents.interaction_fabric import InteractionFabric
 from agent_kernel.agents.observer import ObserverService, RunPauseController
 from agent_kernel.agents.session import AgentSessionService, oneshot_agent_spec
@@ -55,6 +56,7 @@ from agent_kernel.agents.skills import SkillContextProvider, SkillSelector
 from agent_kernel.agents.supervisor import SupervisorService
 from agent_kernel.agents.taskboard import TaskBoardService
 from agent_kernel.agents.team import AgentPoolScheduler
+from agent_kernel.agents.tool_surface import SkillAwareToolSurfacePolicy, ToolSurfacePolicy, ToolSurfaceSelection
 from agent_kernel.agents.workspace import (
   ArtifactMergeBackend,
   FakeWorkspaceBackend,
@@ -93,6 +95,8 @@ __all__ = [
   "DeterministicDiscussionSummarizer",
   "DiscussionSummarizer",
   "FreeForAllSpeakerSelector",
+  "GoalEvidenceDecision",
+  "GoalEvidenceVerifier",
   "GroupChatService",
   "ChannelMembershipHandoffPolicy",
   "HandoffPolicy",
@@ -111,11 +115,14 @@ __all__ = [
   "SpeakerSelection",
   "SpeakerSelector",
   "SkillContextProvider",
+  "SkillAwareToolSurfacePolicy",
   "SkillSelector",
   "StdioAgentCommand",
   "StructuredStdioAgentConnector",
   "SupervisorService",
   "TaskBoardService",
+  "ToolSurfacePolicy",
+  "ToolSurfaceSelection",
   "WorkspaceBackend",
   "WorkspaceIsolationService",
   "WorkspaceMergeQueueService",

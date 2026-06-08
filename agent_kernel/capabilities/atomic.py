@@ -577,13 +577,24 @@ class AtomicCapabilityProvider:
         "browser_execute_js",
         (
           "Execute JavaScript in a browser target for precise browser control and DOM extraction. "
+          "Do not use location.href/open for first navigation of an exploratory task; use browser_navigate without target_id "
+          "so the workbench can create and own a new tab. "
           "Prefer this over repeated browser_scan when reading dynamic pages. Return compact JSON for extracted data; "
           "for feed/latest-post tasks extract visible cards with title/text/url/author/time/metrics after refresh or scroll."
         ),
         ["code"],
         {"target_id": {"type": "string"}},
       ),
-      self._schema("browser_navigate", "Navigate a browser target to a URL.", ["url"], {"target_id": {"type": "string"}}),
+      self._schema(
+        "browser_navigate",
+        (
+          "Navigate a browser target to a URL. Omit target_id for exploratory/search/open-page tasks to create a new "
+          "owned tab; pass target_id only when continuing in a tab returned by browser_navigate/browser_scan or when "
+          "the user explicitly asked to operate the current tab."
+        ),
+        ["url"],
+        {"target_id": {"type": "string"}},
+      ),
       self._schema("desktop_screenshot", "Capture a desktop target screenshot.", []),
       self._schema("desktop_click", "Click desktop coordinates.", ["x", "y"]),
       self._schema("desktop_key", "Send a desktop key or shortcut.", ["key"]),

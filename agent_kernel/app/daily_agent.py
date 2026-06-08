@@ -142,7 +142,10 @@ def assistant_content_from_runner_result(outcome: ContinuousRunnerResult) -> str
     capability_id = outcome.pending.get("capability_id")
     reason = outcome.pending.get("reason")
     return f"需要审批后才能继续执行：{capability_id or '工具调用'}。\n原因：{reason or '策略要求审批'}"
-  return assistant_content_from_runner_output(outcome.output)
+  content = assistant_content_from_runner_output(outcome.output)
+  if content != "日常 Agent 已完成运行，但没有返回可展示内容。":
+    return content
+  return _diagnostic_content_from_runner_result(outcome)
 
 
 def assistant_content_from_runner_output(output: dict[str, Any]) -> str:
@@ -158,3 +161,32 @@ def assistant_content_from_runner_output(output: dict[str, Any]) -> str:
   if output:
     return str(output)
   return "日常 Agent 已完成运行，但没有返回可展示内容。"
+
+
+def _diagnostic_content_from_runner_result(outcome: ContinuousRunnerResult) -> str:
+  if not outcome.tool_calls:
+    return (
+      "日常 Agent 没有返回可展示内容，也没有执行任何工具调用。\n"
+      f"运行 ID：{outcome.run_id}\n"
+      f"状态：{outcome.status}，轮次：{outcome.turns}。\n"
+      "这通常表示模型提前空返回，或当前工具/Skill 上下文没有触发下一步。"
+    )
+  succeeded = sum(1 for call in outcome.tool_calls if call.ok)
+  failed = len(outcome.tool_calls) - succeeded
+  lines = [
+    "日常 Agent 没有生成最终可展示回答，但留下了执行诊断：",
+    f"运行 ID：{outcome.run_id}",
+    f"状态：{outcome.status}，轮次：{outcome.turns}，工具调用：{len(outcome.tool_calls)} 次（成功 {succeeded}，失败 {failed}）。",
+  ]
+  recent = outcome.tool_calls[-5:]
+  if recent:
+    lines.append("最近工具调用：")
+    for call in recent:
+      if call.ok:
+        lines.append(f"- {call.name}: 成功")
+        continue
+      error_type = (call.error or {}).get("type") or "unknown_error"
+      message = (call.error or {}).get("message")
+      suffix = f"；{message}" if isinstance(message, str) and message.strip() else ""
+      lines.append(f"- {call.name}: 失败（{error_type}{suffix}）")
+  return "\n".join(lines)

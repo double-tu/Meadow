@@ -702,20 +702,58 @@ class BrowserLinkHTTPBackend:
       return result
     raw = result.output.get("result")
     data = raw.get("data") if isinstance(raw, dict) else raw
-    if isinstance(data, dict) and data.get("id") is not None:
+    target = self._target_from_created_tab_payload(data, url)
+    if target is None:
+      target = self._target_from_existing_sessions(url)
+    if target is not None:
       return ControlResult(
         ok=True,
         output={
-          "target_id": str(data["id"]),
-          "target": {
-            "target_id": str(data["id"]),
-            "kind": "browser",
-            "label": data.get("title") if isinstance(data.get("title"), str) else None,
-            "metadata": {"url": data.get("url") or url, "created": True},
-          },
+          "target_id": target.target_id,
+          "active_target_id": target.target_id,
+          "target": target.to_dict(),
         },
       )
     return ControlResult(ok=True, output={"result": raw})
+
+  def _target_from_created_tab_payload(self, data: object, requested_url: str) -> ControlTarget | None:
+    if isinstance(data, dict):
+      return self._target_from_tab_like(data, requested_url)
+    if not isinstance(data, list):
+      return None
+    tabs = [item for item in data if isinstance(item, dict) and item.get("id") is not None]
+    if not tabs:
+      return None
+    matching = [item for item in tabs if _browser_urls_equivalent(item.get("url"), requested_url)]
+    active_matching = [item for item in matching if item.get("active") is True]
+    selected = (active_matching or matching or [tabs[-1]])[-1]
+    return self._target_from_tab_like(selected, requested_url)
+
+  def _target_from_existing_sessions(self, requested_url: str) -> ControlTarget | None:
+    matching = [
+      target
+      for target in self.list_targets("browser")
+      if _browser_urls_equivalent(target.metadata.get("url"), requested_url)
+    ]
+    return matching[-1] if matching else None
+
+  def _target_from_tab_like(self, tab: dict[str, Any], requested_url: str) -> ControlTarget | None:
+    tab_id = tab.get("id")
+    if tab_id is None:
+      return None
+    metadata = {
+      key: value
+      for key, value in tab.items()
+      if key not in {"id", "title"} and isinstance(key, str)
+    }
+    metadata.setdefault("url", requested_url)
+    metadata["created"] = True
+    return ControlTarget(
+      target_id=str(tab_id),
+      kind="browser",
+      label=tab.get("title") if isinstance(tab.get("title"), str) else None,
+      metadata=metadata,
+    )
 
   def _post_sync_http(self, payload: dict[str, Any]) -> dict[str, Any]:
     try:
@@ -786,6 +824,24 @@ def _is_browser_extension_or_local_target(target: ControlTarget) -> bool:
     or url.startswith("http://127.0.0.1:")
     or url.startswith("http://localhost:")
   )
+
+
+def _browser_urls_equivalent(candidate: object, requested: str) -> bool:
+  if not isinstance(candidate, str):
+    return False
+  left = _normalize_browser_url(candidate)
+  right = _normalize_browser_url(requested)
+  return bool(left and right and left == right)
+
+
+def _normalize_browser_url(value: str) -> str:
+  text = value.strip()
+  if not text:
+    return ""
+  text = text.split("#", 1)[0]
+  if text.endswith("/"):
+    text = text[:-1]
+  return text
 
 
 @dataclass(slots=True)
