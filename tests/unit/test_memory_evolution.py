@@ -20,6 +20,7 @@ class MemoryEvolutionSettlementTests(unittest.TestCase):
               "candidate_id": "candidate_fact",
               "scope": "project",
               "note": "User prefers concise status updates.",
+              "evidence_summary": "User explicitly confirmed concise status updates in this run.",
             },
           )
         )
@@ -31,6 +32,7 @@ class MemoryEvolutionSettlementTests(unittest.TestCase):
               "candidate_id": "candidate_skill",
               "scope": "project",
               "note": "Workflow: inspect code, patch, then run focused tests.",
+              "evidence_summary": "The run completed inspect, patch, and focused test steps successfully.",
             },
           )
         )
@@ -47,9 +49,40 @@ class MemoryEvolutionSettlementTests(unittest.TestCase):
       self.assertEqual(len(settlements), 2)
       self.assertEqual(repeated, [])
       self.assertEqual(semantic[0].content["candidate_id"], "candidate_fact")
+      self.assertEqual(semantic[0].content["evidence_summary"], "User explicitly confirmed concise status updates in this run.")
       self.assertEqual(procedural[0].content["candidate_id"], "candidate_skill")
       self.assertEqual(semantic[0].created_by, "memory_evolution_settlement")
       self.assertIn(RuntimeEventType.MEMORY_WRITE, [event.event_type for event in events])
+    finally:
+      conn.close()
+
+  def test_settle_run_skips_unverified_candidates(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      with UnitOfWork(conn) as uow:
+        uow.events.append(
+          RuntimeEvent(
+            event_type=RuntimeEventType.MEMORY_EVOLUTION_CANDIDATE,
+            run_id="run_unverified_memory",
+            payload={
+              "candidate_id": "candidate_guess",
+              "scope": "project",
+              "note": "Maybe the user likes verbose reports.",
+            },
+          )
+        )
+
+      service = MemoryEvolutionSettlementService(uow_factory)
+      settlements = service.settle_run("run_unverified_memory")
+
+      with UnitOfWork(conn) as uow:
+        semantic = uow.memory.list_by_scope("project", memory_type="semantic")
+        procedural = uow.memory.list_by_scope("project", memory_type="procedural")
+
+      self.assertEqual(settlements, [])
+      self.assertEqual(semantic, [])
+      self.assertEqual(procedural, [])
     finally:
       conn.close()
 

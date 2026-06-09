@@ -55,6 +55,7 @@ class SkillCard(DomainModel):
   use_policy: SkillUsePolicy | None = None
   procedure_memory_ref: MemoryRef | None = None
   compiled_workflow_ref: str | None = None
+  resource_refs: list[str] = field(default_factory=list)
   examples: list[ArtifactRef] = field(default_factory=list)
 
   def __post_init__(self) -> None:
@@ -62,6 +63,17 @@ class SkillCard(DomainModel):
       self.status = SkillStatus(self.status)
     if isinstance(self.execution_mode, str):
       self.execution_mode = SkillExecutionMode(self.execution_mode)
+
+
+@dataclass(slots=True)
+class SkillResource(DomainModel):
+  resource_id: str
+  skill_id: str
+  title: str
+  content: str
+  kind: Literal["sop", "script", "template", "reference", "example"] = "sop"
+  metadata: dict[str, Any] = field(default_factory=dict)
+  created_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(slots=True)
@@ -80,4 +92,3 @@ class PlanPatch(DomainModel):
   def __post_init__(self) -> None:
     if isinstance(self.status, str):
       self.status = PlanPatchStatus(self.status)
-

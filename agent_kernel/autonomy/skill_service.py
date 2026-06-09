@@ -7,7 +7,7 @@ import re
 
 from agent_kernel.domain.agent import AgentSession
 from agent_kernel.domain.base import new_id
-from agent_kernel.domain.skill import SkillCard, SkillExecutionMode, SkillStatus
+from agent_kernel.domain.skill import SkillCard, SkillExecutionMode, SkillResource, SkillStatus
 from agent_kernel.domain.workflow import WorkflowSpec
 from agent_kernel.autonomy.workflow_library import WorkflowLibrary
 
@@ -66,6 +66,22 @@ class SkillService:
     with self._uow_factory() as uow:
       uow.autonomy.save_record("skill_card", skill.skill_id, skill)
     return skill
+
+  def save_resource(self, resource: SkillResource) -> SkillResource:
+    with self._uow_factory() as uow:
+      uow.autonomy.save_record("skill_resource", resource.resource_id, resource)
+    return resource
+
+  def get_resource(self, resource_id: str) -> SkillResource | None:
+    with self._uow_factory() as uow:
+      record = uow.autonomy.get_record("skill_resource", resource_id)
+    return SkillResource.from_dict(record) if record is not None else None
+
+  def list_resources_for_skill(self, skill_id: str) -> list[SkillResource]:
+    with self._uow_factory() as uow:
+      records = uow.autonomy.list_records("skill_resource")
+    resources = [SkillResource.from_dict(record) for record in records]
+    return [resource for resource in resources if resource.skill_id == skill_id]
 
   def activate(self, skill_id: str) -> SkillCard:
     skill = self.get(skill_id)

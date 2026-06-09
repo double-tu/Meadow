@@ -88,6 +88,7 @@ class ContinuousDailyAgentExecutor:
         uow_factory=self._uow_factory,
         memory=self._memory,
       ),
+      memory=self._memory,
       skills=active_skills,
     )
     outcome = await runner.run(

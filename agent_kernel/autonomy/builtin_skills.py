@@ -5,7 +5,15 @@ from __future__ import annotations
 from dataclasses import replace
 
 from agent_kernel.autonomy.skill_service import SkillService
-from agent_kernel.domain.skill import SkillCard, SkillExecutionMode, SkillStatus
+from agent_kernel.domain.skill import SkillCard, SkillExecutionMode, SkillResource, SkillStatus
+
+
+BROWSER_RESEARCH_SOP_RESOURCE_ID = "builtin.resource.browser_research_sop"
+MEMORY_GOVERNANCE_SOP_RESOURCE_ID = "builtin.resource.memory_governance_sop"
+PLANNING_SOP_RESOURCE_ID = "builtin.resource.planning_sop"
+DELEGATION_SOP_RESOURCE_ID = "builtin.resource.delegation_sop"
+REVIEW_SOP_RESOURCE_ID = "builtin.resource.review_sop"
+VERIFICATION_SOP_RESOURCE_ID = "builtin.resource.verification_sop"
 
 
 BUILTIN_ATOMIC_SKILLS: tuple[SkillCard, ...] = (
@@ -38,6 +46,7 @@ BUILTIN_ATOMIC_SKILLS: tuple[SkillCard, ...] = (
     status=SkillStatus.ACTIVE,
     execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
     recommended_tools=["http_request", "browser_scan", "browser_navigate", "browser_execute_js"],
+    resource_refs=[BROWSER_RESEARCH_SOP_RESOURCE_ID],
     constraints=[
       "只请求与用户目标相关的 URL。",
       "不要访问需要用户授权的私密页面，除非用户明确要求并已授权。",
@@ -151,10 +160,14 @@ BUILTIN_ATOMIC_SKILLS: tuple[SkillCard, ...] = (
     name="记忆检查点与演化埋点",
     description="记录当前任务的关键上下文、经验或后续可沉淀为记忆/Skill 的候选内容。",
     when_to_use="长任务阶段性总结、用户偏好、流程经验、可复用技巧或需要后续记忆演化埋点时使用。",
-    instructions="使用 memory_checkpoint 保存工作上下文；使用 memory_evolution_note 记录可结算的候选经验。",
+    instructions=(
+      "使用 memory_checkpoint 保存工作上下文；使用 memory_evolution_note 记录可结算的候选经验。"
+      "memory_evolution_note 必须包含 evidence_summary，且证据来自工具结果、事件、artifact 或用户确认。"
+    ),
     status=SkillStatus.ACTIVE,
     execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
     recommended_tools=["memory_checkpoint", "memory_evolution_note"],
+    resource_refs=[MEMORY_GOVERNANCE_SOP_RESOURCE_ID],
     constraints=["不要记录敏感凭据。", "只记录对后续任务有价值的压缩信息。"],
     failure_modes=["记忆服务未配置", "记录内容过泛或包含敏感信息"],
   ),
@@ -169,6 +182,162 @@ BUILTIN_ATOMIC_SKILLS: tuple[SkillCard, ...] = (
     recommended_tools=["user_input_request"],
     constraints=["问题要短且可执行。"],
     failure_modes=["用户暂未回复"],
+  ),
+  SkillCard(
+    skill_id="builtin.sop.memory_governance",
+    name="记忆治理 SOP",
+    description="治理 working、episodic、semantic、procedural memory 的写入、证据和结算边界。",
+    when_to_use="需要记录长期事实、沉淀经验、创建 SOP/Skill 或判断什么该记忆时使用。",
+    instructions=(
+      "INDEX_HINT: 长期记忆必须有 evidence_summary 或 source refs；未经执行验证的信息不要结算。"
+      f" Full SOP resource: {MEMORY_GOVERNANCE_SOP_RESOURCE_ID}"
+    ),
+    status=SkillStatus.ACTIVE,
+    execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
+    recommended_tools=["skill_resource_open", "memory_checkpoint", "memory_evolution_note", "memory_search", "memory_read"],
+    resource_refs=[MEMORY_GOVERNANCE_SOP_RESOURCE_ID],
+  ),
+  SkillCard(
+    skill_id="builtin.sop.browser_research",
+    name="浏览器研究 SOP",
+    description="通过真实浏览器、HTTP、DOM/JS 抽取和证据账本完成网页研究。",
+    when_to_use="用户要求搜索、打开网页、查看当前浏览器、研究最新/动态页面或核验证据时使用。",
+    instructions=(
+      "INDEX_HINT: 先感知 tabs，搜索页只算候选，打开来源页后才算证据；动态页面优先 JS 抽取短 JSON。"
+      f" Full SOP resource: {BROWSER_RESEARCH_SOP_RESOURCE_ID}"
+    ),
+    status=SkillStatus.ACTIVE,
+    execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
+    recommended_tools=["skill_resource_open", "browser_scan", "browser_navigate", "browser_execute_js", "http_request"],
+    resource_refs=[BROWSER_RESEARCH_SOP_RESOURCE_ID],
+  ),
+  SkillCard(
+    skill_id="builtin.sop.planning",
+    name="计划推进 SOP",
+    description="复杂任务的计划、阶段推进、失败升级、checkpoint 和收口规则。",
+    when_to_use="任务需要多步骤、跨工具、跨子任务、长时间推进或用户要求制定计划时使用。",
+    instructions=f"INDEX_HINT: 复杂任务先列目标/约束/验证门，阶段切换写 checkpoint。 Full SOP resource: {PLANNING_SOP_RESOURCE_ID}",
+    status=SkillStatus.ACTIVE,
+    execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
+    recommended_tools=["skill_resource_open", "memory_checkpoint", "code_execute", "user_input_request"],
+    resource_refs=[PLANNING_SOP_RESOURCE_ID],
+  ),
+  SkillCard(
+    skill_id="builtin.sop.delegation",
+    name="子 Agent 委派 SOP",
+    description="拆分任务、创建子 Agent/工作台、轮询状态、取消、干预和汇总结论。",
+    when_to_use="用户要求多个 Agent、并行调研、CLI 协作、工作台推进或复杂任务拆分时使用。",
+    instructions=f"INDEX_HINT: 子任务要明确输入/验收/回传格式，主 Agent 必须轮询和整合。 Full SOP resource: {DELEGATION_SOP_RESOURCE_ID}",
+    status=SkillStatus.ACTIVE,
+    execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
+    recommended_tools=["skill_resource_open", "agent_delegate", "agent_delegation_status", "agent_cancel_delegation", "workbench_create", "workbench_status"],
+    resource_refs=[DELEGATION_SOP_RESOURCE_ID],
+  ),
+  SkillCard(
+    skill_id="builtin.sop.review",
+    name="技术评审 SOP",
+    description="以发现为先的代码/架构评审流程，强调文件行号、风险、缺失测试和验证。",
+    when_to_use="用户要求 review、评审、检查改动、找 bug 或评估架构风险时使用。",
+    instructions=f"INDEX_HINT: 评审先列问题和证据，不把总结放在发现前；必须引用文件/行号。 Full SOP resource: {REVIEW_SOP_RESOURCE_ID}",
+    status=SkillStatus.ACTIVE,
+    execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
+    recommended_tools=["skill_resource_open", "workspace_read", "event_search", "code_execute"],
+    resource_refs=[REVIEW_SOP_RESOURCE_ID],
+  ),
+  SkillCard(
+    skill_id="builtin.sop.verification",
+    name="验证验收 SOP",
+    description="用工具证据、测试、事件和 artifact 判断任务是否真正完成。",
+    when_to_use="任务接近完成、需要验收、需要证明结果、或连续失败后要给出阻塞诊断时使用。",
+    instructions=f"INDEX_HINT: 最终结论必须说明证据、测试/工具结果、残留风险和下一步。 Full SOP resource: {VERIFICATION_SOP_RESOURCE_ID}",
+    status=SkillStatus.ACTIVE,
+    execution_mode=SkillExecutionMode.AGENT_INTERPRETED,
+    recommended_tools=["skill_resource_open", "code_execute", "event_search", "artifact_read", "memory_checkpoint"],
+    resource_refs=[VERIFICATION_SOP_RESOURCE_ID],
+  ),
+)
+
+
+BUILTIN_SKILL_RESOURCES: tuple[SkillResource, ...] = (
+  SkillResource(
+    resource_id=MEMORY_GOVERNANCE_SOP_RESOURCE_ID,
+    skill_id="builtin.sop.memory_governance",
+    title="Memory Governance SOP",
+    content=(
+      "Purpose: keep Meadow memory useful, auditable, and minimally polluted.\n"
+      "Rules:\n"
+      "1. No execution, no memory: semantic/procedural memory needs tool results, events, artifacts, or user-confirmed facts.\n"
+      "2. Working memory may store current goal, constraints, active IDs, failure findings, and next step.\n"
+      "3. Long-term candidates must include evidence_summary and should include source_tool_call_ids, source_event_ids, or artifact_ids when available.\n"
+      "4. Do not store secrets, volatile IDs, temporary PIDs, transient timestamps, guesses, or stale state.\n"
+      "5. Procedural memory should be short, reusable, and linked from a compact index or SkillResource.\n"
+      "6. Before finalizing memory, read/search existing memory to avoid duplicates or conflicts."
+    ),
+  ),
+  SkillResource(
+    resource_id=BROWSER_RESEARCH_SOP_RESOURCE_ID,
+    skill_id="builtin.sop.browser_research",
+    title="Browser Research SOP",
+    content=(
+      "Procedure:\n"
+      "1. Perceive current browser state with browser_scan(tabs_only=true) when browser context matters.\n"
+      "2. For exploratory navigation, use browser_navigate without target_id so Meadow owns a new tab.\n"
+      "3. Keep returned target_id for subsequent scan/execute_js calls.\n"
+      "4. Treat search result pages as candidate discovery only; open promising source pages before finalizing.\n"
+      "5. For dynamic feeds/latest posts, prefer browser_execute_js for refresh, scroll, and compact card JSON extraction: title/text/url/author/time/metrics.\n"
+      "6. Track visited sources, candidate sources, verified evidence, failures, and uncertainty.\n"
+      "7. If progress stalls, change query/source/tool, use precise DOM extraction, or report a concrete blocker."
+    ),
+  ),
+  SkillResource(
+    resource_id=PLANNING_SOP_RESOURCE_ID,
+    skill_id="builtin.sop.planning",
+    title="Planning SOP",
+    content=(
+      "Use for non-trivial tasks.\n"
+      "1. Restate objective, user constraints, success criteria, and risky assumptions.\n"
+      "2. Choose the smallest next action that creates evidence.\n"
+      "3. Write memory_checkpoint after selecting a relevant SOP, before subtask switches, and after repeated failures.\n"
+      "4. After failures: first read the error, second inspect environment state, third switch strategy or ask user.\n"
+      "5. Keep final output grounded in completed actions and verified evidence."
+    ),
+  ),
+  SkillResource(
+    resource_id=DELEGATION_SOP_RESOURCE_ID,
+    skill_id="builtin.sop.delegation",
+    title="Delegation SOP",
+    content=(
+      "1. Delegate only clear, bounded subtasks with inputs, constraints, expected output, and deadline/priority when known.\n"
+      "2. Keep parent_run_id and child task IDs in working memory.\n"
+      "3. Poll status instead of sleeping blindly; cancel or intervene when stale or misdirected.\n"
+      "4. Integrate child outputs into one parent conclusion with conflicts and gaps called out.\n"
+      "5. Ask the user if required connector IDs or authority are missing."
+    ),
+  ),
+  SkillResource(
+    resource_id=REVIEW_SOP_RESOURCE_ID,
+    skill_id="builtin.sop.review",
+    title="Technical Review SOP",
+    content=(
+      "Review stance:\n"
+      "1. Findings first, ordered by severity.\n"
+      "2. Each finding needs file/line evidence, impact, and concrete fix direction.\n"
+      "3. Prefer reading related code paths and tests before judging behavior.\n"
+      "4. Mention missing tests or residual risk after findings.\n"
+      "5. Keep summary secondary and short."
+    ),
+  ),
+  SkillResource(
+    resource_id=VERIFICATION_SOP_RESOURCE_ID,
+    skill_id="builtin.sop.verification",
+    title="Verification SOP",
+    content=(
+      "1. Define what would prove completion.\n"
+      "2. Run the narrowest meaningful tests/checks first; broaden when shared behavior changes.\n"
+      "3. Use event_search/artifact_read/tool outputs as evidence instead of relying on model belief.\n"
+      "4. If verification cannot run, state why and identify the next recoverable action.\n"
+      "5. Final answer should include result, verification performed, and remaining risk."
+    ),
   ),
 )
 
@@ -192,4 +361,6 @@ def ensure_builtin_atomic_skills(skill_service: SkillService) -> list[SkillCard]
     )
     skill_service.save(refreshed)
     ensured.append(refreshed)
+  for resource in BUILTIN_SKILL_RESOURCES:
+    skill_service.save_resource(resource)
   return ensured

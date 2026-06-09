@@ -21,7 +21,7 @@ from agent_kernel.capabilities.adapters import (
 )
 from agent_kernel.agents import AgentDelegationBroker, ConnectorTurn, FakeAgentConnector
 from agent_kernel.autonomy import SkillService
-from agent_kernel.domain import ArtifactRef, CapabilityGrant, RuntimeEvent, RuntimeEventType
+from agent_kernel.domain import ArtifactRef, CapabilityGrant, RuntimeEvent, RuntimeEventType, SkillResource
 from agent_kernel.domain.base import utc_now
 from agent_kernel.memory import MemoryFacade
 from agent_kernel.persistence import UnitOfWork, connect_sqlite
@@ -188,6 +188,7 @@ class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
     provider = AtomicCapabilityProvider()
 
     names = {schema["function"]["name"] for schema in provider.tool_schemas()}
+    schemas = {schema["function"]["name"]: schema["function"] for schema in provider.tool_schemas()}
 
     self.assertIn("http_request", names)
     self.assertIn("desktop_click", names)
@@ -197,12 +198,45 @@ class AtomicCapabilityTests(unittest.IsolatedAsyncioTestCase):
     self.assertIn("agent_delegation_status", names)
     self.assertIn("agent_cancel_delegation", names)
     self.assertIn("skill_open", names)
+    self.assertIn("skill_resource_open", names)
     self.assertIn("memory_search", names)
     self.assertIn("memory_read", names)
     self.assertIn("artifact_read", names)
     self.assertIn("event_search", names)
     self.assertIn("context_compact", names)
     self.assertIn("context_expand", names)
+    self.assertIn("evidence_summary", schemas["memory_evolution_note"]["parameters"]["required"])
+
+  async def test_memory_evolution_note_requires_evidence_summary(self) -> None:
+    provider = AtomicCapabilityProvider()
+
+    result = provider.record_memory_evolution_note({"note": "Maybe remember this."})
+
+    self.assertFalse(result.ok)
+    self.assertEqual(result.error["type"], "invalid_input")
+
+  async def test_skill_resource_open_reads_bounded_sop_resource(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      skills = SkillService(uow_factory)
+      resource = SkillResource(
+        resource_id="res_browser_sop",
+        skill_id="skill_browser",
+        title="Browser SOP",
+        content="step " * 100,
+      )
+      skills.save_resource(resource)
+      provider = AtomicCapabilityProvider(skill_service=skills)
+
+      opened = provider.open_skill_resource({"resource_id": "res_browser_sop", "max_chars": 20})
+
+      self.assertTrue(opened.ok)
+      self.assertEqual(opened.output["resource"]["resource_id"], "res_browser_sop")
+      self.assertTrue(opened.output["resource"]["truncated"])
+      self.assertTrue(opened.output["resource"]["content"].endswith("...[truncated]"))
+    finally:
+      conn.close()
 
   async def test_context_reader_tools_open_search_read_and_expand_refs(self) -> None:
     conn = connect_sqlite()

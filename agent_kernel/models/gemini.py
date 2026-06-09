@@ -36,16 +36,11 @@ class GeminiProvider:
     system_parts: list[dict[str, str]] = []
     for message in context.messages:
       role = str(message.get("role", "user"))
-      content = _content_to_text(message.get("content", ""))
       if role == "system":
+        content = _content_to_text(message.get("content", ""))
         system_parts.append({"text": content})
       else:
-        payload["contents"].append(
-          {
-            "role": "model" if role == "assistant" else "user",
-            "parts": [{"text": content}],
-          }
-        )
+        payload["contents"].append(_gemini_message(message))
     if system_parts:
       payload["systemInstruction"] = {"parts": system_parts}
     if context.tool_schemas:
@@ -67,6 +62,74 @@ def _content_to_text(content: Any) -> str:
   if isinstance(content, str):
     return content
   return json.dumps(content, ensure_ascii=False, sort_keys=True)
+
+
+def _gemini_message(message: dict[str, Any]) -> dict[str, Any]:
+  role = str(message.get("role", "user"))
+  if role == "assistant":
+    parts = _gemini_assistant_parts(message)
+    return {"role": "model", "parts": parts if parts else [{"text": ""}]}
+  if role == "tool":
+    name = message.get("name")
+    return {
+      "role": "user",
+      "parts": [
+        {
+          "functionResponse": {
+            "name": name if isinstance(name, str) and name else "",
+            "response": _gemini_tool_response(message.get("content", "")),
+          }
+        }
+      ],
+    }
+  return {"role": "user", "parts": [{"text": _content_to_text(message.get("content", ""))}]}
+
+
+def _gemini_assistant_parts(message: dict[str, Any]) -> list[dict[str, Any]]:
+  parts: list[dict[str, Any]] = []
+  content = _content_to_text(message.get("content", ""))
+  if content:
+    parts.append({"text": content})
+  tool_calls = message.get("tool_calls")
+  if isinstance(tool_calls, list):
+    for raw_call in tool_calls:
+      call = _parse_tool_call(raw_call)
+      if call is not None:
+        parts.append({"functionCall": {"name": call["name"], "args": call["input"]}})
+  return parts
+
+
+def _parse_tool_call(raw_call: Any) -> dict[str, Any] | None:
+  if not isinstance(raw_call, dict):
+    return None
+  name = raw_call.get("name")
+  payload = raw_call.get("input", raw_call.get("arguments", {}))
+  function = raw_call.get("function")
+  if isinstance(function, dict):
+    name = function.get("name", name)
+    payload = function.get("arguments", payload)
+  if isinstance(payload, str):
+    try:
+      payload = json.loads(payload)
+    except json.JSONDecodeError:
+      payload = {"value": payload}
+  if not isinstance(name, str) or not name or not isinstance(payload, dict):
+    return None
+  return {"name": name, "input": payload}
+
+
+def _gemini_tool_response(content: Any) -> dict[str, Any]:
+  if isinstance(content, dict):
+    return content
+  if isinstance(content, str):
+    try:
+      parsed = json.loads(content)
+    except json.JSONDecodeError:
+      return {"content": content}
+    if isinstance(parsed, dict):
+      return parsed
+    return {"content": parsed}
+  return {"content": content}
 
 
 def _gemini_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:

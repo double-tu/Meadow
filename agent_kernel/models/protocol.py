@@ -53,13 +53,8 @@ class ModelContextSanitizer:
     system_messages: list[dict[str, Any]] = []
     conversation: list[dict[str, Any]] = []
     for raw in messages:
-      role = str(raw.get("role") or "user").lower()
-      if role not in {"system", "user", "assistant", "tool"}:
-        role = "user"
-      content = raw.get("content", "")
-      if content is None:
-        content = ""
-      sanitized = {"role": role, "content": content}
+      sanitized = _sanitize_message(raw)
+      role = str(sanitized["role"])
       if role == "system":
         system_messages.append(sanitized)
       else:
@@ -72,6 +67,8 @@ class ModelContextSanitizer:
         merged
         and message["role"] == merged[-1]["role"]
         and message["role"] != "tool"
+        and set(message) == {"role", "content"}
+        and set(merged[-1]) == {"role", "content"}
         and isinstance(message["content"], str)
         and isinstance(merged[-1]["content"], str)
       ):
@@ -134,6 +131,7 @@ class ModelToolProtocolAdapter:
   def parse_tool_call(raw: object) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
       return None
+    call_id = raw.get("id") or raw.get("tool_call_id")
     name = raw.get("name")
     payload = raw.get("input", raw.get("arguments", {}))
     function = raw.get("function")
@@ -147,7 +145,10 @@ class ModelToolProtocolAdapter:
         payload = {"value": payload}
     if not isinstance(name, str) or not isinstance(payload, dict):
       return None
-    return {"name": name, "input": payload}
+    parsed = {"name": name, "input": payload}
+    if isinstance(call_id, str) and call_id:
+      parsed["id"] = call_id
+    return parsed
 
   def _parse_text_tool_calls(self, content: str) -> tuple[list[dict[str, Any]], str, list[ModelProtocolIssue]]:
     if not content:
@@ -180,6 +181,36 @@ def _merge_content(left: Any, right: Any) -> Any:
   if isinstance(left, str) and isinstance(right, str):
     return left + "\n" + right
   return [left, right]
+
+
+def _sanitize_message(raw: dict[str, Any]) -> dict[str, Any]:
+  role = str(raw.get("role") or "user").lower()
+  if role not in {"system", "user", "assistant", "tool"}:
+    role = "user"
+  content = raw.get("content", "")
+  if content is None and role != "assistant":
+    content = ""
+  sanitized: dict[str, Any] = {"role": role, "content": content}
+  name = raw.get("name")
+  if role in {"user", "assistant"} and isinstance(name, str) and name:
+    sanitized["name"] = name
+  if role == "assistant":
+    tool_calls = raw.get("tool_calls")
+    if isinstance(tool_calls, list):
+      normalized_calls = []
+      for call in tool_calls:
+        if isinstance(call, dict):
+          normalized_calls.append(dict(call))
+      if normalized_calls:
+        sanitized["tool_calls"] = normalized_calls
+  if role == "tool":
+    tool_call_id = raw.get("tool_call_id")
+    if isinstance(tool_call_id, str) and tool_call_id:
+      sanitized["tool_call_id"] = tool_call_id
+    name = raw.get("name")
+    if isinstance(name, str) and name:
+      sanitized["name"] = name
+  return sanitized
 
 
 def _result_content_text(result: dict[str, Any]) -> str:

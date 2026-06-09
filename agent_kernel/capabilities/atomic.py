@@ -52,6 +52,7 @@ class AtomicCapabilityIds:
   AGENT_DELEGATION_STATUS = "atom.agent.delegation_status"
   AGENT_CANCEL_DELEGATION = "atom.agent.cancel_delegation"
   SKILL_OPEN = "atom.context.skill_open"
+  SKILL_RESOURCE_OPEN = "atom.context.skill_resource_open"
   MEMORY_SEARCH = "atom.context.memory_search"
   MEMORY_READ = "atom.context.memory_read"
   ARTIFACT_READ = "atom.context.artifact_read"
@@ -117,6 +118,9 @@ class AgentDelegationTool(Protocol):
 
 class SkillReader(Protocol):
   def get(self, skill_id: str):
+    ...
+
+  def get_resource(self, resource_id: str):
     ...
 
 
@@ -333,6 +337,7 @@ class AtomicCapabilityProvider:
       "agent_delegation_status": AtomicCapabilityIds.AGENT_DELEGATION_STATUS,
       "agent_cancel_delegation": AtomicCapabilityIds.AGENT_CANCEL_DELEGATION,
       "skill_open": AtomicCapabilityIds.SKILL_OPEN,
+      "skill_resource_open": AtomicCapabilityIds.SKILL_RESOURCE_OPEN,
       "memory_search": AtomicCapabilityIds.MEMORY_SEARCH,
       "memory_read": AtomicCapabilityIds.MEMORY_READ,
       "artifact_read": AtomicCapabilityIds.ARTIFACT_READ,
@@ -359,6 +364,7 @@ class AtomicCapabilityProvider:
     local_tools.register(AtomicCapabilityIds.AGENT_DELEGATION_STATUS, self.get_delegation_status)
     local_tools.register(AtomicCapabilityIds.AGENT_CANCEL_DELEGATION, self.cancel_delegation)
     local_tools.register(AtomicCapabilityIds.SKILL_OPEN, self.open_skill)
+    local_tools.register(AtomicCapabilityIds.SKILL_RESOURCE_OPEN, self.open_skill_resource)
     local_tools.register(AtomicCapabilityIds.MEMORY_SEARCH, self.search_memory)
     local_tools.register(AtomicCapabilityIds.MEMORY_READ, self.read_memory)
     local_tools.register(AtomicCapabilityIds.ARTIFACT_READ, self.read_artifact)
@@ -519,6 +525,7 @@ class AtomicCapabilityProvider:
         )
         for capability_id, name in [
           (AtomicCapabilityIds.SKILL_OPEN, "Open skill details"),
+          (AtomicCapabilityIds.SKILL_RESOURCE_OPEN, "Open skill resource"),
           (AtomicCapabilityIds.MEMORY_SEARCH, "Search memory"),
           (AtomicCapabilityIds.MEMORY_READ, "Read memory"),
           (AtomicCapabilityIds.ARTIFACT_READ, "Read artifact metadata"),
@@ -612,8 +619,21 @@ class AtomicCapabilityProvider:
       self._schema("memory_checkpoint", "Persist compact working context for the current task.", ["key_info"]),
       self._schema(
         "memory_evolution_note",
-        "Record a candidate fact, lesson, or skill for later memory evolution.",
-        ["note"],
+        (
+          "Record a candidate fact, lesson, or skill for later memory evolution. "
+          "Requires evidence_summary from real tool results, events, artifacts, or user-confirmed facts; "
+          "do not record guesses or unverified conclusions."
+        ),
+        ["note", "evidence_summary"],
+        {
+          "evidence_summary": {"type": "string"},
+          "source_tool_call_ids": {"type": "array", "items": {"type": "string"}},
+          "source_event_ids": {"type": "array", "items": {"type": "string"}},
+          "artifact_ids": {"type": "array", "items": {"type": "string"}},
+          "memory_type": {"type": "string", "enum": ["semantic", "procedural"]},
+          "importance": {"type": "number"},
+          "confidence": {"type": "number"},
+        },
       ),
       self._schema("user_input_request", "Pause the loop and request user input.", ["question"]),
       self._schema(
@@ -657,6 +677,15 @@ class AtomicCapabilityProvider:
         {
           "skill_id": {"type": "string"},
           "detail_level": {"type": "string", "enum": ["card", "spec"]},
+        },
+      ),
+      self._schema(
+        "skill_resource_open",
+        "Open one SkillResource such as a SOP, script, template, reference, or example by resource_id.",
+        ["resource_id"],
+        {
+          "resource_id": {"type": "string"},
+          "max_chars": {"type": "integer"},
         },
       ),
       self._schema(
@@ -942,6 +971,9 @@ class AtomicCapabilityProvider:
     note = self._required_string(input, "note")
     if isinstance(note, ToolResult):
       return note
+    evidence_summary = self._required_string(input, "evidence_summary")
+    if isinstance(evidence_summary, ToolResult):
+      return evidence_summary
     run_id = str(input.get("run_id") or "unknown_run")
     event = RuntimeEvent(
       event_type=RuntimeEventType.MEMORY_EVOLUTION_CANDIDATE,
@@ -950,6 +982,13 @@ class AtomicCapabilityProvider:
         "candidate_id": new_id("memory_candidate"),
         "scope": input.get("scope"),
         "note": note,
+        "evidence_summary": evidence_summary,
+        "source_tool_call_ids": _string_list(input.get("source_tool_call_ids")),
+        "source_event_ids": _string_list(input.get("source_event_ids")),
+        "artifact_ids": _string_list(input.get("artifact_ids")),
+        "memory_type": self._optional_string(input.get("memory_type")),
+        "importance": input.get("importance"),
+        "confidence": input.get("confidence"),
         "source": "atomic_capability",
         "status": "pending",
       },
@@ -1069,6 +1108,24 @@ class AtomicCapabilityProvider:
         ]
       }
     return ToolResult.success({"skill": data})
+
+  def open_skill_resource(self, input: dict[str, Any]) -> ToolResult:
+    if self._skill_service is None:
+      return ToolResult.failure("adapter_not_configured", "Skill service is not configured.")
+    resource_id = self._required_string(input, "resource_id")
+    if isinstance(resource_id, ToolResult):
+      return resource_id
+    resource = self._skill_service.get_resource(resource_id)
+    if resource is None:
+      return ToolResult.failure("not_found", f"Skill resource not found: {resource_id}")
+    max_chars = _positive_int(input.get("max_chars"), default=8000, maximum=20000)
+    data = resource.to_dict()
+    content = data.get("content")
+    if isinstance(content, str) and len(content) > max_chars:
+      data["content"] = content[:max_chars] + "...[truncated]"
+      data["truncated"] = True
+      data["original_chars"] = len(content)
+    return ToolResult.success({"resource": data})
 
   def search_memory(self, input: dict[str, Any]) -> ToolResult:
     if self._memory is None:
@@ -1415,7 +1472,7 @@ class AtomicCapabilityProvider:
     required: list[str],
     extra_properties: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
-    properties: dict[str, Any] = {
+    known_properties: dict[str, Any] = {
       "path": {"type": "string"},
       "content": {"type": "string"},
       "old_text": {"type": "string"},
@@ -1436,6 +1493,10 @@ class AtomicCapabilityProvider:
       "candidates": {"type": "array", "items": {"type": "string"}},
       "target_id": {"type": "string"},
       "scope": {"type": "string"},
+    }
+    properties: dict[str, Any] = {
+      key: known_properties.get(key, {"type": "string"})
+      for key in required
     }
     properties.update(extra_properties or {})
     return {

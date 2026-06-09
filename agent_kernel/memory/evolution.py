@@ -49,6 +49,8 @@ class MemoryEvolutionSettlementService:
     for event in events:
       if event.event_type is not RuntimeEventType.MEMORY_EVOLUTION_CANDIDATE:
         continue
+      if not self._has_evidence(event.payload):
+        continue
       candidate_scope = self._candidate_scope(event, run_id=run_id, override_scope=scope)
       if self._already_settled(candidate_scope, event.event_id):
         continue
@@ -78,6 +80,10 @@ class MemoryEvolutionSettlementService:
     content = {
       "kind": "memory_evolution_settlement",
       "note": note,
+      "evidence_summary": event.payload.get("evidence_summary"),
+      "source_tool_call_ids": _string_list(event.payload.get("source_tool_call_ids")),
+      "source_event_ids": _string_list(event.payload.get("source_event_ids")),
+      "artifact_ids": _string_list(event.payload.get("artifact_ids")),
       "candidate_id": event.payload.get("candidate_id"),
       "source_run_id": event.run_id,
       "source": event.payload.get("source", "memory_evolution_candidate"),
@@ -148,3 +154,20 @@ class MemoryEvolutionSettlementService:
     if any(marker in note for marker in ("sop", "workflow", "procedure", "skill")):
       return "procedural"
     return "semantic"
+
+  @staticmethod
+  def _has_evidence(payload: dict[str, Any]) -> bool:
+    evidence = payload.get("evidence_summary")
+    if isinstance(evidence, str) and evidence.strip():
+      return True
+    for key in ("source_tool_call_ids", "source_event_ids", "artifact_ids"):
+      values = payload.get(key)
+      if isinstance(values, list) and any(isinstance(value, str) and value.strip() for value in values):
+        return True
+    return False
+
+
+def _string_list(value: object) -> list[str]:
+  if not isinstance(value, list):
+    return []
+  return [item for item in value if isinstance(item, str) and item]

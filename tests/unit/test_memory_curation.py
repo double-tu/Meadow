@@ -56,6 +56,7 @@ class MemoryCurationTests(unittest.TestCase):
               "candidate_id": "candidate_weather_pref",
               "scope": "chat_curate",
               "note": "User prefers weather answers in Chinese.",
+              "evidence_summary": "TOOL_CALL_COMPLETED event reported browser_scan found Shenzhen weather.",
             },
           )
         )

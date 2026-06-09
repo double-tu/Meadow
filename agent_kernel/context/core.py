@@ -100,7 +100,7 @@ def default_core_agent_context() -> CoreAgentContext:
     ),
     progressive_disclosure=(
       "The default context contains compact SkillCard and capability indexes, not full SOP bodies.",
-      "When a task needs procedure details, call skill_open or context_expand before executing the SOP.",
+      "When a task needs procedure details, call skill_open, skill_resource_open, or context_expand before executing the SOP.",
       "Open artifact, event, memory, or Skill resources only when the compact index is insufficient.",
     ),
     working_memory_rules=(
@@ -118,21 +118,21 @@ def default_core_agent_context() -> CoreAgentContext:
         topic="web_research_and_browser",
         triggers=("搜索", "今天/当前/最近", "打开网页", "浏览器", "小红书", "天气", "新闻"),
         skill_ids=("builtin.atomic.web_research", "builtin.atomic.desktop_mobile_control"),
-        tools=("skill_open", "browser_scan", "browser_navigate", "browser_execute_js", "http_request"),
+        tools=("skill_open", "skill_resource_open", "browser_scan", "browser_navigate", "browser_execute_js", "http_request"),
         resources=("builtin.sop.browser_research",),
       ),
       CapabilityNavigationEntry(
         topic="multi_agent_collaboration",
         triggers=("多个agent", "并行搜索", "群聊", "CLI协作", "技术评审工作台", "持续任务"),
         skill_ids=("builtin.atomic.collaboration_workbench", "builtin.atomic.agent_delegation"),
-        tools=("skill_open", "workbench_create", "workbench_status", "workbench_message", "agent_delegate"),
+        tools=("skill_open", "skill_resource_open", "workbench_create", "workbench_status", "workbench_message", "agent_delegate"),
         resources=("builtin.sop.delegation",),
       ),
       CapabilityNavigationEntry(
         topic="planning_and_verification",
         triggers=("复杂任务", "多步骤", "计划", "验收", "验证", "端到端"),
         skill_ids=("builtin.atomic.code_execution",),
-        tools=("skill_open", "memory_checkpoint", "code_execute", "user_input_request"),
+        tools=("skill_open", "skill_resource_open", "memory_checkpoint", "code_execute", "user_input_request"),
         resources=("builtin.sop.planning", "builtin.sop.verification"),
       ),
       CapabilityNavigationEntry(
@@ -146,7 +146,7 @@ def default_core_agent_context() -> CoreAgentContext:
         topic="memory_and_skill_evolution",
         triggers=("记忆", "经验", "沉淀", "skill", "SOP", "上下文"),
         skill_ids=("builtin.atomic.memory_checkpoint",),
-        tools=("skill_open", "memory_checkpoint", "memory_evolution_note", "memory_search", "memory_read"),
+        tools=("skill_open", "skill_resource_open", "memory_checkpoint", "memory_evolution_note", "memory_search", "memory_read"),
         resources=("builtin.sop.memory_governance",),
       ),
       CapabilityNavigationEntry(

@@ -53,6 +53,49 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(context.messages[1], {"role": "user", "content": "first user\nsecond user"})
     self.assertEqual(context.messages[2], {"role": "assistant", "content": "answer\nmore"})
 
+  def test_model_context_sanitizer_preserves_standard_tool_transcript_fields(self) -> None:
+    sanitizer = ModelContextSanitizer()
+
+    context = sanitizer.sanitize(
+      ModelContext(
+        messages=[
+          {"role": "user", "content": "read file"},
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "workspace_read", "arguments": '{"path":"a.txt"}'},
+              }
+            ],
+          },
+          {"role": "tool", "tool_call_id": "call_1", "name": "workspace_read", "content": '{"ok":true}'},
+        ]
+      )
+    )
+
+    self.assertEqual(context.messages[1]["tool_calls"][0]["id"], "call_1")
+    self.assertEqual(context.messages[2]["tool_call_id"], "call_1")
+    self.assertEqual(context.messages[2]["name"], "workspace_read")
+
+  def test_model_context_sanitizer_keeps_named_context_user_separate(self) -> None:
+    sanitizer = ModelContextSanitizer()
+
+    context = sanitizer.sanitize(
+      ModelContext(
+        messages=[
+          {"role": "system", "content": "rules"},
+          {"role": "user", "name": "context", "content": "retrieved context"},
+          {"role": "user", "content": "actual user request"},
+        ]
+      )
+    )
+
+    self.assertEqual(context.messages[1], {"role": "user", "name": "context", "content": "retrieved context"})
+    self.assertEqual(context.messages[2], {"role": "user", "content": "actual user request"})
+
   def test_model_tool_protocol_adapter_parses_text_tool_use_blocks(self) -> None:
     adapter = ModelToolProtocolAdapter()
 
@@ -115,7 +158,7 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
 
     result = await provider.complete(
       "model-a",
-      ModelContext(messages=[{"role": "user", "content": {"question": "hi"}}]),
+      ModelContext(messages=[{"role": "user", "name": "context", "content": {"question": "hi"}}]),
     )
 
     self.assertEqual(result["content"], "real response")
@@ -123,6 +166,7 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(calls[0][0], "https://llm.example/v1/chat/completions")
     self.assertEqual(calls[0][1]["Authorization"], "Bearer key")
     self.assertEqual(calls[0][2]["model"], "model-a")
+    self.assertEqual(calls[0][2]["messages"][0]["name"], "context")
     self.assertEqual(calls[0][2]["messages"][0]["content"], '{"question": "hi"}')
     self.assertEqual(calls[0][3], 7)
 
@@ -172,6 +216,41 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(calls[0]["tools"][0]["function"]["name"], "http_request")
     self.assertEqual(result["tool_calls"][0]["function"]["name"], "http_request")
 
+  async def test_openai_compatible_provider_preserves_tool_transcript_payload(self) -> None:
+    calls = []
+
+    def transport(url, headers, payload, timeout_seconds):
+      calls.append(payload)
+      return {"choices": [{"message": {"content": "done"}}]}
+
+    provider = OpenAICompatibleProvider(api_key="key", transport=transport)
+
+    await provider.complete(
+      "model-tools",
+      ModelContext(
+        messages=[
+          {"role": "user", "content": "read file"},
+          {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "workspace_read", "arguments": '{"path":"a.txt"}'},
+              }
+            ],
+          },
+          {"role": "tool", "tool_call_id": "call_1", "name": "workspace_read", "content": '{"ok":true}'},
+        ]
+      ),
+    )
+
+    self.assertIsNone(calls[0]["messages"][1]["content"])
+    self.assertEqual(calls[0]["messages"][1]["tool_calls"][0]["id"], "call_1")
+    self.assertEqual(calls[0]["messages"][2]["tool_call_id"], "call_1")
+    self.assertEqual(calls[0]["messages"][2]["name"], "workspace_read")
+
   async def test_gemini_provider_maps_tools_and_function_calls(self) -> None:
     calls = []
 
@@ -213,6 +292,43 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result["tool_calls"][0]["input"], {"tabs_only": True})
     self.assertEqual(result["usage"], {"totalTokenCount": 8})
 
+  async def test_gemini_provider_maps_standard_tool_transcript_to_function_parts(self) -> None:
+    calls = []
+
+    def transport(url, headers, payload, timeout_seconds):
+      calls.append(payload)
+      return {"candidates": [{"content": {"parts": [{"text": "done"}]}}]}
+
+    provider = GeminiProvider(api_key="gemini-key", transport=transport)
+
+    await provider.complete(
+      "gemini-2.5-pro",
+      ModelContext(
+        messages=[
+          {"role": "user", "content": "read file"},
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "workspace_read", "arguments": '{"path":"a.txt"}'},
+              }
+            ],
+          },
+          {"role": "tool", "tool_call_id": "call_1", "name": "workspace_read", "content": '{"ok":true}'},
+        ]
+      ),
+    )
+
+    self.assertEqual(calls[0]["contents"][1]["role"], "model")
+    self.assertEqual(calls[0]["contents"][1]["parts"][0]["functionCall"]["name"], "workspace_read")
+    self.assertEqual(calls[0]["contents"][1]["parts"][0]["functionCall"]["args"], {"path": "a.txt"})
+    self.assertEqual(calls[0]["contents"][2]["role"], "user")
+    self.assertEqual(calls[0]["contents"][2]["parts"][0]["functionResponse"]["name"], "workspace_read")
+    self.assertEqual(calls[0]["contents"][2]["parts"][0]["functionResponse"]["response"], {"ok": True})
+
   async def test_anthropic_provider_maps_tools_and_tool_use(self) -> None:
     calls = []
 
@@ -247,6 +363,45 @@ class ModelsAndToolsTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result["tool_calls"][0]["name"], "task_status")
     self.assertEqual(result["tool_calls"][0]["input"], {"run_id": "run_1"})
     self.assertEqual(result["content"], "done")
+
+  async def test_anthropic_provider_maps_standard_tool_transcript_to_blocks(self) -> None:
+    calls = []
+
+    def transport(url, headers, payload, timeout_seconds):
+      calls.append(payload)
+      return {"content": [{"type": "text", "text": "done"}]}
+
+    provider = AnthropicMessagesProvider(api_key="anthropic-key", transport=transport)
+
+    await provider.complete(
+      "claude-sonnet-4",
+      ModelContext(
+        messages=[
+          {"role": "user", "content": "read file"},
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "workspace_read", "arguments": '{"path":"a.txt"}'},
+              }
+            ],
+          },
+          {"role": "tool", "tool_call_id": "call_1", "name": "workspace_read", "content": '{"ok":true}'},
+        ]
+      ),
+    )
+
+    self.assertEqual(calls[0]["messages"][1]["role"], "assistant")
+    self.assertEqual(calls[0]["messages"][1]["content"][0]["type"], "tool_use")
+    self.assertEqual(calls[0]["messages"][1]["content"][0]["id"], "call_1")
+    self.assertEqual(calls[0]["messages"][1]["content"][0]["name"], "workspace_read")
+    self.assertEqual(calls[0]["messages"][1]["content"][0]["input"], {"path": "a.txt"})
+    self.assertEqual(calls[0]["messages"][2]["role"], "user")
+    self.assertEqual(calls[0]["messages"][2]["content"][0]["type"], "tool_result")
+    self.assertEqual(calls[0]["messages"][2]["content"][0]["tool_use_id"], "call_1")
 
   def test_llm_config_reads_environment(self) -> None:
     with mock.patch.dict(

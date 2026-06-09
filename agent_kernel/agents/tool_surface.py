@@ -41,6 +41,7 @@ class SkillAwareToolSurfacePolicy:
   _CORE_CONTEXT_TOOLS = {
     "user_input_request",
     "skill_open",
+    "skill_resource_open",
     "memory_search",
     "memory_read",
     "artifact_read",

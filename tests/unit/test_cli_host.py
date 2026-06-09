@@ -334,6 +334,7 @@ class CliHostTests(unittest.TestCase):
               payload={
                 "candidate_id": "candidate_cli",
                 "note": "SOP: run focused tests after connector changes.",
+                "evidence_summary": "Connector change run completed and focused tests were run successfully.",
               },
             )
           )
@@ -352,6 +353,50 @@ class CliHostTests(unittest.TestCase):
     self.assertTrue(payload["ok"])
     self.assertEqual(payload["settlements"][0]["candidate_id"], "candidate_cli")
     self.assertEqual(memories[0].content["candidate_id"], "candidate_cli")
+
+  def test_curate_memory_command_writes_episode_and_settles_verified_candidate(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      db = str(Path(tmp) / "kernel.sqlite")
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          uow.events.append(
+            RuntimeEvent(
+              event_type=RuntimeEventType.TOOL_CALL_COMPLETED,
+              run_id="run_curate_cli",
+              payload={"summary": "workspace_patch succeeded"},
+            )
+          )
+          uow.events.append(
+            RuntimeEvent(
+              event_type=RuntimeEventType.MEMORY_EVOLUTION_CANDIDATE,
+              run_id="run_curate_cli",
+              payload={
+                "candidate_id": "candidate_curate_cli",
+                "scope": "project_cli",
+                "note": "SOP: patch unique text and then run focused tests.",
+                "evidence_summary": "workspace_patch succeeded in this run.",
+              },
+            )
+          )
+      finally:
+        conn.close()
+
+      payload = self._run_cli(["--db", db, "curate-memory", "run_curate_cli", "--scope", "project_cli"])
+
+      conn = connect_sqlite(db)
+      try:
+        with unit_of_work_factory(conn)() as uow:
+          episodes = uow.memory.list_by_scope("project_cli", memory_type="episodic")
+          procedures = uow.memory.list_by_scope("project_cli", memory_type="procedural")
+      finally:
+        conn.close()
+
+    self.assertTrue(payload["ok"])
+    self.assertIsNotNone(payload["episodic_memory_id"])
+    self.assertEqual(payload["settlements"][0]["candidate_id"], "candidate_curate_cli")
+    self.assertEqual(episodes[0].content["kind"], "run_event_summary")
+    self.assertEqual(procedures[0].content["candidate_id"], "candidate_curate_cli")
 
   def test_recover_delegations_command_marks_orphaned_running_failed(self) -> None:
     with tempfile.TemporaryDirectory() as tmp:

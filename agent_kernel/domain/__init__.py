@@ -60,6 +60,7 @@ from agent_kernel.domain.skill import (
   PlanPatchStatus,
   SkillCard,
   SkillExecutionMode,
+  SkillResource,
   SkillStatus,
   SkillUsePolicy,
 )
@@ -186,6 +187,7 @@ __all__ = [
   "SkillCard",
   "SkillExecutionMode",
   "SkillEvolutionRecord",
+  "SkillResource",
   "SkillStatus",
   "SkillUsePolicy",
   "Task",

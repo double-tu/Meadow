@@ -49,12 +49,29 @@ class OpenAICompatibleProvider:
     return _parse_chat_completion_response(response)
 
 
-def _normalize_message(message: dict[str, Any]) -> dict[str, str]:
+def _normalize_message(message: dict[str, Any]) -> dict[str, Any]:
   role = str(message.get("role", "user"))
   content = message.get("content", "")
-  if not isinstance(content, str):
+  normalized: dict[str, Any] = {"role": role}
+  if content is None and role == "assistant" and isinstance(message.get("tool_calls"), list):
+    normalized["content"] = None
+  elif not isinstance(content, str):
     content = json.dumps(content, ensure_ascii=False, sort_keys=True)
-  return {"role": role, "content": content}
+    normalized["content"] = content
+  else:
+    normalized["content"] = content
+  name = message.get("name")
+  if role in {"user", "assistant", "tool"} and isinstance(name, str) and name:
+    normalized["name"] = name
+  if role == "assistant":
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+      normalized["tool_calls"] = tool_calls
+  if role == "tool":
+    tool_call_id = message.get("tool_call_id")
+    if isinstance(tool_call_id, str) and tool_call_id:
+      normalized["tool_call_id"] = tool_call_id
+  return normalized
 
 
 def _parse_chat_completion_response(response: dict[str, Any]) -> dict[str, object]:
@@ -68,7 +85,9 @@ def _parse_chat_completion_response(response: dict[str, Any]) -> dict[str, objec
   if not isinstance(message, dict):
     raise ValueError("LLM response choice missing message.")
   content = message.get("content", "")
-  if not isinstance(content, str):
+  if content is None:
+    content = ""
+  elif not isinstance(content, str):
     content = json.dumps(content, ensure_ascii=False, sort_keys=True)
   parsed: dict[str, object] = {"content": content}
   tool_calls = message.get("tool_calls")

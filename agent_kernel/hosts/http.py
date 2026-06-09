@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from agent_kernel.agents import AgentDelegationBroker, ProductCLIConnectorFactory, load_product_cli_connector_specs
 from agent_kernel.app.collaboration_workbench import CollaborationWorkbenchService
+from agent_kernel.app.memory_curator import MemoryCurator
 from agent_kernel.app.tool_call_control import ToolCallControlOutcome, ToolCallControlService
 from agent_kernel.app.config_center import ConfigCenterService
 from agent_kernel.app.conversation_task_hub import ConversationTaskHub
@@ -234,6 +235,29 @@ class HTTPHost:
     if artifact is None:
       raise KeyError(f"Artifact not found: {artifact_id}")
     return ok_response(artifact=artifact.to_dict(), metadata=metadata or {})
+
+  def curate_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
+    run_id = _required_str(payload.get("run_id"), "run_id")
+    report = MemoryCurator(self._uow_factory).curate_run(
+      run_id,
+      scope=_optional_str(payload.get("scope")),
+    )
+    return ok_response(
+      run_id=report.run_id,
+      scope=report.scope,
+      episodic_memory_id=report.episodic_memory_id,
+      settlements=[
+        {
+          "candidate_id": item.candidate_id,
+          "source_event_id": item.source_event_id,
+          "memory_id": item.memory_id,
+          "memory_type": item.memory_type,
+          "scope": item.scope,
+          "decision": item.decision,
+        }
+        for item in report.settlements
+      ],
+    )
 
   def cancel_run(self, run_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     reason = str((payload or {}).get("reason") or "user requested cancel")
@@ -636,6 +660,9 @@ def make_handler(host: HTTPHost) -> type[BaseHTTPRequestHandler]:
         if len(segments) == 1 and segments[0] == "tasks":
           response = asyncio.run(host.create_task(payload))
           self._write_json(HTTPStatus.CREATED, response)
+          return
+        if len(segments) == 2 and segments[0] == "memory" and segments[1] == "curate-run":
+          self._write_json(HTTPStatus.OK, host.curate_memory(payload))
           return
         if len(segments) == 2 and segments[0] == "chat" and segments[1] == "sessions":
           self._write_json(HTTPStatus.CREATED, host.create_chat_session(payload))

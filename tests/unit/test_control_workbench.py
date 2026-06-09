@@ -240,6 +240,39 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.output["active_target_id"], "tab_new")
     self.assertEqual(result.output["target"]["metadata"]["url"], "https://meadow.example/explore")
 
+  async def test_browser_link_http_backend_create_tab_confirms_delayed_session_match(self) -> None:
+    transport = _BrowserLinkDelayedCreateTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=1)
+
+    result = await backend.execute(
+      ControlCommand.create("browser", "navigate", target_id=None, payload={"url": "https://meadow.example/explore"})
+    )
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["target_id"], "tab_new")
+    session_requests = [request for request in transport.requests if request.get("cmd") == "get_all_sessions"]
+    self.assertGreaterEqual(len(session_requests), 2)
+
+  async def test_browser_link_http_backend_create_tab_reuses_same_origin_target_when_create_returns_tabs(self) -> None:
+    transport = _BrowserLinkSameOriginFallbackTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=1)
+
+    result = await backend.execute(
+      ControlCommand.create(
+        "browser",
+        "navigate",
+        target_id=None,
+        payload={"url": "https://www.google.com/search?q=immersive+translate"},
+      )
+    )
+
+    self.assertTrue(result.ok)
+    self.assertEqual(result.output["target_id"], "tab_google")
+    self.assertTrue(result.output["reused_existing_target"])
+    self.assertEqual(transport.requests[-1]["cmd"], "execute_js")
+    self.assertEqual(transport.requests[-1]["sessionId"], "tab_google")
+    self.assertIn("immersive+translate", transport.requests[-1]["code"])
+
   async def test_browser_link_http_backend_create_tab_does_not_claim_unmatched_existing_tab(self) -> None:
     transport = _BrowserLinkMismatchedTabsTransport()
     backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
@@ -797,6 +830,61 @@ class _BrowserLinkTabsListTransport:
               "data": [
                 {"id": "tab_old", "url": "https://old.example", "title": "Old", "active": False},
                 {"id": "tab_new", "url": command["url"], "title": "Created", "active": True},
+              ]
+            }
+          }
+      return {"r": {"data": "ok"}}
+    return {"r": {"error": "unsupported"}}
+
+
+class _BrowserLinkDelayedCreateTransport:
+  def __init__(self) -> None:
+    self.requests: list[dict[str, object]] = []
+    self._session_reads = 0
+
+  def post_json(self, payload: dict[str, object]) -> dict[str, object]:
+    self.requests.append(payload)
+    if payload.get("cmd") == "get_all_sessions":
+      self._session_reads += 1
+      if self._session_reads == 1:
+        return {"r": [{"id": "tab_old", "url": "https://old.example", "title": "Old", "type": "ext_ws"}]}
+      return {
+        "r": [
+          {"id": "tab_old", "url": "https://old.example", "title": "Old", "type": "ext_ws"},
+          {"id": "tab_new", "url": "https://meadow.example/explore", "title": "Created", "type": "ext_ws"},
+        ]
+      }
+    if payload.get("cmd") == "execute_js":
+      return {"r": {"data": "accepted"}}
+    return {"r": {"error": "unsupported"}}
+
+
+class _BrowserLinkSameOriginFallbackTransport:
+  def __init__(self) -> None:
+    self.requests: list[dict[str, object]] = []
+
+  def post_json(self, payload: dict[str, object]) -> dict[str, object]:
+    self.requests.append(payload)
+    if payload.get("cmd") == "get_all_sessions":
+      return {
+        "r": [
+          {"id": "tab_old", "url": "https://old.example", "title": "Old", "type": "ext_ws"},
+          {"id": "tab_google", "url": "https://www.google.com/search?q=old", "title": "Google", "type": "ext_ws"},
+        ]
+      }
+    if payload.get("cmd") == "execute_js":
+      code = payload.get("code")
+      if isinstance(code, str):
+        try:
+          command = json.loads(code)
+        except json.JSONDecodeError:
+          command = None
+        if isinstance(command, dict) and command.get("cmd") == "tabs" and command.get("method") == "create":
+          return {
+            "r": {
+              "data": [
+                {"id": "tab_old", "url": "https://old.example", "title": "Old", "active": False},
+                {"id": "tab_google", "url": "https://www.google.com/search?q=old", "title": "Google", "active": True},
               ]
             }
           }

@@ -1,4 +1,5 @@
 from datetime import timedelta
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -97,7 +98,10 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
               "tool_calls": [
                 {
                   "name": "memory_evolution_note",
-                  "input": {"note": "When editing text files, use unique replacement patches."},
+                  "input": {
+                    "note": "When editing text files, use unique replacement patches.",
+                    "evidence_summary": "workspace_patch succeeded after workspace_write created note.txt.",
+                  },
                 }
               ]
             },
@@ -204,16 +208,27 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.output["summary"], "large output handled")
-        self.assertTrue(result.tool_calls[0].output["content"].startswith("x"))
-        tool_result_message = provider.calls[1][1].messages[-1]["content"]["results"][0]["output"]
-        self.assertTrue(tool_result_message["_truncated"])
+        self.assertTrue(result.tool_calls[0].output["_artifactized"])
+        artifact_id = result.tool_calls[0].output["artifact_id"]
+        tool_result_messages = [
+          message
+          for message in provider.calls[1][1].messages
+          if message.get("role") == "tool"
+        ]
+        tool_result_message = json.loads(tool_result_messages[-1]["content"])["output"]
+        self.assertTrue(tool_result_message["_artifactized"])
+        self.assertEqual(tool_result_message["artifact_id"], artifact_id)
         with UnitOfWork(conn) as uow:
+          artifact = uow.artifacts.get(artifact_id)
+          artifact_metadata = uow.artifacts.get_metadata(artifact_id)
           events = [
             event
             for event in uow.events.list_by_run("run_large_tool_result")
             if event.event_type == RuntimeEventType.AGENT_TURN_COMPLETED
           ]
-        self.assertTrue(events[0].payload["output"]["tool_results"][0]["output"]["_truncated"])
+        self.assertIsNotNone(artifact)
+        self.assertIn('"content"', artifact_metadata["content"])
+        self.assertTrue(events[0].payload["output"]["tool_results"][0]["output"]["_artifactized"])
       finally:
         conn.close()
 
@@ -282,12 +297,82 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(anchor_messages)
         self.assertEqual(anchor_messages[-1]["content"]["original_user_goal"], "打开小红书并查看推送内容")
         self.assertIn("turn 1: workspace_read ok", anchor_messages[-1]["content"]["action_history"])
-        self.assertEqual(second_messages[-2]["content"], "打开小红书并查看推送内容")
-        tool_result_content = second_messages[-1]["content"]
-        self.assertEqual(tool_result_content["original_user_goal"], "打开小红书并查看推送内容")
-        self.assertEqual(tool_result_content["action_history"], ["turn 1: workspace_read ok"])
-        self.assertIn("Continue working on original_user_goal", tool_result_content["instruction"])
-        self.assertIn("avoid repeating failed or already-completed steps", tool_result_content["instruction"])
+        self.assertEqual(second_messages[-4]["content"], "打开小红书并查看推送内容")
+        self.assertEqual(second_messages[-3]["role"], "assistant")
+        self.assertTrue(second_messages[-3]["tool_calls"])
+        self.assertEqual(second_messages[-2]["role"], "tool")
+        tool_result_content = json.loads(second_messages[-2]["content"])
+        self.assertEqual(tool_result_content["tool_name"], "workspace_read")
+        runtime_context = second_messages[-1]["content"]
+        self.assertEqual(runtime_context["type"], "runtime_context")
+        self.assertEqual(runtime_context["original_user_goal"], "打开小红书并查看推送内容")
+        self.assertEqual(runtime_context["action_history"], ["turn 1: workspace_read ok"])
+        self.assertIn("Continue working on original_user_goal", runtime_context["instruction"])
+        self.assertIn("avoid repeating failed or already-completed steps", runtime_context["instruction"])
+      finally:
+        conn.close()
+
+  async def test_runner_persists_anchor_snapshot_for_context_reinjection(self) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+      conn = connect_sqlite()
+      try:
+        uow_factory = unit_of_work_factory(conn)
+        registry = CapabilityRegistry()
+        local_tools = LocalToolExecutor()
+        memory = MemoryFacade(uow_factory)
+        catalog = AtomicCapabilityProvider(file_workspace=LocalFileWorkspace([tmp]), memory=memory)
+        catalog.register(registry, local_tools)
+        note_path = str(Path(tmp) / "note.txt")
+        Path(note_path).write_text("state from tool", encoding="utf-8")
+        runtime = CapabilityRuntime(
+          registry,
+          PolicyEngine(
+            grants=[
+              CapabilityGrant(
+                grant_id="grant_anchor_read",
+                capability_id="atom.workspace.read",
+                run_id="run_anchor_snapshot",
+                expires_at=utc_now() + timedelta(minutes=5),
+                filesystem_scope=[tmp],
+              )
+            ]
+          ),
+          local_tools,
+          uow_factory=uow_factory,
+        )
+        provider = MockModelProvider(
+          responses=[
+            {"tool_calls": [{"name": "workspace_read", "input": {"path": note_path}}]},
+            {"finish": True, "output": {"summary": "used persisted anchor"}},
+          ]
+        )
+        gateway = ModelGateway()
+        gateway.register_provider("mock", provider)
+        runner = ContinuousAgentRunner(
+          uow_factory=uow_factory,
+          model_gateway=gateway,
+          capability_runtime=runtime,
+          tool_catalog=catalog,
+          context_assembler=ContextAssembler(uow_factory=uow_factory, memory=memory),
+          memory=memory,
+        )
+
+        result = await runner.run(
+          user_message="读取文件后继续完成原始任务",
+          run_id="run_anchor_snapshot",
+          scope="scope_anchor_snapshot",
+          config=ContinuousRunnerConfig(max_turns=3),
+        )
+
+        self.assertEqual(result.status, "completed")
+        working = memory.retrieve("scope_anchor_snapshot", memory_type="working", limit=10)
+        snapshots = [item for item in working if item.content.get("kind") == "run_anchor_snapshot"]
+        self.assertTrue(snapshots)
+        self.assertEqual(snapshots[0].content["original_user_goal"], "读取文件后继续完成原始任务")
+        self.assertIn("turn 1: workspace_read ok", snapshots[0].content["action_history"])
+        second_rendered = str(provider.calls[1][1].messages)
+        self.assertIn("run_anchor_snapshot", second_rendered)
+        self.assertIn("读取文件后继续完成原始任务", second_rendered)
       finally:
         conn.close()
 
@@ -414,17 +499,17 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       )
 
       second_messages = provider.calls[1][1].messages
-      ledger_messages = [
+      context_messages = [
         message
         for message in second_messages
-        if isinstance(message.get("content"), dict)
-        and message["content"].get("type") == "working_state"
-        and isinstance(message["content"].get("research_ledger"), dict)
+        if message.get("role") == "user"
+        and message.get("name") == "context"
+        and isinstance(message.get("content"), str)
       ]
-      self.assertTrue(ledger_messages)
-      ledger = ledger_messages[-1]["content"]["research_ledger"]
-      self.assertEqual(ledger["candidate_sources"][0]["url"], "https://example.com/pricing")
-      self.assertIn("search_results_need_source_open", ledger["strategy_notes"][0])
+      self.assertTrue(context_messages)
+      rendered_context = context_messages[-1]["content"]
+      self.assertIn("https://example.com/pricing", rendered_context)
+      self.assertIn("search_results_need_source_open", rendered_context)
       tool_result_payload = second_messages[-1]["content"]["research_ledger"]
       self.assertEqual(tool_result_payload["evidence"][0]["url"], "https://search.example/?q=plugin")
     finally:
@@ -873,9 +958,14 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(result.status, "completed")
       self.assertEqual(result.output["content"], "已停止重复读取，并说明了阻塞原因。")
       self.assertEqual(result.tool_calls[-1].error["type"], "repeated_tool_call_guard")
-      repair_content = provider.calls[4][1].messages[-1]["content"]
-      self.assertEqual(repair_content["results"][-1]["error"]["type"], "repeated_tool_call_guard")
-      self.assertIn("Repeated identical tool call was blocked", repair_content["results"][-1]["repair_hint"])
+      repair_tool_messages = [
+        message
+        for message in provider.calls[4][1].messages
+        if message.get("role") == "tool"
+      ]
+      repair_content = json.loads(repair_tool_messages[-1]["content"])
+      self.assertEqual(repair_content["error"]["type"], "repeated_tool_call_guard")
+      self.assertIn("Repeated identical tool call was blocked", repair_content["repair_hint"])
       with UnitOfWork(conn) as uow:
         persisted_calls = uow.tool_calls.list_by_run("run_repeated_guard")
       self.assertEqual(len(persisted_calls), 3)

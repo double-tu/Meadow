@@ -17,6 +17,7 @@ from agent_kernel.agents import (
 )
 from agent_kernel.app.tool_call_control import ToolCallControlService
 from agent_kernel.app.control_plane import ControlPlaneService
+from agent_kernel.app.memory_curator import MemoryCurator
 from agent_kernel.app.mcp_config import MCPConfigService
 from agent_kernel.app.scheduled_tasks import ScheduledTaskService
 from agent_kernel.config import LLMConfig, load_config_dict
@@ -152,6 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
   settle_memory = subcommands.add_parser("settle-memory")
   settle_memory.add_argument("run_id")
   settle_memory.add_argument("--scope", default=None)
+
+  curate_memory = subcommands.add_parser("curate-memory")
+  curate_memory.add_argument("run_id")
+  curate_memory.add_argument("--scope", default=None)
 
   return parser
 
@@ -379,6 +384,24 @@ async def _dispatch(args: argparse.Namespace, conn) -> dict[str, Any]:
           "decision": item.decision,
         }
         for item in settlements
+      ],
+    )
+  if args.command == "curate-memory":
+    report = MemoryCurator(uow_factory).curate_run(args.run_id, scope=args.scope)
+    return ok_response(
+      run_id=report.run_id,
+      scope=report.scope,
+      episodic_memory_id=report.episodic_memory_id,
+      settlements=[
+        {
+          "candidate_id": item.candidate_id,
+          "source_event_id": item.source_event_id,
+          "memory_id": item.memory_id,
+          "memory_type": item.memory_type,
+          "scope": item.scope,
+          "decision": item.decision,
+        }
+        for item in report.settlements
       ],
     )
   raise ValueError(f"Unsupported command: {args.command}")

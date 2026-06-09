@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from agent_kernel.context.budget import ContextBudget
+from agent_kernel.context.event_payload import compact_context_built_payload
 from agent_kernel.context.token_counter import estimate_tokens
 from agent_kernel.domain.base import new_id
 from agent_kernel.domain.context import ContextCandidate, ContextPlan, ModelContext, RetrievalPack
@@ -174,11 +175,14 @@ class ContextManager:
     return round(min(1.0, useful_tokens / budget_tokens), 4)
 
   def _write_ledger(self, run_id: str, plan: ContextPlan, retrieval_pack: RetrievalPack) -> None:
+    payload = compact_context_built_payload(
+      {"context_plan": plan.to_dict(), "retrieval_pack": retrieval_pack.to_dict()}
+    )
     with self._uow_factory() as uow:
       uow.events.append(
         RuntimeEvent(
           event_type=RuntimeEventType.CONTEXT_BUILT,
           run_id=run_id,
-          payload={"context_plan": plan.to_dict(), "retrieval_pack": retrieval_pack.to_dict()},
+          payload=payload,
         )
       )

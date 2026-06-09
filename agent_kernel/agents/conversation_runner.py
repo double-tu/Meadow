@@ -27,12 +27,14 @@ from agent_kernel.capabilities.runtime import CapabilityCallContext, CapabilityR
 from agent_kernel.domain.base import new_id
 from agent_kernel.domain.context import ContextAssemblyRequest, ModelContext
 from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
+from agent_kernel.domain.identifiers import ArtifactRef
 from agent_kernel.domain.serialization import to_json
 from agent_kernel.domain.skill import SkillCard
 from agent_kernel.agents.goal_evidence import GoalEvidenceVerifier
 from agent_kernel.agents.research_ledger import ResearchLedger
 from agent_kernel.agents.run_anchor import RunAnchor
 from agent_kernel.agents.tool_surface import SkillAwareToolSurfacePolicy, ToolSurfacePolicy, ToolSurfaceSelection
+from agent_kernel.memory.facade import MemoryFacade
 from agent_kernel.models.gateway import ModelGateway
 from agent_kernel.models.protocol import ModelContextSanitizer, ModelToolProtocolAdapter
 from agent_kernel.policy.engine import PolicyDecisionType
@@ -57,6 +59,34 @@ class ContinuousToolCallRecord:
   output: dict[str, Any] = field(default_factory=dict)
   error: dict[str, Any] | None = None
   requires_approval: bool = False
+  model_tool_call_id: str | None = None
+
+
+@dataclass(slots=True)
+class ContinuousStepOutcome:
+  """Normalized model-visible outcome for one executed capability call."""
+
+  tool_name: str
+  capability_id: str
+  ok: bool
+  model_visible_result: dict[str, Any] = field(default_factory=dict)
+  error: dict[str, Any] | None = None
+  repair_hint: str | None = None
+  anchor_update: str | None = None
+
+  def to_model_message(self) -> dict[str, Any]:
+    payload = {
+      "tool_name": self.tool_name,
+      "capability_id": self.capability_id,
+      "ok": self.ok,
+      "output": self.model_visible_result,
+      "error": self.error,
+    }
+    if self.repair_hint:
+      payload["repair_hint"] = self.repair_hint
+    if self.anchor_update:
+      payload["anchor_update"] = self.anchor_update
+    return payload
 
 
 @dataclass(slots=True)
@@ -86,6 +116,7 @@ class ContinuousAgentRunner:
     goal_evidence_verifier: GoalEvidenceVerifier | None = None,
     context_sanitizer: ModelContextSanitizer | None = None,
     tool_protocol_adapter: ModelToolProtocolAdapter | None = None,
+    memory: MemoryFacade | None = None,
     system_instructions: str | None = None,
   ) -> None:
     self._uow_factory = uow_factory
@@ -99,6 +130,7 @@ class ContinuousAgentRunner:
     self._goal_evidence_verifier = goal_evidence_verifier or GoalEvidenceVerifier()
     self._context_sanitizer = context_sanitizer or ModelContextSanitizer()
     self._tool_protocol_adapter = tool_protocol_adapter or ModelToolProtocolAdapter()
+    self._memory = memory
     self._system_instructions = system_instructions or _DEFAULT_SYSTEM_INSTRUCTIONS
 
   async def run(
@@ -208,9 +240,7 @@ class ContinuousAgentRunner:
               output=output,
               tool_calls=all_tool_calls,
             )
-          messages = [
-            *_normalize_history_messages(history_messages or []),
-            {"role": "user", "content": user_message},
+          messages.append(
             {
               "role": "user",
               "content": {
@@ -227,8 +257,8 @@ class ContinuousAgentRunner:
                   "Use working_memory_anchor to preserve continuity."
                 ),
               },
-            },
-          ]
+            }
+          )
           continue
         if not _is_empty_model_diagnostic(output):
           stop_results = []
@@ -260,9 +290,7 @@ class ContinuousAgentRunner:
               transition=transition,
               hook_results=blocking_stop_results,
             )
-            messages = [
-              *_normalize_history_messages(history_messages or []),
-              {"role": "user", "content": user_message},
+            messages.append(
               {
                 "role": "user",
                 "content": {
@@ -277,8 +305,8 @@ class ContinuousAgentRunner:
                     "recent failures, and next recoverable action. Do not return empty/no-content completion text."
                   ),
                 },
-              },
-            ]
+              }
+            )
             continue
           if blocking_stop_results:
             all_hook_results.extend(blocking_stop_results)
@@ -320,6 +348,8 @@ class ContinuousAgentRunner:
       turn_records: list[ContinuousToolCallRecord] = []
       empty_model_result_count = 0
       tool_messages: list[dict[str, Any]] = []
+      tool_calls = _ensure_tool_call_ids(tool_calls, turn=turn)
+      messages.append(_assistant_transcript_message(model_result, tool_calls))
       for raw_call in tool_calls:
         if should_cancel is not None and should_cancel():
           output = _cancelled_output(run_id=run_id, turn=turn)
@@ -366,20 +396,27 @@ class ContinuousAgentRunner:
               "type": "repeated_tool_call_guard",
               "message": "The same tool call was repeated too many times without changing input.",
             },
+            model_tool_call_id=_tool_call_id(raw_call),
           )
           turn_records.append(warning_record)
-          tool_messages.append(
-            {
-              "tool_name": call.display_name,
-              "capability_id": call.capability_id,
-              "ok": False,
-              "output": {},
-              "error": warning_record.error,
-              "repair_hint": (
-                "Repeated identical tool call was blocked. Inspect the actual state, change inputs, "
-                "switch tool/source, open the relevant Skill/SOP, or ask the user with the concrete blocker."
-              ),
-            }
+          tool_message = ContinuousStepOutcome(
+            tool_name=call.display_name,
+            capability_id=call.capability_id,
+            ok=False,
+            error=warning_record.error,
+            repair_hint=(
+              "Repeated identical tool call was blocked. Inspect the actual state, change inputs, "
+              "switch tool/source, open the relevant Skill/SOP, or ask the user with the concrete blocker."
+            ),
+            anchor_update=_anchor_update_from_record(warning_record),
+          ).to_model_message()
+          tool_messages.append(tool_message)
+          messages.append(
+            _tool_transcript_message(
+              raw_call,
+              tool_message,
+              name=call.display_name,
+            )
           )
           continue
         outcome = await self._capability_runtime.call(
@@ -401,6 +438,7 @@ class ContinuousAgentRunner:
           output=outcome.result.output if outcome.result is not None else {},
           error=outcome.result.error if outcome.result is not None else None,
           requires_approval=outcome.requires_approval,
+          model_tool_call_id=_tool_call_id(raw_call),
         )
         turn_records.append(record)
         if outcome.result is not None:
@@ -430,14 +468,15 @@ class ContinuousAgentRunner:
             tool_calls=all_tool_calls,
             pending=pending,
           )
-        tool_messages.append(
-          {
-            "tool_name": call.display_name,
-            "capability_id": call.capability_id,
-            "ok": record.ok,
-            "output": _compact_for_json(record.output, max_bytes=6000),
-            "error": _compact_for_json(record.error, max_bytes=2000),
-          }
+        self._artifactize_large_tool_output(run_id=run_id, turn=turn, record=record)
+        tool_message = _step_outcome_from_record(record).to_model_message()
+        tool_messages.append(tool_message)
+        messages.append(
+          _tool_transcript_message(
+            raw_call,
+            tool_message,
+            name=call.display_name,
+          )
         )
       all_tool_calls.extend(turn_records)
       action_history.extend(_summarize_turn_records(turn_records, turn=turn))
@@ -463,6 +502,16 @@ class ContinuousAgentRunner:
       if turn_hook_results:
         all_hook_results.extend(turn_hook_results)
         action_history.extend(_summarize_hook_results(turn_hook_results, turn=turn))
+      self._persist_anchor_snapshot(
+        scope=scope,
+        run_id=run_id,
+        turn=turn,
+        run_anchor=run_anchor,
+        action_history=action_history,
+        research_ledger=research_ledger,
+        hook_results=turn_hook_results,
+        turn_records=turn_records,
+      )
       execution_hook_messages = hook_results_to_model_messages(turn_hook_results)
       evidence = self._goal_evidence_verifier.evaluate(user_message, all_tool_calls)
       finalization_instruction = evidence.instruction if evidence.satisfied else None
@@ -479,18 +528,16 @@ class ContinuousAgentRunner:
         transition=transition,
         hook_results=turn_hook_results,
       )
-      messages = [
-        *_normalize_history_messages(history_messages or []),
-        {"role": "user", "content": user_message},
+      messages.append(
         {
           "role": "user",
           "content": {
-            "type": "tool_results",
+            "type": "runtime_context",
             "original_user_goal": user_message,
             "turn": turn,
             "action_history": action_history[-12:],
             "research_ledger": research_ledger.to_model_payload(),
-            "results": tool_messages,
+            "tool_result_count": len(tool_messages),
             "execution_hooks": execution_hook_messages,
             "instruction": (
               "Continue working on original_user_goal. If the goal is not completed yet, call the next required tool. "
@@ -510,7 +557,7 @@ class ContinuousAgentRunner:
             ),
           },
         }
-      ]
+      )
     return ContinuousRunnerResult(
       run_id=run_id,
       status="max_turns_exceeded",
@@ -716,6 +763,88 @@ class ContinuousAgentRunner:
   def _tool_repetition_key(capability_id: str, input: dict[str, Any]) -> str:
     return to_json({"capability_id": capability_id, "input": _stable_tool_input(input)})
 
+  def _persist_anchor_snapshot(
+    self,
+    *,
+    scope: str,
+    run_id: str,
+    turn: int,
+    run_anchor: RunAnchor,
+    action_history: list[str],
+    research_ledger: ResearchLedger,
+    hook_results: list[ProgressHookResult],
+    turn_records: list[ContinuousToolCallRecord],
+  ) -> None:
+    if self._memory is None:
+      return
+    content: dict[str, Any] = {
+      "kind": "run_anchor_snapshot",
+      "run_id": run_id,
+      "turn": turn,
+      "original_user_goal": run_anchor.original_user_goal,
+      "history": run_anchor.history_lines[-12:],
+      "action_history": action_history[-12:],
+      "last_tool_outcomes": [
+        {
+          "name": record.name,
+          "capability_id": record.capability_id,
+          "ok": record.ok,
+          "error_type": (record.error or {}).get("type") if record.error else None,
+        }
+        for record in turn_records[-8:]
+      ],
+    }
+    research_payload = research_ledger.to_model_payload()
+    if research_payload is not None:
+      content["research_ledger"] = research_payload
+    if hook_results:
+      content["execution_hooks"] = [result.to_dict() for result in hook_results[-6:]]
+    self._memory.write_working(
+      scope,
+      content,
+      importance=0.96,
+      created_by="continuous_agent_anchor",
+    )
+
+  def _artifactize_large_tool_output(
+    self,
+    *,
+    run_id: str,
+    turn: int,
+    record: ContinuousToolCallRecord,
+    max_inline_bytes: int = 8000,
+  ) -> None:
+    try:
+      encoded = to_json(record.output).encode("utf-8")
+    except (TypeError, ValueError):
+      return
+    if len(encoded) <= max_inline_bytes:
+      return
+    artifact = ArtifactRef(
+      artifact_id=new_id("art_tool_output"),
+      uri=f"memory://runs/{run_id}/tool-output/{turn}/{record.name}",
+      media_type="application/json",
+    )
+    metadata = {
+      "kind": "large_tool_output",
+      "run_id": run_id,
+      "turn": turn,
+      "tool_name": record.name,
+      "capability_id": record.capability_id,
+      "content": to_json(record.output),
+      "original_bytes": len(encoded),
+    }
+    with self._uow_factory() as uow:
+      uow.artifacts.save(artifact, metadata)
+    record.output = {
+      "_artifactized": True,
+      "artifact_id": artifact.artifact_id,
+      "uri": artifact.uri,
+      "media_type": artifact.media_type,
+      "original_bytes": len(encoded),
+      "preview": _compact_for_json(record.output, max_bytes=4000),
+    }
+
 
 _DEFAULT_SYSTEM_INSTRUCTIONS = (
   "你是 Meadow 日常 Agent。你必须基于用户目标、上下文、记忆和 Skills 自主决定下一步。"
@@ -732,12 +861,18 @@ def _normalize_history_messages(messages: list[dict[str, Any]]) -> list[dict[str
   normalized: list[dict[str, Any]] = []
   for message in messages:
     role = message.get("role")
-    if role not in {"user", "assistant"}:
+    if role not in {"system", "user", "assistant", "tool"}:
       continue
     content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
+    has_tool_calls = role == "assistant" and isinstance(message.get("tool_calls"), list)
+    has_tool_result = role == "tool" and isinstance(message.get("tool_call_id"), str)
+    if content is None and not has_tool_calls:
       continue
-    normalized.append({"role": role, "content": content})
+    if isinstance(content, str) and not content.strip() and not (has_tool_calls or has_tool_result):
+      continue
+    normalized_message = dict(message)
+    normalized_message["role"] = role
+    normalized.append(normalized_message)
   return normalized
 
 
@@ -1138,6 +1273,75 @@ def _progress_guard_instruction(turn: int) -> str:
       "environment/state, use a different capability/source, or request user input with the concrete blocker."
     )
   return ""
+
+
+def _step_outcome_from_record(record: ContinuousToolCallRecord) -> ContinuousStepOutcome:
+  return ContinuousStepOutcome(
+    tool_name=record.name,
+    capability_id=record.capability_id,
+    ok=record.ok,
+    model_visible_result=_compact_for_json(record.output, max_bytes=6000),
+    error=_compact_for_json(record.error, max_bytes=2000),
+    anchor_update=_anchor_update_from_record(record),
+  )
+
+
+def _ensure_tool_call_ids(tool_calls: list[dict[str, Any]], *, turn: int) -> list[dict[str, Any]]:
+  normalized: list[dict[str, Any]] = []
+  for index, raw_call in enumerate(tool_calls):
+    call = dict(raw_call)
+    if not isinstance(call.get("id"), str) or not call.get("id"):
+      call["id"] = f"call_turn_{turn}_{index}"
+    normalized.append(call)
+  return normalized
+
+
+def _tool_call_id(raw_call: dict[str, Any]) -> str:
+  call_id = raw_call.get("id") or raw_call.get("tool_call_id")
+  return str(call_id) if call_id else ""
+
+
+def _assistant_transcript_message(model_result: dict[str, Any], tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+  content = _model_result_text(model_result)
+  message: dict[str, Any] = {
+    "role": "assistant",
+    "content": content,
+    "tool_calls": [
+      _openai_tool_call(call)
+      for call in tool_calls
+    ],
+  }
+  return message
+
+
+def _openai_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+  call_id = _tool_call_id(call)
+  name = str(call.get("name") or "")
+  arguments = call.get("input", call.get("arguments", {}))
+  if not isinstance(arguments, str):
+    arguments = to_json(arguments if isinstance(arguments, dict) else {})
+  return {
+    "id": call_id,
+    "type": "function",
+    "function": {
+      "name": name,
+      "arguments": arguments,
+    },
+  }
+
+
+def _tool_transcript_message(raw_call: dict[str, Any], result: dict[str, Any], *, name: str) -> dict[str, Any]:
+  return {
+    "role": "tool",
+    "tool_call_id": _tool_call_id(raw_call),
+    "name": name,
+    "content": to_json(result),
+  }
+
+
+def _anchor_update_from_record(record: ContinuousToolCallRecord) -> str:
+  status = "ok" if record.ok else f"failed:{(record.error or {}).get('type', 'unknown_error')}"
+  return f"{record.name} {status}"
 
 
 def _summarize_turn_records(records: list[ContinuousToolCallRecord], *, turn: int) -> list[str]:

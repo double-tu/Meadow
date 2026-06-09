@@ -109,6 +109,7 @@ class ContextLayerItem(DomainModel):
   artifact_refs: list[ArtifactRef] = field(default_factory=list)
   sensitivity: Literal["public", "internal", "confidential", "secret"] = "internal"
   rationale: str | None = None
+  message: dict[str, Any] | None = None
 
   def __post_init__(self) -> None:
     if isinstance(self.layer, str):

@@ -16,8 +16,10 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from typing import Any, Literal, Protocol
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
@@ -691,23 +693,33 @@ class BrowserLinkHTTPBackend:
         output["url"] = url
         return ControlResult(ok=True, output=output)
       return created
+    return self._navigate_existing_target(command.target_id, url, command.timeout_seconds, command_id=command.command_id)
+
+  def _navigate_existing_target(
+    self,
+    target_id: str,
+    url: str,
+    timeout_seconds: float | None = None,
+    *,
+    command_id: str = "navigate_existing",
+  ) -> ControlResult:
     code = "window.location.href = " + json.dumps(url) + ";"
     result = self._execute_js(
       ControlCommand(
-        command_id=command.command_id,
+        command_id=command_id,
         target_kind="browser",
         action="execute_js",
-        target_id=command.target_id,
+        target_id=target_id,
         payload={"code": code},
-        timeout_seconds=command.timeout_seconds,
+        timeout_seconds=timeout_seconds,
       )
     )
     if not result.ok:
       return result
     output = dict(result.output)
     output["url"] = url
-    output["target_id"] = command.target_id
-    output["active_target_id"] = command.target_id
+    output["target_id"] = target_id
+    output["active_target_id"] = target_id
     return ControlResult(ok=True, output=output)
 
   def _create_tab(self, url: str, timeout_seconds: float | None = None) -> ControlResult:
@@ -728,7 +740,23 @@ class BrowserLinkHTTPBackend:
     data = raw.get("data") if isinstance(raw, dict) else raw
     target = self._target_from_created_tab_payload(data, url)
     if target is None:
-      target = self._target_from_existing_sessions(url)
+      if _has_created_tab_payload(data):
+        target = self._target_from_existing_sessions(url)
+        if target is None:
+          reusable_target = self._target_from_same_origin_sessions(url)
+          if reusable_target is not None:
+            result = self._navigate_existing_target(
+              reusable_target.target_id,
+              url,
+              timeout_seconds,
+              command_id="reuse_same_origin_tab",
+            )
+            if result.ok:
+              result.output["reused_existing_target"] = True
+              result.output["reuse_reason"] = "same_origin_create_fallback"
+            return result
+      else:
+        target = self._target_from_existing_sessions_with_retry(url, timeout_seconds)
     if target is not None:
       return ControlResult(
         ok=True,
@@ -774,6 +802,29 @@ class BrowserLinkHTTPBackend:
       if _browser_urls_equivalent(target.metadata.get("url"), requested_url)
     ]
     return matching[-1] if matching else None
+
+  def _target_from_same_origin_sessions(self, requested_url: str) -> ControlTarget | None:
+    matching = [
+      target
+      for target in self.list_targets("browser")
+      if _browser_origins_equivalent(target.metadata.get("url"), requested_url)
+    ]
+    return matching[-1] if matching else None
+
+  def _target_from_existing_sessions_with_retry(
+    self,
+    requested_url: str,
+    timeout_seconds: float | None = None,
+  ) -> ControlTarget | None:
+    wait_seconds = min(max(timeout_seconds or self._request_timeout_seconds, 0.2), 1.5)
+    deadline = time.monotonic() + wait_seconds
+    while True:
+      target = self._target_from_existing_sessions(requested_url)
+      if target is not None:
+        return target
+      if time.monotonic() >= deadline:
+        return None
+      time.sleep(0.1)
 
   def _target_from_tab_like(self, tab: dict[str, Any], requested_url: str) -> ControlTarget | None:
     tab_id = tab.get("id")
@@ -870,6 +921,41 @@ def _browser_urls_equivalent(candidate: object, requested: str) -> bool:
   left = _normalize_browser_url(candidate)
   right = _normalize_browser_url(requested)
   return bool(left and right and left == right)
+
+
+def _browser_origins_equivalent(candidate: object, requested: str) -> bool:
+  if not isinstance(candidate, str):
+    return False
+  try:
+    left = urlsplit(candidate)
+    right = urlsplit(requested)
+  except ValueError:
+    return False
+  return bool(
+    left.scheme
+    and right.scheme
+    and left.hostname
+    and right.hostname
+    and left.scheme == right.scheme
+    and left.hostname == right.hostname
+    and (left.port or _default_port(left.scheme)) == (right.port or _default_port(right.scheme))
+  )
+
+
+def _default_port(scheme: str) -> int | None:
+  if scheme == "http":
+    return 80
+  if scheme == "https":
+    return 443
+  return None
+
+
+def _has_created_tab_payload(data: object) -> bool:
+  if isinstance(data, dict):
+    return data.get("id") is not None
+  if isinstance(data, list):
+    return any(isinstance(item, dict) and item.get("id") is not None for item in data)
+  return False
 
 
 def _normalize_browser_url(value: str) -> str:

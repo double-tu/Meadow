@@ -72,6 +72,51 @@ class HTTPHostTests(unittest.TestCase):
     finally:
       conn.close()
 
+  def test_http_host_curates_run_memory(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      with UnitOfWork(conn) as uow:
+        uow.events.append(
+          RuntimeEvent(
+            event_type=RuntimeEventType.TOOL_CALL_COMPLETED,
+            run_id="run_http_curate",
+            payload={"summary": "browser_scan verified a source page"},
+          )
+        )
+        uow.events.append(
+          RuntimeEvent(
+            event_type=RuntimeEventType.MEMORY_EVOLUTION_CANDIDATE,
+            run_id="run_http_curate",
+            payload={
+              "candidate_id": "candidate_http_curate",
+              "scope": "chat_http_curate",
+              "note": "User prefers browser research with source-page verification.",
+              "evidence_summary": "browser_scan verified a source page during this run.",
+            },
+          )
+        )
+      handler = make_handler(HTTPHost(uow_factory))
+
+      payload = self._request_json(
+        handler,
+        "POST",
+        "/memory/curate-run",
+        {"run_id": "run_http_curate", "scope": "chat_http_curate"},
+      )
+
+      with UnitOfWork(conn) as uow:
+        episodes = uow.memory.list_by_scope("chat_http_curate", memory_type="episodic")
+        semantics = uow.memory.list_by_scope("chat_http_curate", memory_type="semantic")
+
+      self.assertTrue(payload["ok"])
+      self.assertIsNotNone(payload["episodic_memory_id"])
+      self.assertEqual(payload["settlements"][0]["candidate_id"], "candidate_http_curate")
+      self.assertEqual(episodes[0].content["kind"], "run_event_summary")
+      self.assertEqual(semantics[0].content["candidate_id"], "candidate_http_curate")
+    finally:
+      conn.close()
+
   def test_http_host_streams_run_events_as_sse(self) -> None:
     conn = connect_sqlite()
     try:
@@ -775,7 +820,14 @@ class HTTPHostTests(unittest.TestCase):
         async def complete(self, provider_name, model_ref, context):
           self._calls += 1
           if self._calls == 2:
-            tool_result = context.messages[-1]["content"]["results"][0]["output"]
+            import json
+
+            tool_messages = [
+              message
+              for message in context.messages
+              if message.get("role") == "tool"
+            ]
+            tool_result = json.loads(tool_messages[-1]["content"])["output"]
             workbench_id = tool_result["workbench"]["workbench"]["workbench_id"]
             provider.responses[0]["tool_calls"][0]["input"]["workbench_id"] = workbench_id
           return await super().complete(provider_name, model_ref, context)

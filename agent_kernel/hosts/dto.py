@@ -90,6 +90,7 @@ def default_http_routes() -> list[HTTPRouteSpec]:
     HTTPRouteSpec(method="POST", path="/delegations/status", description="Inspect delegation status by parent run."),
     HTTPRouteSpec(method="GET", path="/delegations/{task_id}", description="Inspect one delegation task."),
     HTTPRouteSpec(method="POST", path="/delegations/{task_id}/cancel", description="Cancel a delegation task."),
+    HTTPRouteSpec(method="POST", path="/memory/curate-run", description="Curate one run into episodic memory and settle verified memory candidates."),
     HTTPRouteSpec(method="GET", path="/mcp-servers", description="List configured MCP servers."),
     HTTPRouteSpec(method="POST", path="/mcp-servers", description="Upsert a configured MCP server."),
     HTTPRouteSpec(method="DELETE", path="/mcp-servers/{name}", description="Delete a configured MCP server."),

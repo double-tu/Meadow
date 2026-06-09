@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Protocol
 
 from agent_kernel.context.budget import ContextBudgetManager
 from agent_kernel.context.core import CoreAgentContextProvider
+from agent_kernel.context.event_payload import compact_context_built_payload
 from agent_kernel.context.token_counter import estimate_tokens
 from agent_kernel.domain.base import new_id
 from agent_kernel.domain.context import (
@@ -57,13 +60,11 @@ class ContextAssembler:
       layer_budget = budget.layer_budgets.get(provider.kind.value, 0)
       layer = provider.collect(request, layer_budget)
       trimmed = self._budget_manager.trim_layer(layer, layer_budget)
+      if provider.kind == ContextLayerKind.CONVERSATION_WINDOW:
+        trimmed = _repair_conversation_tool_transcript(layer, trimmed)
       layers.append(trimmed)
       omitted.extend(trimmed.omitted_items)
-    messages = [
-      {"role": item.role, "content": item.content}
-      for layer in layers
-      for item in layer.items
-    ]
+    messages = _render_model_messages(layers)
     memory_refs = _unique_memory_refs(
       item.memory_ref
       for layer in layers
@@ -183,6 +184,13 @@ class ContextAssembler:
       artifact_refs=pack.model_context.attachments,
       token_estimate=sum(layer.token_estimate for layer in pack.layers),
     )
+    payload = compact_context_built_payload(
+      {
+        "context_plan": plan.to_dict(),
+        "retrieval_pack": retrieval_pack.to_dict(),
+        "context_pack_id": pack.pack_id,
+      }
+    )
     with self._uow_factory() as uow:
       uow.events.append(
         RuntimeEvent(
@@ -190,11 +198,7 @@ class ContextAssembler:
           run_id=request.run_id,
           agent_id=request.agent_id,
           task_id=request.task_id,
-          payload={
-            "context_plan": plan.to_dict(),
-            "retrieval_pack": retrieval_pack.to_dict(),
-            "context_pack_id": pack.pack_id,
-          },
+          payload=payload,
           artifact_refs=pack.model_context.attachments,
         )
       )
@@ -261,8 +265,8 @@ class SkillToolIndexLayerProvider:
     skills = [_skill_index(skill) for skill in request.skills if isinstance(skill, SkillCard)]
     tools = [
       {
-        "name": tool.get("name") or tool.get("capability_id"),
-        "description": tool.get("description"),
+        "name": _tool_schema_name(tool),
+        "description": _tool_schema_description(tool),
         "capability_id": tool.get("capability_id"),
       }
       for tool in request.tool_schemas
@@ -342,18 +346,19 @@ class ConversationWindowLayerProvider:
     for index, message in enumerate(request.messages):
       role = str(message.get("role") or "user")
       content = message.get("content")
-      if content is None:
+      if content is None and not (role == "assistant" and isinstance(message.get("tool_calls"), list)):
         continue
       freshness = (index + 1) / max(1, count)
       items.append(
         _item(
           self.kind,
           role=role if role in {"system", "user", "assistant", "tool"} else "user",
-          content=content,
+          content=_conversation_token_content(message, content),
           priority=0.55 + freshness,
           source_type="message",
           source_ref=str(message.get("message_id") or f"message:{index}"),
           rationale="Recent conversation window message.",
+          message=message,
         )
       )
     return _layer(self.kind, budget_tokens, items)
@@ -428,6 +433,7 @@ def _item(
   memory_ref: MemoryRef | None = None,
   artifact_refs: list[ArtifactRef] | None = None,
   sensitivity: str = "internal",
+  message: dict[str, Any] | None = None,
 ) -> ContextLayerItem:
   return ContextLayerItem(
     item_id=new_id("ctx_item"),
@@ -442,6 +448,7 @@ def _item(
     artifact_refs=artifact_refs or [],
     sensitivity=sensitivity,  # type: ignore[arg-type]
     rationale=rationale,
+    message=message,
   )
 
 
@@ -502,6 +509,7 @@ def _skill_index(skill: SkillCard) -> dict[str, Any]:
     "max_risk_level": max_risk_level,
     "procedure_memory_ref": skill.procedure_memory_ref.to_dict() if skill.procedure_memory_ref else None,
     "compiled_workflow_ref": skill.compiled_workflow_ref,
+    "resource_refs": list(skill.resource_refs),
   }
 
 
@@ -566,3 +574,438 @@ def _density_score(layers: list[ContextLayer]) -> float:
 def _candidate_source_type(source_type: str) -> Any:
   allowed = {"message", "memory", "artifact", "tool_result", "workflow_state", "schema", "instruction"}
   return source_type if source_type in allowed else "instruction"
+
+
+def _repair_conversation_tool_transcript(original: ContextLayer, trimmed: ContextLayer) -> ContextLayer:
+  if original.kind != ContextLayerKind.CONVERSATION_WINDOW:
+    return trimmed
+  selected_ids = {item.item_id for item in trimmed.items}
+  original_items = list(original.items)
+  changed = True
+  while changed:
+    changed = False
+    for index, item in enumerate(original_items):
+      if item.item_id not in selected_ids:
+        continue
+      before_count = len(selected_ids)
+      message = item.message or {}
+      role = str(message.get("role") or item.role)
+      if role == "assistant":
+        call_ids = _message_tool_call_ids(message)
+        if call_ids:
+          preceding_user = _preceding_user_item(original_items, start_index=index)
+          if preceding_user is not None:
+            selected_ids.add(preceding_user.item_id)
+          selected_ids.update(
+            response.item_id
+            for response in _following_tool_response_items(original_items, start_index=index, call_ids=call_ids)
+          )
+      elif role == "tool":
+        tool_call_id = message.get("tool_call_id")
+        if isinstance(tool_call_id, str) and tool_call_id:
+          assistant = _preceding_tool_call_item(original_items, start_index=index, tool_call_id=tool_call_id)
+          if assistant is not None:
+            selected_ids.add(assistant.item_id)
+            assistant_index = original_items.index(assistant)
+            preceding_user = _preceding_user_item(original_items, start_index=assistant_index)
+            if preceding_user is not None:
+              selected_ids.add(preceding_user.item_id)
+      elif role == "user" and _is_runtime_continuation_message(message):
+        selected_ids.update(
+          group_item.item_id
+          for group_item in _preceding_tool_transcript_group(original_items, start_index=index)
+        )
+      if len(selected_ids) != before_count:
+        changed = True
+  selected = [item for item in original_items if item.item_id in selected_ids]
+  omitted = [item for item in original_items if item.item_id not in selected_ids]
+  return ContextLayer(
+    kind=trimmed.kind,
+    budget_tokens=trimmed.budget_tokens,
+    items=selected,
+    omitted_items=[*original.omitted_items, *omitted],
+    token_estimate=sum(item.token_estimate for item in selected),
+    rationale=trimmed.rationale,
+  )
+
+
+def _message_tool_call_ids(message: dict[str, Any]) -> set[str]:
+  tool_calls = message.get("tool_calls")
+  if not isinstance(tool_calls, list):
+    return set()
+  call_ids: set[str] = set()
+  for call in tool_calls:
+    if not isinstance(call, dict):
+      continue
+    call_id = call.get("id") or call.get("tool_call_id")
+    if isinstance(call_id, str) and call_id:
+      call_ids.add(call_id)
+  return call_ids
+
+
+def _following_tool_response_items(
+  items: list[ContextLayerItem],
+  *,
+  start_index: int,
+  call_ids: set[str],
+) -> list[ContextLayerItem]:
+  responses: list[ContextLayerItem] = []
+  remaining = set(call_ids)
+  for item in items[start_index + 1 :]:
+    message = item.message or {}
+    role = str(message.get("role") or item.role)
+    if role == "assistant":
+      break
+    if role != "tool":
+      continue
+    tool_call_id = message.get("tool_call_id")
+    if isinstance(tool_call_id, str) and tool_call_id in remaining:
+      responses.append(item)
+      remaining.remove(tool_call_id)
+    if not remaining:
+      break
+  return responses
+
+
+def _preceding_tool_call_item(
+  items: list[ContextLayerItem],
+  *,
+  start_index: int,
+  tool_call_id: str,
+) -> ContextLayerItem | None:
+  for item in reversed(items[:start_index]):
+    message = item.message or {}
+    role = str(message.get("role") or item.role)
+    if role == "assistant":
+      return item if tool_call_id in _message_tool_call_ids(message) else None
+    if role == "user":
+      return None
+  return None
+
+
+def _preceding_user_item(items: list[ContextLayerItem], *, start_index: int) -> ContextLayerItem | None:
+  for item in reversed(items[:start_index]):
+    message = item.message or {}
+    role = str(message.get("role") or item.role)
+    if role == "user":
+      return item
+    if role == "assistant":
+      return None
+  return None
+
+
+def _is_runtime_continuation_message(message: dict[str, Any]) -> bool:
+  content = message.get("content")
+  if not isinstance(content, dict):
+    return False
+  return content.get("type") in {"runtime_context", "model_repair"}
+
+
+def _preceding_tool_transcript_group(
+  items: list[ContextLayerItem],
+  *,
+  start_index: int,
+) -> list[ContextLayerItem]:
+  group: list[ContextLayerItem] = []
+  saw_tool = False
+  saw_assistant = False
+  for item in reversed(items[:start_index]):
+    message = item.message or {}
+    role = str(message.get("role") or item.role)
+    if role == "tool":
+      saw_tool = True
+      group.append(item)
+      continue
+    if role == "assistant" and saw_tool and _message_tool_call_ids(message):
+      saw_assistant = True
+      group.append(item)
+      continue
+    if role == "user" and saw_assistant:
+      group.append(item)
+      break
+    if role == "user":
+      break
+  return list(reversed(group))
+
+
+def _conversation_token_content(message: dict[str, Any], content: Any) -> Any:
+  role = str(message.get("role") or "user")
+  if role in {"assistant", "tool"}:
+    return message
+  return content
+
+
+def _render_model_messages(layers: list[ContextLayer]) -> list[dict[str, Any]]:
+  system_parts: list[str] = []
+  context_sections: list[str] = []
+  transcript: list[dict[str, Any]] = []
+  for layer in layers:
+    if layer.kind == ContextLayerKind.SYSTEM_POLICY:
+      for item in layer.items:
+        system_parts.append(_render_system_item(item))
+      continue
+    if layer.kind == ContextLayerKind.CONVERSATION_WINDOW:
+      for item in layer.items:
+        message = _message_from_layer_item(item)
+        role = str(message.get("role") or "user")
+        if role == "system":
+          context_sections.append(_render_context_item(item))
+        else:
+          transcript.append(message)
+      continue
+    if layer.items:
+      context_sections.append(_render_context_layer(layer))
+  messages: list[dict[str, Any]] = []
+  system_content = "\n\n".join(part for part in system_parts if part.strip()).strip()
+  if system_content:
+    messages.append({"role": "system", "content": system_content})
+  context_content = "\n\n".join(section for section in context_sections if section.strip()).strip()
+  if context_content:
+    messages.append({"role": "user", "name": "context", "content": context_content})
+  messages.extend(transcript)
+  return messages
+
+
+def _render_system_item(item: ContextLayerItem) -> str:
+  if isinstance(item.content, str):
+    return item.content
+  if isinstance(item.content, dict) and item.content.get("type") == "core_agent_context":
+    return _render_core_agent_context(item.content)
+  return _render_tagged_section(str(item.source_ref or item.layer.value), item.content)
+
+
+def _render_core_agent_context(content: dict[str, Any]) -> str:
+  lines = ["# Meadow Operating Context", "", "This is compact operating context, not a fixed workflow."]
+  for title, key in [
+    ("Constitution", "constitution"),
+    ("Progressive Disclosure", "progressive_disclosure"),
+    ("Failure Handling", "failure_escalation"),
+    ("Working Memory", "working_memory_rules"),
+    ("Memory Governance", "memory_governance"),
+  ]:
+    values = content.get(key)
+    if isinstance(values, list) and values:
+      lines.extend(["", f"## {title}"])
+      lines.extend(f"- {value}" for value in values if isinstance(value, str))
+  navigation = content.get("capability_navigation")
+  if isinstance(navigation, list) and navigation:
+    lines.extend(["", "## Capability Navigation"])
+    for entry in navigation:
+      if not isinstance(entry, dict):
+        continue
+      topic = entry.get("topic")
+      skills = ", ".join(str(value) for value in entry.get("skill_ids", []) if value)
+      tools = ", ".join(str(value) for value in entry.get("tools", []) if value)
+      resources = ", ".join(str(value) for value in entry.get("resources", []) if value)
+      parts = [str(topic or "topic")]
+      if skills:
+        parts.append(f"skills: {skills}")
+      if tools:
+        parts.append(f"tools: {tools}")
+      if resources:
+        parts.append(f"resources: {resources}")
+      lines.append("- " + " | ".join(parts))
+  return "\n".join(lines)
+
+
+def _render_context_layer(layer: ContextLayer) -> str:
+  title = _context_layer_title(layer.kind)
+  rendered_items = [_render_context_item(item) for item in layer.items]
+  rendered_items = [item for item in rendered_items if item.strip()]
+  if not rendered_items:
+    return ""
+  return f"<{title}>\n" + "\n\n".join(rendered_items) + f"\n</{title}>"
+
+
+def _render_context_item(item: ContextLayerItem) -> str:
+  content = item.content
+  if item.layer == ContextLayerKind.AGENT_PROFILE:
+    return _render_agent_profile(content)
+  if item.layer == ContextLayerKind.SKILL_TOOL_INDEX:
+    return _render_skill_tool_index(content)
+  if item.layer == ContextLayerKind.WORKING_MEMORY:
+    return _render_memory_or_state(content)
+  if item.layer in {ContextLayerKind.EPISODIC_ARTIFACT, ContextLayerKind.LONG_TERM_MEMORY}:
+    return _render_memory_or_state(content)
+  if isinstance(content, dict) and content.get("type") == "working_memory_anchor":
+    return _render_working_anchor(content)
+  return _render_tagged_section(str(item.source_ref or item.layer.value), content)
+
+
+def _context_layer_title(kind: ContextLayerKind) -> str:
+  if kind == ContextLayerKind.AGENT_PROFILE:
+    return "agent_profile"
+  if kind == ContextLayerKind.SKILL_TOOL_INDEX:
+    return "available_skills_and_tools"
+  if kind == ContextLayerKind.WORKING_MEMORY:
+    return "working_memory"
+  if kind == ContextLayerKind.EPISODIC_ARTIFACT:
+    return "episodic_context"
+  if kind == ContextLayerKind.LONG_TERM_MEMORY:
+    return "long_term_memory"
+  return kind.value
+
+
+def _render_agent_profile(content: Any) -> str:
+  if not isinstance(content, dict):
+    return str(content)
+  fields = [
+    f"scope: {content.get('scope')}",
+    f"agent_id: {content.get('agent_id')}",
+    f"task_id: {content.get('task_id')}",
+    f"model_ref: {content.get('model_ref')}",
+  ]
+  return "\n".join(field for field in fields if not field.endswith("None"))
+
+
+def _render_skill_tool_index(content: Any) -> str:
+  if not isinstance(content, dict):
+    return str(content)
+  lines = [
+    "Skill index is compact. Choose relevant skills yourself; open skill/resource details when procedure matters.",
+  ]
+  skills = content.get("skills")
+  if isinstance(skills, list) and skills:
+    lines.append("")
+    lines.append("Skills:")
+    for skill in skills:
+      if isinstance(skill, dict):
+        lines.extend(_render_skill_card(skill))
+  tools = content.get("tools")
+  if isinstance(tools, list) and tools:
+    lines.append("")
+    lines.append("Tools:")
+    for tool in tools:
+      if not isinstance(tool, dict):
+        continue
+      name = tool.get("name")
+      if not name:
+        continue
+      description = str(tool.get("description") or "").strip()
+      lines.append(f"- {name}: {description[:220]}")
+  return "\n".join(lines)
+
+
+def _render_skill_card(skill: dict[str, Any]) -> list[str]:
+  lines = [f"- {skill.get('skill_id')}: {skill.get('name')}"]
+  for key, label in [
+    ("when_to_use", "when"),
+    ("description", "desc"),
+    ("procedure_hint", "hint"),
+  ]:
+    value = skill.get(key)
+    if isinstance(value, str) and value.strip():
+      lines.append(f"  {label}: {value.strip()}")
+  recommended_tools = skill.get("recommended_tools")
+  if isinstance(recommended_tools, list) and recommended_tools:
+    lines.append("  recommended_tools: " + ", ".join(str(value) for value in recommended_tools if value))
+  resource_refs = skill.get("resource_refs")
+  if isinstance(resource_refs, list) and resource_refs:
+    lines.append("  resource_refs: " + ", ".join(str(value) for value in resource_refs if value))
+  return lines
+
+
+def _render_memory_or_state(content: Any) -> str:
+  if not isinstance(content, dict):
+    return str(content)
+  memory_id = content.get("memory_id")
+  content_type = content.get("type")
+  if content_type == "working_state":
+    return _render_working_state(content)
+  payload = content.get("content", content)
+  if isinstance(payload, dict):
+    summary = payload.get("summary") or payload.get("key_info") or payload.get("active_goal") or _format_json(payload)
+  else:
+    summary = payload
+  prefix = f"- {content_type or 'context'}"
+  if memory_id:
+    prefix += f" {memory_id}"
+  return f"{prefix}: {_compact_render_text(str(summary), 900)}"
+
+
+def _render_working_state(content: dict[str, Any]) -> str:
+  lines = ["- working_state"]
+  instructions = content.get("research_instructions")
+  if isinstance(instructions, list) and instructions:
+    lines.append("  research_instructions:")
+    lines.extend(f"  - {item}" for item in instructions if isinstance(item, str))
+  ledger = content.get("research_ledger")
+  if isinstance(ledger, dict):
+    lines.append("  research_ledger:")
+    for key in ("strategy_notes", "candidate_sources", "evidence", "failures", "visited_sources"):
+      values = ledger.get(key)
+      if not isinstance(values, list) or not values:
+        continue
+      lines.append(f"    {key}:")
+      for value in values[-6:]:
+        lines.append("    - " + _compact_render_text(_format_json(value) if isinstance(value, dict) else str(value), 500))
+  return "\n".join(lines)
+
+
+def _render_working_anchor(content: dict[str, Any]) -> str:
+  lines = ["<working_memory_anchor>"]
+  goal = content.get("original_user_goal")
+  if goal:
+    lines.append(f"original_user_goal: {goal}")
+  current_turn = content.get("current_turn")
+  if current_turn is not None:
+    lines.append(f"current_turn: {current_turn}")
+  history = content.get("history")
+  if isinstance(history, list) and history:
+    lines.append("recent_history:")
+    lines.extend(f"- {item}" for item in history[-8:])
+  action_history = content.get("action_history")
+  if isinstance(action_history, list) and action_history:
+    lines.append("action_history:")
+    lines.extend(f"- {item}" for item in action_history[-8:])
+  lines.append("</working_memory_anchor>")
+  return "\n".join(lines)
+
+
+def _render_tagged_section(name: str, content: Any) -> str:
+  normalized = re.sub(r"[^a-zA-Z0-9_:-]+", "_", name).strip("_") or "context"
+  if isinstance(content, str):
+    body = content
+  else:
+    body = _format_json(content)
+  return f"<{normalized}>\n{body}\n</{normalized}>"
+
+
+def _format_json(value: Any) -> str:
+  return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _compact_render_text(value: str, max_chars: int) -> str:
+  text = " ".join(value.split())
+  if len(text) <= max_chars:
+    return text
+  return text[: max_chars - 15].rstrip() + "...[truncated]"
+
+
+def _tool_schema_name(tool: dict[str, Any]) -> str | None:
+  name = tool.get("name") or tool.get("capability_id")
+  function = tool.get("function")
+  if not name and isinstance(function, dict):
+    name = function.get("name")
+  return str(name) if name else None
+
+
+def _tool_schema_description(tool: dict[str, Any]) -> str | None:
+  description = tool.get("description")
+  function = tool.get("function")
+  if not description and isinstance(function, dict):
+    description = function.get("description")
+  return str(description) if description else None
+
+
+def _message_from_layer_item(item: ContextLayerItem) -> dict[str, Any]:
+  if item.message is None:
+    return {"role": item.role, "content": item.content}
+  message = dict(item.message)
+  role = str(message.get("role") or item.role)
+  if role not in {"system", "user", "assistant", "tool"}:
+    role = item.role if item.role in {"system", "user", "assistant", "tool"} else "user"
+  message["role"] = role
+  if "content" not in message:
+    message["content"] = item.content
+  return message
