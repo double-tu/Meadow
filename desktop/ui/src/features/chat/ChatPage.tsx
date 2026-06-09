@@ -76,7 +76,11 @@ export function ChatPage({ api }: ChatPageProps) {
 
   async function runSessionAction(action: "pause" | "retry" | "clear") {
     if (!activeSession) return;
-    if (action === "pause") await api.pauseChat(activeSession.session_id);
+    if (action === "pause") {
+      await api.pauseChat(activeSession.session_id);
+      setSending(false);
+      setActiveRunId(null);
+    }
     if (action === "retry") await api.retryChat(activeSession.session_id);
     if (action === "clear") await api.clearChat(activeSession.session_id);
     await Promise.all([sessions.reload(), messages.reload()]);

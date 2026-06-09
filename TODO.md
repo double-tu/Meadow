@@ -1,6 +1,6 @@
 # Agent Kernel Development TODO
 
-更新时间: 2026-06-08 14:08:35 CST
+更新时间: 2026-06-08 23:31:10 CST
 
 ## 当前目标
 
@@ -27,6 +27,7 @@
 - [x] 实现 artifact 内容读取 adapter MVP: `artifact_read` 可读取 metadata 内联 content/body/text/payload，或经授权 `FileWorkspace` 读取 `file://`/本地路径，并支持 start/count/keyword 窗口化输出；对象存储、截图/blob、多媒体 adapter 仍待补。
 - [x] 将 `ContinuousAgentRunner` 与日常对话接入 `ContextAssembler`，保留旧 `ContextManager` 兼容路径。
 - [x] 实现 GenericAgent 风格运行时锚点 MVP: `ContinuousAgentRunner` 每轮注入 `working_memory_anchor`, 折叠历史、保留原始用户目标、action_history 和当前 turn, 避免连续对话/工具回灌后丢失任务语境。
+- [x] 实现 GenericAgent 风格研究账本 MVP: `ResearchLedger` 被动提炼 visited sources、evidence、candidate sources、failures 和 strategy notes, 并在每轮上下文和工具结果回灌中模型可见; 搜索结果/链接候选与已打开证据分离, 推动模型纵向/横向探索而不硬编码具体任务流程。
 - [x] 实现模型协议适配/上下文清洗 MVP: 新增 `ModelContextSanitizer` 与 `ModelToolProtocolAdapter`, 支持清理非法消息序列、解析原生/JSON/text `<tool_use>` 工具调用, 并把坏工具协议作为 repair 诊断回灌模型。
 - [x] 增强 Capability 运行时协议底座: `CapabilitySpec` 新增 `CapabilityExecutionPolicy`、并发安全、只读/破坏性、用户交互、中断行为、进度/压缩/UI render hint/resource locks 元数据; 新增 `CapabilityProtocolDescriber` 与 `CapabilityBatchPlanner`, 为后续 streaming tool executor、UI 折叠过程和并发调度提供接口。
 - [x] 实现模型健康与 fallback router MVP: 新增 `ModelHealthRouter`/`ModelRoute`/failure classifier, `ModelGateway` 支持可选健康路由, 记录空回复、协议错误、截断、超时和 provider error, 不传 router 时保持旧行为。
@@ -36,6 +37,20 @@
 - [x] 实现后台 MemoryCurator MVP: `MemoryCurator.curate_run` 从工具/Agent/Workbench/候选事件写 run episodic summary，并复用 `MemoryEvolutionSettlementService` 结算 semantic/procedural memory。
 - [ ] 实现 MemoryCurator 调度 worker/API: 当前为可调用服务，尚未接入后台定时/队列/HTTP 控制入口。
 - [ ] 完成验收: 同一任务中模型能看到能力索引、主动打开 skill/记忆/artifact、上下文 ledger 可解释包含与省略原因，大 payload 不进入 event payload。
+
+## 当前阶段目标 - Agent 执行恢复与无进展纠偏协议
+
+目标: 以 `docs/agent-execution-recovery-architecture.md` 为阶段性蓝图, 将 GenericAgent/Claude Code 类工具里有效的“模型可见修复协议、stop hook、无进展识别、最大轮次诊断”吸收到 Meadow 的通用 Agent Runtime。运行时只做机制性纠偏和诊断, 不硬编码具体网站、具体任务或具体 Skill 流程; 任务策略继续由 Skill/SOP、上下文、记忆和模型自主组合决定。
+
+- [x] 编写 Agent 执行恢复架构文档: `docs/agent-execution-recovery-architecture.md`, 明确 transition reason、progress hook、stop hook、NoProgressHook、最大轮次诊断合成器、UI 投影和验收标准。
+- [x] P1 实现 runtime hook 契约: 新增 `ExecutionTransition`、`ProgressHookResult`、`AgentProgressHook`、`NoProgressHook`、`StopHook`、`ExecutionDiagnosticSynthesizer`, 保持接口不依赖具体 UI、adapter 或特殊任务流程。
+- [x] P1 实现通用进展信号抽取第一版: 基于工具输入签名、输出摘要、错误类型、证据指纹、artifact/event refs 判断是否有新增证据; 已覆盖浏览器 tabs/page/JS 空结果、HTTP/Skill/子 Agent 等失败类通用信号, MCP/Workbench 后续可扩展更多输出指纹。
+- [x] P2 接入 `ContinuousAgentRunner`: 每轮维护 transition reason, 将 hook result 作为模型可见 `tool_results.execution_hooks` 回灌; no-tool、空回复、截断、重复工具调用、无进展进入 repair/continue 流。
+- [x] P2 改造最大轮次/失败输出: 终止时输出 original goal、status、turn/tool count、completed actions、valid evidence、failures、no_progress_causes、next_steps, 避免空白或“已完成但无内容”。
+- [x] P2 接入 stop hook: 模型尝试完成但输出空/无效完成文案或失败无诊断时, 阻止完成并回灌修复指令。
+- [x] P3 增加回归测试: 重复 `browser_scan(tabs_only=true)` 与 `skill_open` 交替触发 no-progress; hook 修复消息进入下一轮模型输入; 最大轮次输出诊断; 有效 Feed/页面证据仍能生成可读摘要。
+- [ ] P4 接入过程可视化: `RuntimeEvent`/`ProcessVisibilityProjector` 展示 transition、hook warning/blocking/terminal、失败诊断、子 Agent/工具中间过程折叠。
+- [ ] 完成验收: 日常对话中任务失败或达到轮次时始终有可行动结果; 重复低信息工具调用会被模型可见地纠偏; 浏览器/HTTP/子 Agent/MCP/Workflow 失败共用同一机制而不是硬编码特殊流程。
 
 ## 桌面端可视化路线
 
@@ -52,9 +67,11 @@
 - [ ] 深化浏览器目标治理: 持久化 BrowserTargetOwnership/lease 事件、支持 target release/transfer/force-claim API、浏览器 lane/pool、关闭/重载 exclusive lease、UI 展示 target owner/status/action。
 - [ ] 深化浏览器页面观察与 artifact handoff: 增强主内容抽取、动态页面滚动/分页、Feed/card 结构化抽取、搜索结果候选去噪、来源页正文窗口化读取, 并把大页面内容保存为 artifact ref 而不是直接塞入 event/context。
 - [ ] 增强 Web Research SOP 执行闭环验收: 日常对话中模型能先 scan tabs, 再搜索/打开候选结果页, 至少核验多个公开来源后回答; 工具失败时能基于 SOP 自动换链接、换搜索入口或退回 HTTP。
+- [x] 增强 Web Research SOP 与工具 schema: 明确搜索页只是候选发现、候选未打开前不算证据、重复 scan 要升级到 browser_execute_js/换来源/换查询/打开 Skill/SOP, 并与 `ResearchLedger` 协同回灌。
 - [x] 增加 ContinuousAgentRunner 重复工具调用保护 MVP: 对同一 capability + 稳定输入连续重复超过阈值时返回 guard 结果, 防止模型在浏览器/HTTP 失败或标签漂移时无限循环。
 - [x] 对齐 GenericAgent 重复工具调用修复流: repeated_tool_call_guard 不再立即结束整次任务, 而是作为失败观察回灌给模型, 要求探测真实状态、换输入/工具/来源、打开 Skill/SOP 或请求用户; 轮次耗尽时再输出诊断兜底。
 - [x] 对齐 GenericAgent `no_tool` 修复处理: 模型未调用工具且空/不可展示时不再直接完成, 而是把 `[System] Blank response` 修复提示回灌重试; 流中断、max_tokens 截断、大代码块未调用工具也进入修复回灌; 连续 3 次仍空才失败退出并带 run/turn/模型结果键诊断。
+- [x] 对齐 GenericAgent/Claude Code 的模型可见执行恢复协议: 按 `docs/agent-execution-recovery-architecture.md` 为 runner 增加 transition reason、progress hook、stop hook、无进展纠偏和最大轮次诊断合成, 避免任务失败时无结果或无效结果。
 - [x] 实现 AgentMailbox/InterventionChannel 协议 MVP: 新增 `AgentProtocolMessage`、`AgentInterventionChannel`, 将 message/keyinfo/intervention/stop/pause/resume/status/permission request-response 泛化为结构化 mailbox payload。
 - [x] 实现 Coordinator/Worker 协议 MVP: 新增 `CoordinatorProfile` 和 `WorkerTaskNotification`, 支持主 Agent 以 coordinator 身份调度 worker, worker 完成/失败/被杀以结构化 task notification 回灌模型。
 - [x] 实现子 Agent 权限桥协议 MVP: 新增 `LeaderPermissionBridge` 和 `DelegatedPermissionRequest`, 支持子 Agent 权限请求冒泡到 parent/leader 并形成结构化响应。

@@ -11,8 +11,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
+from agent_kernel.agents.execution_hooks import (
+  ExecutionDiagnosticSynthesizer,
+  ExecutionTransition,
+  NoProgressHook,
+  ProgressHookResult,
+  StopHook,
+  hook_results_to_model_messages,
+  terminal_diagnostic_content,
+)
 from agent_kernel.capabilities.atomic import AtomicToolCatalog
 from agent_kernel.capabilities.runtime import CapabilityCallContext, CapabilityRuntime
 from agent_kernel.domain.base import new_id
@@ -21,6 +30,7 @@ from agent_kernel.domain.events import RuntimeEvent, RuntimeEventType
 from agent_kernel.domain.serialization import to_json
 from agent_kernel.domain.skill import SkillCard
 from agent_kernel.agents.goal_evidence import GoalEvidenceVerifier
+from agent_kernel.agents.research_ledger import ResearchLedger
 from agent_kernel.agents.run_anchor import RunAnchor
 from agent_kernel.agents.tool_surface import SkillAwareToolSurfacePolicy, ToolSurfacePolicy, ToolSurfaceSelection
 from agent_kernel.models.gateway import ModelGateway
@@ -28,7 +38,7 @@ from agent_kernel.models.protocol import ModelContextSanitizer, ModelToolProtoco
 from agent_kernel.policy.engine import PolicyDecisionType
 
 
-RunnerStatus = Literal["completed", "max_turns_exceeded", "awaiting_approval", "waiting_for_user", "failed"]
+RunnerStatus = Literal["completed", "max_turns_exceeded", "awaiting_approval", "waiting_for_user", "failed", "cancelled"]
 
 
 @dataclass(slots=True)
@@ -101,6 +111,7 @@ class ContinuousAgentRunner:
     agent_id: str | None = None,
     scope: str | None = None,
     config: ContinuousRunnerConfig | None = None,
+    should_cancel: Callable[[], bool] | None = None,
   ) -> ContinuousRunnerResult:
     config = config or ContinuousRunnerConfig()
     run_id = run_id or new_id("conv_run")
@@ -110,12 +121,17 @@ class ContinuousAgentRunner:
       original_user_goal=user_message,
       history_messages=history_messages or [],
     )
+    research_ledger = ResearchLedger.from_goal(user_message)
     all_tool_calls: list[ContinuousToolCallRecord] = []
     action_history: list[str] = []
+    all_hook_results: list[ProgressHookResult] = []
     finalization_instruction: str | None = None
     last_repetition_key: str | None = None
     consecutive_repeated_tool_calls = 0
     empty_model_result_count = 0
+    stop_hook_block_count = 0
+    progress_hooks = [NoProgressHook(), StopHook()]
+    diagnostic_synthesizer = ExecutionDiagnosticSynthesizer()
     self._append_event(
       RuntimeEvent(
         event_type=RuntimeEventType.RUN_CREATED,
@@ -127,6 +143,29 @@ class ContinuousAgentRunner:
     )
 
     for turn in range(1, config.max_turns + 1):
+      if should_cancel is not None and should_cancel():
+        output = _cancelled_output(run_id=run_id, turn=turn)
+        self._append_turn_event(
+          run_id,
+          agent_id,
+          task_id,
+          turn,
+          output,
+          [],
+          transition=ExecutionTransition(
+            run_id=run_id,
+            turn=turn,
+            reason="user_cancelled",
+            original_goal=user_message,
+          ),
+        )
+        return ContinuousRunnerResult(
+          run_id=run_id,
+          status="cancelled",
+          turns=turn,
+          output=output,
+          tool_calls=all_tool_calls,
+        )
       tool_surface = self._select_tool_surface(user_message, turn)
       if finalization_instruction is not None:
         tool_surface = ToolSurfaceSelection(
@@ -144,6 +183,7 @@ class ContinuousAgentRunner:
         run_anchor=run_anchor,
         turn=turn,
         action_history=action_history,
+        research_ledger=research_ledger,
       )
       context = self._context_sanitizer.sanitize(context)
       adaptation = self._tool_protocol_adapter.adapt(
@@ -190,6 +230,83 @@ class ContinuousAgentRunner:
             },
           ]
           continue
+        if not _is_empty_model_diagnostic(output):
+          stop_results = []
+          transition = ExecutionTransition(
+            run_id=run_id,
+            turn=turn,
+            reason="final_answer",
+            original_goal=user_message,
+          )
+          for hook in progress_hooks:
+            stop_results.extend(
+              hook.before_final_answer(
+                transition=transition,
+                model_output=output,
+                all_records=all_tool_calls,
+              )
+            )
+          blocking_stop_results = [result for result in stop_results if result.severity in {"blocking", "terminal"}]
+          if blocking_stop_results and stop_hook_block_count < 2 and turn < config.max_turns:
+            stop_hook_block_count += 1
+            all_hook_results.extend(blocking_stop_results)
+            self._append_turn_event(
+              run_id,
+              agent_id,
+              task_id,
+              turn,
+              {"stop_hook_blocking": [result.to_dict() for result in blocking_stop_results]},
+              [],
+              transition=transition,
+              hook_results=blocking_stop_results,
+            )
+            messages = [
+              *_normalize_history_messages(history_messages or []),
+              {"role": "user", "content": user_message},
+              {
+                "role": "user",
+                "content": {
+                  "type": "model_repair",
+                  "original_user_goal": user_message,
+                  "turn": turn,
+                  "diagnostics": {"type": "stop_hook_blocking"},
+                  "execution_hooks": hook_results_to_model_messages(blocking_stop_results),
+                  "instruction": (
+                    "A stop hook blocked the previous final answer because it was not actionable enough. "
+                    "Use available tool evidence to produce a concrete final answer, or explain the exact blocker, "
+                    "recent failures, and next recoverable action. Do not return empty/no-content completion text."
+                  ),
+                },
+              },
+            ]
+            continue
+          if blocking_stop_results:
+            all_hook_results.extend(blocking_stop_results)
+            terminal_output = _terminal_output_from_tool_calls(
+              all_tool_calls,
+              original_goal=user_message,
+              status="failed",
+              turns=turn,
+              hook_results=all_hook_results,
+              diagnostic_synthesizer=diagnostic_synthesizer,
+            )
+            self._append_turn_event(
+              run_id,
+              agent_id,
+              task_id,
+              turn,
+              terminal_output,
+              [],
+              transition=transition,
+              hook_results=blocking_stop_results,
+            )
+            return ContinuousRunnerResult(
+              run_id=run_id,
+              status="failed",
+              turns=turn,
+              output=terminal_output,
+              tool_calls=all_tool_calls,
+            )
         self._append_turn_event(run_id, agent_id, task_id, turn, output, [])
         run_anchor.record_turn(model_result=model_result, records=[])
         return ContinuousRunnerResult(
@@ -204,6 +321,29 @@ class ContinuousAgentRunner:
       empty_model_result_count = 0
       tool_messages: list[dict[str, Any]] = []
       for raw_call in tool_calls:
+        if should_cancel is not None and should_cancel():
+          output = _cancelled_output(run_id=run_id, turn=turn)
+          self._append_turn_event(
+            run_id,
+            agent_id,
+            task_id,
+            turn,
+            output,
+            turn_records,
+            transition=ExecutionTransition(
+              run_id=run_id,
+              turn=turn,
+              reason="user_cancelled",
+              original_goal=user_message,
+            ),
+          )
+          return ContinuousRunnerResult(
+            run_id=run_id,
+            status="cancelled",
+            turns=turn,
+            output=output,
+            tool_calls=[*all_tool_calls, *turn_records],
+          )
         call = self._tool_catalog.normalize_call(
           raw_call["name"],
           raw_call["input"],
@@ -302,6 +442,28 @@ class ContinuousAgentRunner:
       all_tool_calls.extend(turn_records)
       action_history.extend(_summarize_turn_records(turn_records, turn=turn))
       run_anchor.record_turn(model_result=model_result, records=turn_records)
+      research_ledger.observe_records(turn_records, turn=turn)
+      transition = ExecutionTransition(
+        run_id=run_id,
+        turn=turn,
+        reason="tool_result_feedback",
+        original_goal=user_message,
+        metadata={"tool_count": len(turn_records)},
+      )
+      turn_hook_results: list[ProgressHookResult] = []
+      for hook in progress_hooks:
+        turn_hook_results.extend(
+          hook.after_tool_results(
+            transition=transition,
+            turn_records=turn_records,
+            all_records=all_tool_calls,
+            action_history=action_history,
+          )
+        )
+      if turn_hook_results:
+        all_hook_results.extend(turn_hook_results)
+        action_history.extend(_summarize_hook_results(turn_hook_results, turn=turn))
+      execution_hook_messages = hook_results_to_model_messages(turn_hook_results)
       evidence = self._goal_evidence_verifier.evaluate(user_message, all_tool_calls)
       finalization_instruction = evidence.instruction if evidence.satisfied else None
       self._append_turn_event(
@@ -309,8 +471,13 @@ class ContinuousAgentRunner:
         agent_id,
         task_id,
         turn,
-        {"tool_results": _compact_for_json(tool_messages, max_bytes=5000)},
+        {
+          "tool_results": _compact_for_json(tool_messages, max_bytes=5000),
+          "execution_hooks": _compact_for_json([result.to_dict() for result in turn_hook_results], max_bytes=3000),
+        },
         turn_records,
+        transition=transition,
+        hook_results=turn_hook_results,
       )
       messages = [
         *_normalize_history_messages(history_messages or []),
@@ -322,13 +489,18 @@ class ContinuousAgentRunner:
             "original_user_goal": user_message,
             "turn": turn,
             "action_history": action_history[-12:],
+            "research_ledger": research_ledger.to_model_payload(),
             "results": tool_messages,
+            "execution_hooks": execution_hook_messages,
             "instruction": (
               "Continue working on original_user_goal. If the goal is not completed yet, call the next required tool. "
               "Do not finish by only summarizing intermediate inspection results unless they fully satisfy the original goal. "
               "Use action_history to avoid repeating failed or already-completed steps. "
+              "Use research_ledger to track visited sources, evidence, candidate links, and failures for research/browser tasks; "
+              "open promising candidate sources and extract evidence before finalizing when the user asked for search or investigation. "
               "Use working_memory_anchor to preserve continuity across user replies and tool-result turns. "
               "Follow the relevant Skill/SOP instructions when a selected or active Skill applies. "
+              "If execution_hooks are present, treat them as model-visible runtime repair instructions and do not repeat the blocked strategy. "
               + (
                 finalization_instruction
                 if finalization_instruction is not None
@@ -343,7 +515,14 @@ class ContinuousAgentRunner:
       run_id=run_id,
       status="max_turns_exceeded",
       turns=config.max_turns,
-      output=_fallback_output_from_tool_calls(all_tool_calls),
+      output=_terminal_output_from_tool_calls(
+        all_tool_calls,
+        original_goal=user_message,
+        status="max_turns_exceeded",
+        turns=config.max_turns,
+        hook_results=all_hook_results,
+        diagnostic_synthesizer=diagnostic_synthesizer,
+      ),
       tool_calls=all_tool_calls,
     )
 
@@ -422,13 +601,25 @@ class ContinuousAgentRunner:
     run_anchor: RunAnchor,
     turn: int,
     action_history: list[str],
+    research_ledger: ResearchLedger,
   ) -> ModelContext:
     tool_schemas = tool_surface.tool_schemas
+    research_payload = research_ledger.to_model_payload()
     anchored_messages = [
       run_anchor.render_message(current_turn=turn, action_history=action_history),
       *messages,
     ]
     if self._context_assembler is not None:
+      metadata: dict[str, Any] = {}
+      if research_payload is not None:
+        metadata["working_memory"] = {
+          "research_ledger": research_payload,
+          "research_instructions": [
+            "Search/result pages are candidate discovery, not verified evidence.",
+            "Open promising candidate sources and extract evidence before finalizing research tasks.",
+            "If progress stalls, switch source/tool/query, use browser_execute_js for precise DOM extraction, or report a concrete blocker.",
+          ],
+        }
       return self._context_assembler.assemble(
         ContextAssemblyRequest(
           run_id=run_id,
@@ -439,12 +630,15 @@ class ContinuousAgentRunner:
           skills=tool_surface.skills,
           tool_schemas=tool_schemas,
           max_tokens=4096,
+          metadata=metadata,
         )
       ).model_context
+    research_message = research_ledger.render_message(current_turn=turn)
     model_messages = [
       {"role": "system", "content": self._system_instructions},
       *self._tool_surface_messages(tool_surface),
       *self._skill_messages(tool_surface.skills),
+      *([research_message] if research_message is not None else []),
       *anchored_messages,
     ]
     if self._context_manager is None:
@@ -482,6 +676,9 @@ class ContinuousAgentRunner:
     turn: int,
     output: dict[str, Any],
     tool_calls: list[ContinuousToolCallRecord],
+    *,
+    transition: ExecutionTransition | None = None,
+    hook_results: list[ProgressHookResult] | None = None,
   ) -> None:
     self._append_event(
       RuntimeEvent(
@@ -492,7 +689,12 @@ class ContinuousAgentRunner:
         payload={
           "runner": "continuous_agent",
           "turn": turn,
+          "transition": transition.to_dict() if transition is not None else None,
           "output": _compact_for_json(output, max_bytes=5000),
+          "hook_results": _compact_for_json(
+            [result.to_dict() for result in hook_results or []],
+            max_bytes=3000,
+          ),
           "tool_calls": [
             {
               "name": call.name,
@@ -520,6 +722,8 @@ _DEFAULT_SYSTEM_INSTRUCTIONS = (
   "需要实时信息、浏览器/桌面/移动控制、文件、代码执行、MCP、Workflow、子代理或任务分配时，"
   "优先调用可用工具，不要只说明自己可以做。工具结果会回灌给你继续推理。"
   "如果工具失败，必须基于失败结果继续尝试其他可用工具，或如实说明失败原因；不能编造工具没有返回的信息。"
+  "对搜索/调研/浏览器任务，搜索结果页和 AI 概览只是候选线索；需要打开相关来源页、提取证据、交叉核验后再回答。"
+  "如果连续工具调用没有新增证据，必须切换策略：换查询/来源/工具，使用 browser_execute_js 精确抽取，打开 Skill/SOP，委派子任务，或给出具体阻塞报告。"
   "如果任务完成，返回最终中文回答；如果缺少关键信息，调用用户输入能力。"
 )
 
@@ -670,7 +874,7 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
       lines.append("部分操作失败：" + "；".join(_humanize_tool_failures(failed_tools[-3:])))
     return {"content": "\n".join(lines)}
   if feed_titles:
-    lines = ["已获取到页面数据，但执行轮次已用完。根据已返回的数据，看到的推荐内容包括："]
+    lines = ["已获取到页面数据，但执行轮次已用完。根据已返回的数据，页面条目/候选内容包括："]
     lines.extend(f"- {title}" for title in _unique_strings(feed_titles)[:12])
     if access_issues:
       lines.append("")
@@ -686,7 +890,7 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
       if isinstance(titles, list):
         browser_feed_titles.extend(str(title) for title in titles if str(title).strip())
     if browser_feed_titles:
-      lines = ["已通过浏览器获取到页面推荐内容，执行轮次已用完。根据已返回的数据，看到的推荐内容包括："]
+      lines = ["已通过浏览器获取到页面内容，执行轮次已用完。根据已返回的数据，页面条目/候选内容包括："]
       lines.extend(f"- {title}" for title in _unique_strings(browser_feed_titles)[:20])
       if access_issues:
         lines.append("")
@@ -703,7 +907,7 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
         lines.append(f"- 页面：{title or url}")
       titles = item.get("feed_titles")
       if isinstance(titles, list) and titles:
-        lines.append("  - 推荐内容：")
+        lines.append("  - 页面条目/候选内容：")
         lines.extend(f"    - {feed_title}" for feed_title in _unique_strings([str(feed_title) for feed_title in titles])[:8])
       cards = item.get("visible_cards")
       if isinstance(cards, list) and cards:
@@ -755,6 +959,31 @@ def _fallback_output_from_tool_calls(tool_calls: list[ContinuousToolCallRecord])
   return {"content": "\n".join(summary)}
 
 
+def _terminal_output_from_tool_calls(
+  tool_calls: list[ContinuousToolCallRecord],
+  *,
+  original_goal: str,
+  status: RunnerStatus,
+  turns: int,
+  hook_results: list[ProgressHookResult],
+  diagnostic_synthesizer: ExecutionDiagnosticSynthesizer,
+) -> dict[str, Any]:
+  fallback = _fallback_output_from_tool_calls(tool_calls)
+  diagnostics = diagnostic_synthesizer.synthesize(
+    original_goal=original_goal,
+    status=status,
+    turns=turns,
+    tool_calls=tool_calls,
+    hook_results=hook_results,
+  )
+  content = str(fallback.get("content") or "")
+  if not content.strip():
+    content = f"日常 Agent 未能完成任务：{original_goal}"
+  fallback["content"] = terminal_diagnostic_content(content, diagnostics)
+  fallback.update(diagnostics)
+  return fallback
+
+
 def _diagnostic_output_for_empty_model_result(result: dict[str, Any], *, turn: int | None = None) -> dict[str, Any]:
   markers = []
   for key in ("finish", "finish_reason", "stop_reason"):
@@ -774,6 +1003,17 @@ def _diagnostic_output_for_empty_model_result(result: dict[str, Any], *, turn: i
       "type": "empty_model_result",
       "turn": turn,
       "model_result_keys": sorted(str(key) for key in result.keys()),
+    },
+  }
+
+
+def _cancelled_output(*, run_id: str, turn: int) -> dict[str, Any]:
+  return {
+    "content": "任务已根据用户请求暂停。可以稍后重试或继续发新消息调整任务。",
+    "diagnostics": {
+      "type": "user_cancelled",
+      "run_id": run_id,
+      "turn": turn,
     },
   }
 
@@ -924,6 +1164,15 @@ def _summarize_turn_records(records: list[ContinuousToolCallRecord], *, turn: in
   return summaries
 
 
+def _summarize_hook_results(results: list[ProgressHookResult], *, turn: int) -> list[str]:
+  summaries: list[str] = []
+  for result in results:
+    if result.severity not in {"warning", "blocking", "terminal"}:
+      continue
+    summaries.append(f"turn {turn}: execution_hook {result.severity}:{result.reason}")
+  return summaries
+
+
 def _record_target_id(record: ContinuousToolCallRecord) -> str | None:
   for source in (record.output, record.input):
     value = source.get("target_id") or source.get("active_target_id")
@@ -1057,6 +1306,8 @@ def _extract_browser_observation(output: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def _extract_browser_observation_from_tool_result(output: dict[str, Any]) -> dict[str, Any] | None:
+  if "targets" in output and "page" not in output:
+    return None
   payload = _browser_tool_payload(output)
   if payload is None:
     return None
@@ -1104,6 +1355,8 @@ def _parse_browser_payload(value: Any) -> Any:
 
 def _observation_from_structured_browser_payload(payload: Any) -> dict[str, Any]:
   if isinstance(payload, list):
+    if _looks_like_browser_target_list(payload):
+      return {}
     cards = [_normalize_browser_card(item) for item in payload]
     cards = [item for item in cards if item]
     if not cards:
@@ -1147,6 +1400,34 @@ def _observation_from_structured_browser_payload(payload: Any) -> dict[str, Any]
         if nested_value and nested_key not in observation:
           observation[nested_key] = nested_value
   return observation
+
+
+def _looks_like_browser_target_list(payload: list[Any]) -> bool:
+  dict_items = [item for item in payload if isinstance(item, dict)]
+  if not dict_items or len(dict_items) != len(payload):
+    return False
+  target_like = 0
+  for item in dict_items:
+    keys = set(item)
+    has_target_id = any(key in keys for key in ("target_id", "id", "sessionId"))
+    has_tab_metadata = any(key in keys for key in ("windowId", "active", "kind", "metadata"))
+    has_location = any(key in keys for key in ("url", "title", "label"))
+    has_content_field = any(
+      key in keys
+      for key in (
+        "text",
+        "content",
+        "summary",
+        "displayTitle",
+        "feed_titles",
+        "visible_cards",
+        "search_results",
+        "snippet",
+      )
+    )
+    if has_target_id and has_location and (has_tab_metadata or not has_content_field):
+      target_like += 1
+  return target_like == len(dict_items)
 
 
 def _normalize_browser_card(value: Any) -> dict[str, str]:

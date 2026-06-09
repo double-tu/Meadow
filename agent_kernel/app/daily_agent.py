@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from agent_kernel.agents import ContinuousAgentRunner, ContinuousRunnerConfig, ContinuousRunnerResult
 from agent_kernel.autonomy.builtin_skills import ensure_builtin_atomic_skills
@@ -29,6 +29,7 @@ class DailyAgentRequest:
   model_ref: str = "mock"
   agent_id: str = DAILY_AGENT_ID
   max_turns: int = 16
+  cancel_requested: Callable[[], bool] | None = None
 
 
 @dataclass(slots=True)
@@ -101,6 +102,7 @@ class ContinuousDailyAgentExecutor:
         model_ref=request.model_ref,
         max_turns=request.max_turns,
       ),
+      should_cancel=request.cancel_requested,
     )
     raw = runner_result_to_raw(outcome)
     return DailyAgentResponse(content=assistant_content_from_runner_result(outcome), raw=raw)

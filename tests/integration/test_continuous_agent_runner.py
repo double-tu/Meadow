@@ -6,7 +6,16 @@ import unittest
 from agent_kernel.agents import ContinuousAgentRunner, ContinuousRunnerConfig
 from agent_kernel.autonomy.builtin_skills import BUILTIN_ATOMIC_SKILLS
 from agent_kernel.capabilities import AtomicCapabilityProvider, CapabilityRegistry, CapabilityRuntime
-from agent_kernel.capabilities.adapters import ControlResult, ControlWorkbench, HTTPResponse, LocalFileWorkspace, LocalToolExecutor
+from agent_kernel.capabilities.adapters import (
+  ControlResult,
+  ControlTarget,
+  ControlWorkbench,
+  FakeControlBackend,
+  HTTPResponse,
+  LocalFileWorkspace,
+  LocalToolExecutor,
+)
+from agent_kernel.context import ContextAssembler
 from agent_kernel.domain import CapabilityGrant, RuntimeEventType
 from agent_kernel.domain.base import utc_now
 from agent_kernel.memory import MemoryFacade
@@ -334,6 +343,93 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
     finally:
       conn.close()
 
+  async def test_runner_injects_research_ledger_after_browser_observation(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      backend = FakeControlBackend()
+      backend.register_target(
+        ControlTarget(
+          target_id="tab_1",
+          kind="browser",
+          label="Search",
+          metadata={"url": "https://search.example/?q=plugin"},
+        )
+      )
+      backend.register_response(
+        "browser",
+        "inspect",
+        ControlResult(
+          ok=True,
+          output={
+            "page": {
+              "title": "Search Results",
+              "url": "https://search.example/?q=plugin",
+              "text": "Search result snippets are only candidates.",
+              "search_results": [
+                {
+                  "title": "Official Pricing",
+                  "href": "https://example.com/pricing",
+                  "snippet": "Subscription details",
+                }
+              ],
+              "links": [{"text": "Forum discussion", "href": "https://forum.example/topic"}],
+            }
+          },
+        ),
+      )
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(grants=[]),
+        local_tools,
+        control_workbench=ControlWorkbench(backend),
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(
+        responses=[
+          {"tool_calls": [{"name": "browser_scan", "input": {"target_id": "tab_1"}}]},
+          {"finish": True, "output": {"summary": "will continue from ledger"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+        context_assembler=ContextAssembler(uow_factory=uow_factory, memory=MemoryFacade(uow_factory)),
+        skills=list(BUILTIN_ATOMIC_SKILLS),
+      )
+
+      await runner.run(
+        user_message="帮我深度搜索这个插件的订阅版本",
+        run_id="run_research_ledger",
+        scope="scope_research_ledger",
+        config=ContinuousRunnerConfig(max_turns=3),
+      )
+
+      second_messages = provider.calls[1][1].messages
+      ledger_messages = [
+        message
+        for message in second_messages
+        if isinstance(message.get("content"), dict)
+        and message["content"].get("type") == "working_state"
+        and isinstance(message["content"].get("research_ledger"), dict)
+      ]
+      self.assertTrue(ledger_messages)
+      ledger = ledger_messages[-1]["content"]["research_ledger"]
+      self.assertEqual(ledger["candidate_sources"][0]["url"], "https://example.com/pricing")
+      self.assertIn("search_results_need_source_open", ledger["strategy_notes"][0])
+      tool_result_payload = second_messages[-1]["content"]["research_ledger"]
+      self.assertEqual(tool_result_payload["evidence"][0]["url"], "https://search.example/?q=plugin")
+    finally:
+      conn.close()
+
   async def test_runner_retries_empty_model_result_before_finishing(self) -> None:
     conn = connect_sqlite()
     try:
@@ -557,7 +653,7 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       )
 
       self.assertEqual(result.status, "max_turns_exceeded")
-      self.assertIn("看到的推荐内容包括", result.output["content"])
+      self.assertIn("页面条目/候选内容包括", result.output["content"])
       self.assertIn("云南大理避暑很舒服", result.output["content"])
     finally:
       conn.close()
@@ -654,7 +750,7 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       )
 
       self.assertEqual(result.status, "max_turns_exceeded")
-      self.assertIn("已通过浏览器获取到页面推荐内容", result.output["content"])
+      self.assertIn("已通过浏览器获取到页面内容", result.output["content"])
       self.assertIn("深圳周末咖啡地图", result.output["content"])
       self.assertIn("夏天通勤穿搭", result.output["content"])
     finally:
@@ -786,6 +882,153 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
     finally:
       conn.close()
 
+  async def test_runner_injects_no_progress_hook_for_repeated_low_information_actions(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_browser_tabs_only_progress",
+              capability_id="atom.browser.scan",
+              run_id="run_no_progress_hook",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        control_workbench=ControlWorkbench(_BrowserTabsOnlyBackend()),
+        uow_factory=uow_factory,
+      )
+      provider = MockModelProvider(
+        responses=[
+          {"tool_calls": [{"name": "browser_scan", "input": {"tabs_only": True}}]},
+          {"tool_calls": [{"name": "skill_open", "input": {"skill_id": "builtin.atomic.web_research"}}]},
+          {"tool_calls": [{"name": "browser_scan", "input": {"tabs_only": True}}]},
+          {"finish": True, "output": {"content": "已收到无进展提示，准备更换策略。"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="帮我用浏览器打开小红书刷新并获取最新帖子",
+        run_id="run_no_progress_hook",
+        scope="scope_no_progress_hook",
+        config=ContinuousRunnerConfig(max_turns=5),
+      )
+
+      self.assertEqual(result.status, "completed")
+      hook_content = provider.calls[3][1].messages[-1]["content"]
+      self.assertTrue(hook_content["execution_hooks"])
+      self.assertEqual(hook_content["execution_hooks"][0]["hook"], "no_progress_repeated_low_information")
+      self.assertIn("Do not repeat", hook_content["execution_hooks"][0]["repair_hint"])
+      self.assertIn("execution_hook warning:no_progress", hook_content["action_history"][-1])
+    finally:
+      conn.close()
+
+  async def test_runner_max_turns_returns_structured_no_progress_diagnostic(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(
+        registry,
+        PolicyEngine(
+          grants=[
+            CapabilityGrant(
+              grant_id="grant_browser_tabs_only_terminal",
+              capability_id="atom.browser.scan",
+              run_id="run_no_progress_terminal",
+              expires_at=utc_now() + timedelta(minutes=5),
+            )
+          ]
+        ),
+        local_tools,
+        control_workbench=ControlWorkbench(_BrowserTabsOnlyBackend()),
+        uow_factory=uow_factory,
+      )
+      repeated_scan = {"tool_calls": [{"name": "browser_scan", "input": {"tabs_only": True}}]}
+      provider = MockModelProvider(responses=[repeated_scan, repeated_scan, repeated_scan])
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="帮我用浏览器打开小红书刷新并获取最新帖子",
+        run_id="run_no_progress_terminal",
+        scope="scope_no_progress_terminal",
+        config=ContinuousRunnerConfig(max_turns=3),
+      )
+
+      self.assertEqual(result.status, "max_turns_exceeded")
+      self.assertEqual(result.output["diagnostics"]["type"], "execution_terminal_diagnostic")
+      self.assertEqual(result.output["diagnostics"]["original_goal"], "帮我用浏览器打开小红书刷新并获取最新帖子")
+      self.assertGreaterEqual(len(result.output["diagnostics"]["no_progress_causes"]), 1)
+      self.assertIn("未完成原因", result.output["content"])
+      self.assertIn("建议下一步", result.output["content"])
+    finally:
+      conn.close()
+
+  async def test_runner_stop_hook_repairs_empty_completion_text(self) -> None:
+    conn = connect_sqlite()
+    try:
+      uow_factory = unit_of_work_factory(conn)
+      registry = CapabilityRegistry()
+      local_tools = LocalToolExecutor()
+      catalog = AtomicCapabilityProvider()
+      catalog.register(registry, local_tools)
+      runtime = CapabilityRuntime(registry, PolicyEngine(grants=[]), local_tools, uow_factory=uow_factory)
+      provider = MockModelProvider(
+        responses=[
+          {"finish": True, "output": {"content": "日常 Agent 已完成运行，但没有返回可展示内容。"}},
+          {"finish": True, "output": {"content": "已改为输出具体失败原因和下一步。"}},
+        ]
+      )
+      gateway = ModelGateway()
+      gateway.register_provider("mock", provider)
+      runner = ContinuousAgentRunner(
+        uow_factory=uow_factory,
+        model_gateway=gateway,
+        capability_runtime=runtime,
+        tool_catalog=catalog,
+      )
+
+      result = await runner.run(
+        user_message="帮我执行一个需要明确结果的任务",
+        run_id="run_stop_hook_empty_completion",
+        scope="scope_stop_hook_empty_completion",
+        config=ContinuousRunnerConfig(max_turns=4),
+      )
+
+      self.assertEqual(result.status, "completed")
+      self.assertEqual(result.output["content"], "已改为输出具体失败原因和下一步。")
+      repair_content = provider.calls[1][1].messages[-1]["content"]
+      self.assertEqual(repair_content["diagnostics"]["type"], "stop_hook_blocking")
+      self.assertEqual(repair_content["execution_hooks"][0]["hook"], "stop_hook_invalid_empty_final")
+    finally:
+      conn.close()
+
   async def test_runner_fallback_summarizes_browser_page_observation(self) -> None:
     conn = connect_sqlite()
     try:
@@ -905,7 +1148,7 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       )
 
       self.assertEqual(result.status, "max_turns_exceeded")
-      self.assertIn("已通过浏览器获取到页面推荐内容", result.output["content"])
+      self.assertIn("已通过浏览器获取到页面内容", result.output["content"])
       self.assertIn("云南大理避暑很舒服", result.output["content"])
       self.assertIn("当了三十年的班主任", result.output["content"])
     finally:
@@ -964,7 +1207,7 @@ class ContinuousAgentRunnerIntegrationTests(unittest.IsolatedAsyncioTestCase):
       )
 
       self.assertEqual(result.status, "max_turns_exceeded")
-      self.assertIn("已通过浏览器获取到页面推荐内容", result.output["content"])
+      self.assertIn("已通过浏览器获取到页面内容", result.output["content"])
       self.assertIn("深圳周末去哪玩", result.output["content"])
       self.assertIn("AI 工具流整理", result.output["content"])
     finally:
@@ -1072,6 +1315,33 @@ class _BrowserObservationBackend:
           ],
           "text": "称赞老师。",
         },
+      },
+    )
+
+
+class _BrowserTabsOnlyBackend:
+  def list_targets(self, kind=None):
+    return []
+
+  async def execute(self, command):
+    return ControlResult(
+      ok=True,
+      output={
+        "active_target_id": "tab_feed",
+        "targets": [
+          {
+            "target_id": "tab_feed",
+            "kind": "browser",
+            "label": "小红书 - 你的生活兴趣社区",
+            "metadata": {"url": "https://www.xiaohongshu.com/explore"},
+          },
+          {
+            "target_id": "tab_workbench",
+            "kind": "browser",
+            "label": "Meadow 桌面工作台",
+            "metadata": {"url": "http://127.0.0.1:4180/"},
+          },
+        ],
       },
     )
 

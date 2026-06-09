@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from http.client import IncompleteRead
 from typing import Any, Protocol
 
 from agent_kernel.app.conversation_task_hub import ConversationTaskHub
@@ -92,6 +93,7 @@ class DesktopChatService:
     self._default_llm_config = default_llm_config
     self._memory = MemoryFacade(self._uow_factory)
     self._history_compactor = ConversationHistoryCompactor(self._memory)
+    self._cancelled_run_ids: set[str] = set()
     if model_binding_provider is not None:
       self._model_binding_provider = model_binding_provider
     elif model_gateway is not None and model_provider_name and model_ref:
@@ -153,6 +155,7 @@ class DesktopChatService:
     )
     self._save_message(user_message)
     run_id = str(data.get("run_id") or new_id("chat_run"))
+    self._cancelled_run_ids.discard(run_id)
     self._save_session(
       replace(
         session,
@@ -204,6 +207,7 @@ class DesktopChatService:
       run_id,
       current_message_id=user_message.message_id,
     )
+    self._cancelled_run_ids.discard(run_id)
     assistant_content = str(llm_result.get("content") or "")
     next_status = _session_status_from_llm_result(llm_result)
     pending = _daily_agent_pending(llm_result)
@@ -280,6 +284,8 @@ class DesktopChatService:
       raise KeyError(f"Chat session not found: {session_id}")
     run_id = session.metadata.get("active_run_id") or session.metadata.get("last_run_id")
     run = None
+    if isinstance(run_id, str) and run_id:
+      self._cancelled_run_ids.add(run_id)
     if isinstance(run_id, str) and run_id and self._run_control is not None:
       with self._uow_factory() as uow:
         current = uow.states.get(run_id)
@@ -326,13 +332,45 @@ class DesktopChatService:
             provider_name=binding.provider_name,
             model_ref=binding.model_ref,
             agent_id=DAILY_AGENT_ID,
+            cancel_requested=lambda: self._is_run_cancelled(run_id),
           ),
           binding.gateway,
         )
-      except Exception as exc:
+      except IncompleteRead as exc:
+        if self._is_run_cancelled(run_id):
+          return _daily_agent_cancelled_result(run_id)
+        read_bytes = len(exc.partial) if isinstance(exc.partial, (bytes, bytearray)) else None
         return {
-          "content": f"日常 Agent 执行失败：{exc}",
-          "error": {"type": "daily_agent_execution_failed", "message": str(exc)},
+          "content": (
+            "日常 Agent 执行中断：模型或网络响应未完整返回。\n"
+            f"运行 ID：{run_id}\n"
+            f"已读取字节：{read_bytes if read_bytes is not None else 'unknown'}。\n"
+            "这通常是上游模型连接中断或响应流提前关闭。可以点击重试；如果重复出现，需要切换模型或降低单轮输出/工具结果大小。"
+          ),
+          "error": {
+            "type": "incomplete_read",
+            "message": "Model/network response stream ended before the full payload was read.",
+            "read_bytes": read_bytes,
+          },
+          "daily_agent": {
+            "run_id": run_id,
+            "status": "failed",
+            "turns": None,
+            "output": {},
+            "pending": None,
+            "tool_calls": [],
+          },
+        }
+      except Exception as exc:
+        if self._is_run_cancelled(run_id):
+          return _daily_agent_cancelled_result(run_id)
+        return {
+          "content": f"日常 Agent 执行失败：{type(exc).__name__}: {_truncate_error_message(str(exc))}",
+          "error": {
+            "type": "daily_agent_execution_failed",
+            "error_class": type(exc).__name__,
+            "message": _truncate_error_message(str(exc)),
+          },
         }
       return {"content": response.content, **response.raw}
     messages = self._build_llm_messages(
@@ -363,6 +401,9 @@ class DesktopChatService:
     if binding.config is None:
       raise RuntimeError("Current model binding does not expose an LLMConfig.")
     return binding.config
+
+  def _is_run_cancelled(self, run_id: str) -> bool:
+    return run_id in self._cancelled_run_ids
 
   def _build_llm_messages(
     self,
@@ -442,6 +483,27 @@ def _string_list_or_empty(value: object) -> list[str]:
   return [item for item in value if isinstance(item, str)]
 
 
+def _daily_agent_cancelled_result(run_id: str) -> dict[str, Any]:
+  return {
+    "content": "任务已根据用户请求暂停。可以稍后重试，或继续发新消息调整任务。",
+    "daily_agent": {
+      "run_id": run_id,
+      "status": "cancelled",
+      "turns": None,
+      "output": {"diagnostics": {"type": "user_cancelled"}},
+      "pending": None,
+      "tool_calls": [],
+    },
+  }
+
+
+def _truncate_error_message(message: str, *, limit: int = 600) -> str:
+  text = " ".join(str(message).split())
+  if len(text) <= limit:
+    return text
+  return text[:limit] + "...[truncated]"
+
+
 def _capability_hints(selected_skill_ids: list[str]) -> list[dict[str, Any]]:
   hints = [
     {"kind": "workflow", "label": "创建/运行任务", "available": True},
@@ -469,4 +531,6 @@ def _session_status_from_llm_result(llm_result: dict[str, Any]) -> str:
   status = daily_agent.get("status")
   if status in {"waiting_for_user", "awaiting_approval"}:
     return str(status)
+  if status == "cancelled":
+    return "paused"
   return "idle"

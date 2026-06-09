@@ -25,12 +25,14 @@ BUILTIN_ATOMIC_SKILLS: tuple[SkillCard, ...] = (
       "3) 读取：用 browser_scan 读取当前页；该工具会返回 page.text、links、search_results 等结构。"
       "4) 深挖：如果当前页是搜索结果页，不能把搜索页当最终答案；从 search_results 中选择与目标最相关的结果，"
       "继续打开至少 2 个结果页（只有 1 个可用结果时除外），分别读取正文。"
+      "如果 search_results 为空但 page.text/links 中出现候选标题或 URL，用 browser_execute_js 从页面 DOM 精确抽取候选链接。"
       "5) 动态信息流：用户要求打开、刷新、查看推荐/最新帖子/Feed 时，不要反复全页 browser_scan；"
       "应在目标 target_id 上用 browser_execute_js 执行 refresh/scroll/click/read DOM 小脚本，"
       "从可见 article/card/link/img/time/like/comment 节点抽取短 JSON 数组，字段至少包含 title/text/url/author/time/metrics。"
       "一次抽取为空时先滚动或等待再抽取，仍为空才说明页面登录、反爬或结构不可读。"
-      "6) 核验：记录每个来源的 title/url/关键事实；多个来源互相印证后总结，不确定处明确说明。"
-      "7) 控制：需要点击、滚动、提取特定 DOM 或处理动态页面时，用 browser_execute_js；优先小脚本精准读取，少做全页扫描。"
+      "6) 证据账本：每个来源都要记住 title/url/关键事实/不确定点；候选来源未打开前不要把它当证据。"
+      "7) 核验：多个来源互相印证后总结，不确定处明确说明；如果轮次或权限不足，输出已查证据、未完成原因和下一步可恢复动作。"
+      "8) 控制：需要点击、滚动、提取特定 DOM 或处理动态页面时，用 browser_execute_js；优先小脚本精准读取，少做全页扫描。"
       "失败时尝试下一个候选链接或换用 http_request。执行后基于工具结果回答，不要只说明自己可以做。"
     ),
     status=SkillStatus.ACTIVE,

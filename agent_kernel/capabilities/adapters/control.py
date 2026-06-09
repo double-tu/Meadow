@@ -213,7 +213,7 @@ class ControlOwnerContext:
 
   @property
   def owner_key(self) -> tuple[str, str | None, str | None, str | None]:
-    return (self.scope or self.run_id, self.run_id, self.agent_id, self.task_id)
+    return (self.scope or self.run_id, self.workbench_id, self.agent_id, self.task_id)
 
 
 @dataclass(slots=True)
@@ -228,7 +228,7 @@ class BrowserTargetOwnership(DomainModel):
   last_action: str | None = None
 
   def owner_key(self) -> tuple[str, str | None, str | None, str | None]:
-    return (self.scope or self.owner_run_id, self.owner_run_id, self.owner_agent_id, self.owner_task_id)
+    return (self.scope or self.owner_run_id, self.workbench_id, self.owner_agent_id, self.owner_task_id)
 
 
 @dataclass(slots=True)
@@ -240,9 +240,10 @@ class BrowserTargetLease(DomainModel):
   owner_agent_id: str | None = None
   owner_task_id: str | None = None
   scope: str | None = None
+  workbench_id: str | None = None
 
   def owner_key(self) -> tuple[str, str | None, str | None, str | None]:
-    return (self.scope or self.owner_run_id, self.owner_run_id, self.owner_agent_id, self.owner_task_id)
+    return (self.scope or self.owner_run_id, self.workbench_id, self.owner_agent_id, self.owner_task_id)
 
 
 @dataclass(slots=True)
@@ -283,7 +284,16 @@ class BrowserTargetCoordinator:
       if action == "navigate":
         return BrowserTargetResolution(target_id=None)
       if action == "inspect":
-        return BrowserTargetResolution(target_id=None)
+        return BrowserTargetResolution(
+          target_id=None,
+          error={
+            "type": "browser_target_scope_required",
+            "message": (
+              "Reading page content requires an explicit target_id or an active browser target owned by this run scope. "
+              "Use browser_scan(tabs_only=true) to list tabs, then pass a target_id or open a new owned tab with browser_navigate."
+            ),
+          },
+        )
       else:
         return BrowserTargetResolution(
           target_id=None,
@@ -331,6 +341,18 @@ class BrowserTargetCoordinator:
     try:
       if owner is not None and result.ok:
         target_id = self._result_target_id(result.output) or requested_target_id
+        if action == "navigate" and requested_target_id is None and not target_id:
+          result = ControlResult(
+            ok=False,
+            output=dict(result.output),
+            error={
+              "type": "browser_target_creation_unconfirmed",
+              "message": (
+                "Browser navigation requested a new owned tab, but the browser bridge did not return or expose "
+                "a target matching the requested URL. The run will not claim an arbitrary existing tab."
+              ),
+            },
+          )
         ownership = self._ownership_by_target.get(target_id) if target_id else None
         if (
           action == "inspect"
@@ -429,6 +451,7 @@ class BrowserTargetCoordinator:
       owner_agent_id=owner.agent_id,
       owner_task_id=owner.task_id,
       scope=owner.scope,
+      workbench_id=owner.workbench_id,
     )
     self._active_lease_by_target[target_id] = lease
     return lease
@@ -667,6 +690,7 @@ class BrowserLinkHTTPBackend:
         output = dict(created.output)
         output["url"] = url
         return ControlResult(ok=True, output=output)
+      return created
     code = "window.location.href = " + json.dumps(url) + ";"
     result = self._execute_js(
       ControlCommand(
@@ -714,10 +738,22 @@ class BrowserLinkHTTPBackend:
           "target": target.to_dict(),
         },
       )
-    return ControlResult(ok=True, output={"result": raw})
+    return ControlResult(
+      ok=False,
+      output={"result": raw, "url": url},
+      error={
+        "type": "browser_target_creation_unconfirmed",
+        "message": (
+          "The browser bridge accepted a tab creation request but did not return a created tab, and no existing "
+          "browser session matched the requested URL."
+        ),
+      },
+    )
 
   def _target_from_created_tab_payload(self, data: object, requested_url: str) -> ControlTarget | None:
     if isinstance(data, dict):
+      if not _browser_urls_equivalent(data.get("url"), requested_url):
+        return None
       return self._target_from_tab_like(data, requested_url)
     if not isinstance(data, list):
       return None
@@ -726,7 +762,9 @@ class BrowserLinkHTTPBackend:
       return None
     matching = [item for item in tabs if _browser_urls_equivalent(item.get("url"), requested_url)]
     active_matching = [item for item in matching if item.get("active") is True]
-    selected = (active_matching or matching or [tabs[-1]])[-1]
+    selected = (active_matching or matching or [None])[-1]
+    if selected is None:
+      return None
     return self._target_from_tab_like(selected, requested_url)
 
   def _target_from_existing_sessions(self, requested_url: str) -> ControlTarget | None:
@@ -1720,6 +1758,15 @@ class ControlWorkbench:
       payload=command.payload,
     )
     if resolution.error is not None:
+      if command.action == "inspect" and resolution.error.get("type") == "browser_target_scope_required":
+        targets = [target.to_dict() for target in targets]
+        result = ControlResult(
+          ok=True,
+          output={"targets": targets, "page_error": resolution.error},
+        )
+        self._browser_coordinator.annotate_targets(targets, owner)
+        self._browser_coordinator._annotate_result_output(result.output, owner, resolution.lease)
+        return result
       return ControlResult(ok=False, error=resolution.error)
     scoped_command = ControlCommand(
       command_id=command.command_id,

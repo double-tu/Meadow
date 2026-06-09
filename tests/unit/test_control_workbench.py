@@ -240,6 +240,20 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.output["active_target_id"], "tab_new")
     self.assertEqual(result.output["target"]["metadata"]["url"], "https://meadow.example/explore")
 
+  async def test_browser_link_http_backend_create_tab_does_not_claim_unmatched_existing_tab(self) -> None:
+    transport = _BrowserLinkMismatchedTabsTransport()
+    backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
+
+    result = await backend.execute(
+      ControlCommand.create("browser", "navigate", target_id=None, payload={"url": "https://meadow.example/explore"})
+    )
+
+    self.assertFalse(result.ok)
+    self.assertEqual(result.error["type"], "browser_target_creation_unconfirmed")
+    self.assertNotIn("target_id", result.output)
+    self.assertNotIn("active_target_id", result.output)
+    self.assertEqual(result.output["url"], "https://meadow.example/explore")
+
   async def test_browser_link_http_backend_inspect_fetches_page_summary(self) -> None:
     transport = _BrowserLinkTransport()
     backend = BrowserLinkHTTPBackend(post_json=transport.post_json, request_timeout_seconds=2)
@@ -290,6 +304,62 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(scanned.output["active_target_id"], "tab_new")
     self.assertEqual(scanned.output["browser_scope"]["active_target_id"], "tab_new")
 
+  async def test_control_workbench_targetless_page_scan_returns_scope_error_without_random_page(self) -> None:
+    backend = _ScopedBrowserBackend()
+    workbench = ControlWorkbench(backend)
+    owner = ControlOwnerContext(run_id="run_daily", agent_id="daily", scope="chat")
+
+    scanned = await workbench.inspect_browser(owner=owner)
+
+    self.assertTrue(scanned.ok)
+    self.assertIn("targets", scanned.output)
+    self.assertNotIn("page", scanned.output)
+    self.assertEqual(scanned.output["page_error"]["type"], "browser_target_scope_required")
+    self.assertEqual(len(backend.commands), 0)
+
+  async def test_control_workbench_same_scope_can_continue_target_across_runs(self) -> None:
+    backend = _ScopedBrowserBackend()
+    workbench = ControlWorkbench(backend)
+    first_turn = ControlOwnerContext(run_id="run_first", agent_id="daily", task_id="chat", scope="chat")
+    next_turn = ControlOwnerContext(run_id="run_next", agent_id="daily", task_id="chat", scope="chat")
+
+    navigated = await workbench.navigate("https://search.example", owner=first_turn)
+    scanned = await workbench.inspect_browser(target_id=navigated.output["target_id"], owner=next_turn)
+
+    self.assertTrue(navigated.ok)
+    self.assertTrue(scanned.ok)
+    self.assertEqual(scanned.output["active_target_id"], "tab_new")
+    self.assertTrue(scanned.output["browser_scope"]["active_target_id"], "tab_new")
+    targets = await workbench.inspect_browser(payload={"tabs_only": True}, owner=next_turn)
+    owned = [target for target in targets.output["targets"] if target["target_id"] == "tab_new"][0]
+    self.assertTrue(owned["owned_by_current_scope"])
+
+  async def test_control_workbench_same_child_agent_can_continue_target_across_runs(self) -> None:
+    backend = _ScopedBrowserBackend()
+    workbench = ControlWorkbench(backend)
+    first_turn = ControlOwnerContext(run_id="run_child_first", agent_id="child_a", task_id="slice_a", scope="chat")
+    next_turn = ControlOwnerContext(run_id="run_child_next", agent_id="child_a", task_id="slice_a", scope="chat")
+
+    navigated = await workbench.navigate("https://child.example", owner=first_turn)
+    scanned = await workbench.inspect_browser(target_id=navigated.output["target_id"], owner=next_turn)
+
+    self.assertTrue(navigated.ok)
+    self.assertTrue(scanned.ok)
+    self.assertEqual(scanned.output["active_target_id"], "tab_new")
+
+  async def test_control_workbench_same_scope_rejects_different_child_agent_target_access(self) -> None:
+    backend = _ScopedBrowserBackend()
+    workbench = ControlWorkbench(backend)
+    first_child = ControlOwnerContext(run_id="run_child_a", agent_id="child_a", task_id="slice_a", scope="chat")
+    second_child = ControlOwnerContext(run_id="run_child_b", agent_id="child_b", task_id="slice_b", scope="chat")
+
+    claimed = await workbench.navigate("https://owned.example", target_id="tab_a", owner=first_child)
+    rejected = await workbench.inspect_browser(target_id="tab_a", owner=second_child)
+
+    self.assertTrue(claimed.ok)
+    self.assertFalse(rejected.ok)
+    self.assertEqual(rejected.error["type"], "browser_target_owned_by_other_scope")
+
   async def test_control_workbench_browser_scope_rejects_other_owner_mutation(self) -> None:
     backend = _ScopedBrowserBackend()
     workbench = ControlWorkbench(backend)
@@ -315,7 +385,7 @@ class ControlWorkbenchTests(unittest.IsolatedAsyncioTestCase):
     self.assertTrue(scanned.ok)
     self.assertIn("targets", scanned.output)
     self.assertNotIn("page", scanned.output)
-    self.assertEqual(scanned.output["page_error"]["type"], "browser_target_owned_by_other_scope")
+    self.assertEqual(scanned.output["page_error"]["type"], "browser_target_scope_required")
 
   async def test_adb_mobile_backend_lists_devices_and_parses_ui_dump(self) -> None:
     runner = _ADBRunner()
@@ -727,6 +797,39 @@ class _BrowserLinkTabsListTransport:
               "data": [
                 {"id": "tab_old", "url": "https://old.example", "title": "Old", "active": False},
                 {"id": "tab_new", "url": command["url"], "title": "Created", "active": True},
+              ]
+            }
+          }
+      return {"r": {"data": "ok"}}
+    return {"r": {"error": "unsupported"}}
+
+
+class _BrowserLinkMismatchedTabsTransport:
+  def __init__(self) -> None:
+    self.requests: list[dict[str, object]] = []
+
+  def post_json(self, payload: dict[str, object]) -> dict[str, object]:
+    self.requests.append(payload)
+    if payload.get("cmd") == "get_all_sessions":
+      return {
+        "r": [
+          {"id": "tab_old", "url": "https://old.example", "title": "Old", "type": "ext_ws"},
+          {"id": "tab_invoice", "url": "https://bestvm.cloud/viewinvoice.php?id=1", "title": "Invoice", "type": "ext_ws"},
+        ]
+      }
+    if payload.get("cmd") == "execute_js":
+      code = payload.get("code")
+      if isinstance(code, str):
+        try:
+          command = json.loads(code)
+        except json.JSONDecodeError:
+          command = None
+        if isinstance(command, dict) and command.get("cmd") == "tabs" and command.get("method") == "create":
+          return {
+            "r": {
+              "data": [
+                {"id": "tab_old", "url": "https://old.example", "title": "Old", "active": False},
+                {"id": "tab_invoice", "url": "https://bestvm.cloud/viewinvoice.php?id=1", "title": "Invoice", "active": True},
               ]
             }
           }

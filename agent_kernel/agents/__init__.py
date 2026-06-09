@@ -30,6 +30,14 @@ from agent_kernel.agents.delegation_mcp import (
   delegation_mcp_tool_schemas,
   run_delegation_mcp_stdio,
 )
+from agent_kernel.agents.execution_hooks import (
+  AgentProgressHook,
+  ExecutionDiagnosticSynthesizer,
+  ExecutionTransition,
+  NoProgressHook,
+  ProgressHookResult,
+  StopHook,
+)
 from agent_kernel.agents.loop import AgentLoop, AgentTurnResult
 from agent_kernel.agents.mailbox import build_mailbox_message
 from agent_kernel.agents.group_chat import (
@@ -80,6 +88,7 @@ __all__ = [
   "AgentInterventionChannel",
   "AgentLoop",
   "AgentMessageKind",
+  "AgentProgressHook",
   "AgentProtocolMessage",
   "AgentTurnResult",
   "AgentPoolScheduler",
@@ -95,6 +104,8 @@ __all__ = [
   "DelegationMCPServer",
   "DelegationMCPToolNames",
   "DelegatedPermissionRequest",
+  "ExecutionDiagnosticSynthesizer",
+  "ExecutionTransition",
   "FakeAgentConnector",
   "FakeWorkspaceBackend",
   "GitPatchReviewBackend",
@@ -114,10 +125,12 @@ __all__ = [
   "InteractionFabric",
   "LeaderPermissionBridge",
   "ObserverService",
+  "NoProgressHook",
   "RunPauseController",
   "ProductCLIConnectorFactory",
   "ProductCLIConnectorSpec",
   "ProductCLIShimProfile",
+  "ProgressHookResult",
   "RoutedConnectorTurn",
   "PermissionBridgeStatus",
   "ArtifactMergeBackend",
@@ -130,6 +143,7 @@ __all__ = [
   "SkillAwareToolSurfacePolicy",
   "SkillSelector",
   "StdioAgentCommand",
+  "StopHook",
   "StructuredStdioAgentConnector",
   "SupervisorService",
   "TaskBoardService",

@@ -567,8 +567,10 @@ class AtomicCapabilityProvider:
         (
           "Inspect browser targets and a bounded page summary through a control workbench. "
           "Use tabs_only=true to only list tabs. After navigate returns target_id, keep passing the same target_id. "
+          "A search-results page is for candidate discovery; open candidate source pages before treating information as verified evidence. "
           "For dynamic feed/card pages, avoid repeated full scans; use browser_execute_js to refresh, scroll, click, "
-          "or extract structured visible cards."
+          "or extract structured visible cards. If search_results is empty but page text shows useful links, use browser_execute_js "
+          "to extract anchors/headings/snippets from the DOM."
         ),
         [],
         {"tabs_only": {"type": "boolean"}, "target_id": {"type": "string"}},
@@ -580,7 +582,9 @@ class AtomicCapabilityProvider:
           "Do not use location.href/open for first navigation of an exploratory task; use browser_navigate without target_id "
           "so the workbench can create and own a new tab. "
           "Prefer this over repeated browser_scan when reading dynamic pages. Return compact JSON for extracted data; "
-          "for feed/latest-post tasks extract visible cards with title/text/url/author/time/metrics after refresh or scroll."
+          "for feed/latest-post tasks extract visible cards with title/text/url/author/time/metrics after refresh or scroll. "
+          "For research/search tasks, use small scripts to extract candidate links, article/forum body text, post metadata, and source URLs. "
+          "Keep returned JSON concise; large content should be summarized or saved through available artifact/context tools when supported."
         ),
         ["code"],
         {"target_id": {"type": "string"}},
